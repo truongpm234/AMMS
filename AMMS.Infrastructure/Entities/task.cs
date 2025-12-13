@@ -1,0 +1,31 @@
+﻿using System;
+using System.Collections.Generic;
+
+namespace AMMS.Infrastructure.Entities;
+
+public partial class task
+{
+    public int task_id { get; set; }
+
+    public int? prod_id { get; set; }
+
+    public string name { get; set; } = null!;
+
+    public int? seq_num { get; set; }
+
+    public string? status { get; set; }
+
+    public int? assigned_to { get; set; }
+
+    public string? machine { get; set; }
+
+    public DateTime? start_time { get; set; }
+
+    public DateTime? end_time { get; set; }
+
+    public virtual user? assigned_toNavigation { get; set; }
+
+    public virtual production? prod { get; set; }
+
+    public virtual ICollection<task_log> task_logs { get; set; } = new List<task_log>();
+}

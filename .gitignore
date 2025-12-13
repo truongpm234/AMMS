@@ -1,0 +1,78 @@
+############################################
+# .NET / Visual Studio
+############################################
+bin/
+obj/
+out/
+
+.vs/
+[Bb]uild/
+[Ll]og/
+[Dd]ebug/
+[Rr]elease/
+
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.csproj.user
+
+############################################
+# Rider / VS Code
+############################################
+.idea/
+.vscode/
+
+############################################
+# OS
+############################################
+.DS_Store
+Thumbs.db
+
+############################################
+# App settings & Secrets (IMPORTANT)
+############################################
+
+# Ignore ALL appsettings files
+appsettings.json
+appsettings.*.json
+
+# Ignore secrets / config files in ANY subfolder
+**/appsettings.json
+**/appsettings.*.json
+
+# Environment variables
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Secrets / keys
+**/*secret*.json
+**/*secrets*.json
+**/*key*.json
+**/*apikey*.json
+**/*credentials*.json
+**/*private*.json
+
+############################################
+# Certificates
+############################################
+*.pfx
+*.cer
+*.crt
+*.pem
+*.key
+
+############################################
+# Logs & temp
+############################################
+*.log
+logs/
+temp/
+tmp/
+
+############################################
+# Publish output
+############################################
+publish/
