@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace AMMS.Domain.Entities;
 
-public partial class stock_move
+public class stock_move
 {
     public int move_id { get; set; }
 

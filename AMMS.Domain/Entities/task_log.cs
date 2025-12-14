@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace AMMS.Domain.Entities;
 
-public partial class task_log
+public class task_log
 {
     public int log_id { get; set; }
 

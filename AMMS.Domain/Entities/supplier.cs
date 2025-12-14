@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace AMMS.Domain.Entities;
 
-public partial class supplier
+public class supplier
 {
     public int supplier_id { get; set; }
 

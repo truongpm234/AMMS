@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace AMMS.Domain.Entities;
 
-public partial class purchase
+public class purchase
 {
     public int purchase_id { get; set; }
 

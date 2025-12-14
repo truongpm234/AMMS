@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace AMMS.Domain.Entities;
 
-public partial class material
+public class material
 {
     public int material_id { get; set; }
 

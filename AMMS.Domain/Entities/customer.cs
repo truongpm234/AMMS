@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace AMMS.Domain.Entities;
 
-public partial class customer
+public class customer
 {
     public int customer_id { get; set; }
 

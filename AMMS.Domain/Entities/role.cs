@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace AMMS.Domain.Entities;
 
-public partial class role
+public class role
 {
     public int role_id { get; set; }
 

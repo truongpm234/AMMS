@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace AMMS.Domain.Entities;
 
-public partial class production
+public class production
 {
     public int prod_id { get; set; }
 

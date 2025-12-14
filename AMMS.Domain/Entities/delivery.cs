@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace AMMS.Domain.Entities;
 
-public partial class delivery
+public class delivery
 {
     public int delivery_id { get; set; }
 

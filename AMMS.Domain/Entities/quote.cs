@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace AMMS.Domain.Entities;
 
-public partial class quote
+public class quote
 {
     public int quote_id { get; set; }
 
