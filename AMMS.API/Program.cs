@@ -7,7 +7,6 @@ using Microsoft.EntityFrameworkCore;
 using AMMS.Infrastructure.Configurations;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Infrastructure.FileStorage;
-using AMMS.Domain.Interfaces;
 
 var builder = WebApplication.CreateBuilder(args);
 Console.WriteLine(builder.Configuration.GetConnectionString("DefaultConnection"));
