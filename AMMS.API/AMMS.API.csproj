@@ -15,7 +15,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\AMMS.Application\AMMS.Application.csproj" />
+    <ProjectReference Include="..\AMMS.Domain\AMMS.Domain.csproj" />
     <ProjectReference Include="..\AMMS.Infrastructure\AMMS.Infrastructure.csproj" />
+    <ProjectReference Include="..\AMMS.Shared\AMMS.Shared.csproj" />
   </ItemGroup>
 
 </Project>

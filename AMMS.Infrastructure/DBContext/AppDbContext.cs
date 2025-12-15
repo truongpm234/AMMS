@@ -26,7 +26,9 @@ public partial class AppDbContext : DbContext
 
     public virtual DbSet<production> productions { get; set; }
 
-    public virtual DbSet<purchase> purchases { get; set; }
+    public virtual DbSet<purchase> purchases { get; set; } 
+
+    public virtual DbSet<order_request> order_requests { get; set; }
 
     public virtual DbSet<purchase_item> purchase_items { get; set; }
 
@@ -62,6 +64,10 @@ public partial class AppDbContext : DbContext
             entity.HasOne(d => d.order_item).WithMany(p => p.boms)
                 .HasForeignKey(d => d.order_item_id)
                 .HasConstraintName("boms_order_item_id_fkey");
+        });
+
+        modelBuilder.Entity<order_request>(entity =>
+        {
         });
 
         modelBuilder.Entity<customer>(entity =>
