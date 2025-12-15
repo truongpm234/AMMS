@@ -1,4 +1,4 @@
-﻿namespace AMMS.Application.Services
+﻿namespace AMMS.Application.Interfaces
 {
     public interface IUploadFileService
     {
