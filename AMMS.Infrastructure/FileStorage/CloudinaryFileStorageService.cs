@@ -2,7 +2,7 @@
 using CloudinaryDotNet;
 using CloudinaryDotNet.Actions;
 using AMMS.Infrastructure.Configurations;
-using AMMS.Application.Abstractions;
+using AMMS.Infrastructure.Interfaces;
 
 namespace AMMS.Infrastructure.FileStorage
 {

@@ -1,4 +1,10 @@
+<<<<<<< HEAD
 ﻿using AMMS.Application.Interface;
+=======
+﻿using AMMS.Application.Interfaces;
+using AMMS.Infrastructure.FileStorage;
+using AMMS.Infrastructure.Interfaces;
+>>>>>>> main
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -22,3 +28,4 @@ namespace AMMS.Application.Services
         }
     }
 }
+

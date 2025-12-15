@@ -5,7 +5,6 @@ using System.Text;
 using System.Threading.Tasks;
 
 namespace AMMS.Infrastructure.Interfaces
-
 {
         public interface ICloudinaryFileStorageService
     {
