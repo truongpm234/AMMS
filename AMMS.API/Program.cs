@@ -15,6 +15,10 @@ builder.Services.AddSwaggerGen();
 // Configuration
 builder.Services.Configure<CloudinaryOptions>(
     builder.Configuration.GetSection("Cloudinary"));
+builder.Configuration
+    .AddJsonFile("appsettings.json", optional: false)
+    .AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true)
+    .AddEnvironmentVariables();
 
 // Application services
 builder.Services.AddScoped<IUploadFileService, UploadFileService>();
