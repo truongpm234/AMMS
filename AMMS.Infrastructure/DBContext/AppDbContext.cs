@@ -68,6 +68,8 @@ public partial class AppDbContext : DbContext
 
         modelBuilder.Entity<order_request>(entity =>
         {
+            entity.HasKey(e => e.order_request_id);
+            entity.ToTable("order_request");
         });
 
         modelBuilder.Entity<customer>(entity =>
