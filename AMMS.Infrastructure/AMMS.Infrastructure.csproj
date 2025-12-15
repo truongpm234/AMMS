@@ -21,7 +21,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\AMMS.Application\AMMS.Application.csproj" />
     <ProjectReference Include="..\AMMS.Shared\AMMS.Shared.csproj" />
   </ItemGroup>
 

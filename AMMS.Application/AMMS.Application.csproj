@@ -1,7 +1,8 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\AMMS.Shared\AMMS.Shared.csproj" />
+	  <ProjectReference Include="..\AMMS.Shared\AMMS.Shared.csproj" />
+	  <ProjectReference Include="..\AMMS.Infrastructure\AMMS.Infrastructure.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

@@ -1,4 +1,6 @@
-﻿using AMMS.Application.Abstractions;
+﻿using AMMS.Application.Interfaces;
+using AMMS.Infrastructure.FileStorage;
+using AMMS.Infrastructure.Interfaces;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -22,3 +24,4 @@ namespace AMMS.Application.Services
         }
     }
 }
+
