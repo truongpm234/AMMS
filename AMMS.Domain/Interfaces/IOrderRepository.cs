@@ -1,13 +1,12 @@
-﻿using AMMS.Shared.DTOs.Orders;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿using AMMS.Domain.Entities;
 
 namespace AMMS.Domain
 {
     public interface IOrderRepository
     {
+        Task AddAsync(order_request entity);
+        void Update(order_request entity);
+        Task DeleteAsync(int id);
+        Task<int> SaveChangesAsync();
     }
 }

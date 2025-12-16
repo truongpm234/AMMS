@@ -1,13 +1,12 @@
-﻿using AMMS.Shared.DTOs.Orders;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿using AMMS.Domain.Entities;
+using AMMS.Shared.DTOs.Orders;
 
 namespace AMMS.Application.Interfaces
 {
     public interface IOrderService
     {
+        Task<CreateCustomerOrderResponse> CreateAsync(CreateCustomerOrderResquest req);
+        Task UpdateAsync(int id, CreateCustomerOrderResquest req);
+        Task DeleteAsync(int id);
     }
 }

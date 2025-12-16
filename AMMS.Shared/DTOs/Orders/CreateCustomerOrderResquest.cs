@@ -4,12 +4,10 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace AMMS.Domain.Entities
+namespace AMMS.Shared.DTOs.Orders
 {
-    public class order_request
+    public class CreateCustomerOrderResquest
     {
-        public int order_request_id { get; set; }
-
         public string customer_name { get; set; } = null!;
 
         public string? customer_phone { get; set; }
@@ -20,14 +18,10 @@ namespace AMMS.Domain.Entities
 
         public string product_name { get; set; } = null!;
 
-        public int quantity { get; set; }
-
         public string? description { get; set; }
 
+        public int quantity { get; set; }
+
         public string? design_file_path { get; set; }
-
-        public DateTime order_request_date { get; set; }
     }
-
 }
-
