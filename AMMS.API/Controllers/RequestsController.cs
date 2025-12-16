@@ -29,7 +29,7 @@ namespace AMMS.API.Controllers
             try
             {
                 await _service.UpdateAsync(id, req);
-                return NoContent();
+                return Ok();
             }
             catch (Exception ex)
             {

@@ -1,6 +1,6 @@
 ﻿using AMMS.Infrastructure.Entities;
 
-namespace AMMS.Infrastructure.Repositories
+namespace AMMS.Infrastructure.Interfaces
 {
     public interface IRequestRepository
     {

@@ -1,5 +1,6 @@
 ﻿using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
+using AMMS.Infrastructure.Interfaces;
 using Microsoft.EntityFrameworkCore;
 
 namespace AMMS.Infrastructure.Repositories
@@ -19,7 +20,7 @@ namespace AMMS.Infrastructure.Repositories
         }
         public void Update(order_request entity)
         {
-            _db.Entry(entity).State = EntityState.Modified;
+            _db.order_requests.Update(entity);
         }
 
         public async Task<order_request?> GetByIdAsync(int id)

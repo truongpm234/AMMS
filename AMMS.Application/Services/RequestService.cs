@@ -1,5 +1,6 @@
 ﻿using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.Entities;
+using AMMS.Infrastructure.Interfaces;
 using AMMS.Infrastructure.Repositories;
 using AMMS.Shared.DTOs.Orders;
 
@@ -26,7 +27,7 @@ namespace AMMS.Application.Services
                 quantity = req.quantity,
                 description = req.description,
                 design_file_path = req.design_file_path,
-                order_request_date = DateTime.Now
+                order_request_date = req.order_request_date,
             };
 
             await _repo.AddAsync(entity);
@@ -41,15 +42,19 @@ namespace AMMS.Application.Services
             if (entity == null)
                 throw new KeyNotFoundException("Order request not found");
 
-            entity.customer_name = req.customer_name;
-            entity.customer_phone = req.customer_phone;
-            entity.customer_email = req.customer_email;
-            entity.delivery_date = req.delivery_date;
-            entity.product_name = req.product_name;
-            entity.quantity = req.quantity;
-            entity.description = req.description;
-            entity.design_file_path = req.design_file_path;
-            entity.order_request_date = DateTime.Now;
+            var update = new order_request
+            {
+                order_request_id = id,
+                customer_name = req.customer_name,
+                customer_phone = req.customer_phone,
+                customer_email = req.customer_email,
+                delivery_date = req.delivery_date,
+                product_name = req.product_name,
+                quantity = req.quantity,
+                description = req.description,
+                design_file_path = req.design_file_path,
+                order_request_date = req.order_request_date,
+            };
 
             _repo.Update(entity);
             await _repo.SaveChangesAsync();

@@ -24,7 +24,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
         {
             npgsqlOptions.CommandTimeout(60);
             npgsqlOptions.EnableRetryOnFailure(
-                maxRetryCount: 5,
+                maxRetryCount: 0,
                 maxRetryDelay: TimeSpan.FromSeconds(10),
                 errorCodesToAdd: null);
         }));
@@ -38,6 +38,12 @@ builder.Services.AddScoped<IUploadFileService, UploadFileService>();
 builder.Services.AddScoped<ICloudinaryFileStorageService, CloudinaryFileStorageService>();
 builder.Services.AddScoped<IRequestService, RequestService>();
 builder.Services.AddScoped<IRequestRepository, RequestRepository>();
+
+
+builder.Services.AddControllers()
+    .AddJsonOptions(x =>
+        x.JsonSerializerOptions.ReferenceHandler =
+            System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles);
 
 var app = builder.Build();
 

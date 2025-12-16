@@ -181,6 +181,7 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.customer_phone).HasMaxLength(20);
             entity.Property(e => e.delivery_date).HasColumnType("timestamp without time zone");
             entity.Property(e => e.order_request_date).HasColumnType("timestamp without time zone");
+
             entity.Property(e => e.product_name).HasMaxLength(200);
         });
 
