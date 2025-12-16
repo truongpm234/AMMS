@@ -20,7 +20,11 @@ namespace AMMS.Infrastructure.Repositories
         }
         public void Update(order_request entity)
         {
-            _db.order_requests.Update(entity);
+            if (_db.Entry(entity).State == EntityState.Detached)
+            {
+                _db.order_requests.Attach(entity);
+                _db.Entry(entity).State = EntityState.Modified;
+            }
         }
 
         public async Task<order_request?> GetByIdAsync(int id)
