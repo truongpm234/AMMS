@@ -37,8 +37,8 @@ builder.Services.Configure<CloudinaryOptions>(
 
 builder.Services.AddScoped<IUploadFileService, UploadFileService>();
 builder.Services.AddScoped<ICloudinaryFileStorageService, CloudinaryFileStorageService>();
-builder.Services.AddScoped<IOrderService, OrderService>();
-builder.Services.AddScoped<IOrderRepository, OrderRepository>();
+builder.Services.AddScoped<IRequestService, RequestService>();
+builder.Services.AddScoped<IRequestRepository, RequestRepository>();
 
 var app = builder.Build();
 

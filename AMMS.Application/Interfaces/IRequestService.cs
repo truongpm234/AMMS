@@ -2,7 +2,7 @@
 
 namespace AMMS.Application.Interfaces
 {
-    public interface IOrderService
+    public interface IRequestService
     {
         Task<CreateCustomerOrderResponse> CreateAsync(CreateCustomerOrderResquest req);
         Task UpdateAsync(int id, CreateCustomerOrderResquest req);

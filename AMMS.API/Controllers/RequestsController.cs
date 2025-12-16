@@ -6,11 +6,11 @@ namespace AMMS.API.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
-    public class OrdersController : ControllerBase
+    public class RequestsController : ControllerBase
     {
-        private readonly IOrderService _service;
+        private readonly IRequestService _service;
 
-        public OrdersController(IOrderService service)
+        public RequestsController(IRequestService service)
         {
             _service = service;
         }

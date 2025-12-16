@@ -161,6 +161,7 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.paper_type).HasMaxLength(100);
             entity.Property(e => e.print_size).HasMaxLength(50);
             entity.Property(e => e.product_name).HasMaxLength(200);
+            entity.Property(e => e.product_type).HasMaxLength(50);
 
             entity.HasOne(d => d.order).WithMany(p => p.order_items)
                 .HasForeignKey(d => d.order_id)

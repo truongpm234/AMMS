@@ -5,11 +5,11 @@ using AMMS.Shared.DTOs.Orders;
 
 namespace AMMS.Application.Services
 {
-    public class OrderService : IOrderService
+    public class RequestService : IRequestService
     {
-        private readonly IOrderRepository _repo;
+        private readonly IRequestRepository _repo;
 
-        public OrderService(IOrderRepository repo)
+        public RequestService(IRequestRepository repo)
         {
             _repo = repo;
         }

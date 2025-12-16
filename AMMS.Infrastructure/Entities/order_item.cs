@@ -11,6 +11,8 @@ public partial class order_item
 
     public string product_name { get; set; } = null!;
 
+    public string? product_type { get; set; }
+
     public int quantity { get; set; }
 
     public string? finished_size { get; set; }
