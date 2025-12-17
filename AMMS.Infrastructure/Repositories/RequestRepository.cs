@@ -17,14 +17,12 @@ namespace AMMS.Infrastructure.Repositories
 
         public async Task<order_request?> GetByIdAsync(int id)
         {
-            // ⚠️ BỎ AsNoTracking để EF quản lý entity
             return await _db.order_requests
                 .FirstOrDefaultAsync(x => x.order_request_id == id);
         }
 
         public Task UpdateAsync(order_request entity)
         {
-            // EF tự track → không cần Attach
             _db.order_requests.Update(entity);
             return Task.CompletedTask;
         }

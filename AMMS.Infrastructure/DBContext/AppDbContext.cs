@@ -62,25 +62,24 @@ public partial class AppDbContext : DbContext
         }
     }
 
-    public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
-{
-    // Convert tất cả DateTime về Unspecified trước khi save
-    foreach (var entry in ChangeTracker.Entries())
-    {
-        if (entry.State == EntityState.Added || entry.State == EntityState.Modified)
-        {
-            foreach (var property in entry.Properties)
-            {
-                if (property.CurrentValue is DateTime dateTime && dateTime.Kind != DateTimeKind.Unspecified)
-                {
-                    property.CurrentValue = DateTime.SpecifyKind(dateTime, DateTimeKind.Unspecified);
-                }
-            }
-        }
-    }
-    
-    return await base.SaveChangesAsync(cancellationToken);
-}
+    //public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    //{
+    //    foreach (var entry in ChangeTracker.Entries())
+    //    {
+    //        if (entry.State == EntityState.Added || entry.State == EntityState.Modified)
+    //        {
+    //            foreach (var property in entry.Properties)
+    //            {
+    //                if (property.CurrentValue is DateTime dateTime && dateTime.Kind != DateTimeKind.Unspecified)
+    //                {
+    //                    property.CurrentValue = DateTime.SpecifyKind(dateTime, DateTimeKind.Unspecified);
+    //                }
+    //            }
+    //        }
+    //    }
+
+    //    return await base.SaveChangesAsync(cancellationToken);
+    //}
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.HasDefaultSchema("AMMS_DB");
