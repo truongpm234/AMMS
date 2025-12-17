@@ -88,20 +88,16 @@ namespace AMMS.Application.Services
 
         public async Task DeleteAsync(int id)
         {
-            using var transaction = await _repo.DbContext.Database.BeginTransactionAsync();
             try
             {
                 await _repo.DeleteAsync(id);
                 await _repo.SaveChangesAsync();
-                await transaction.CommitAsync();
             }
             catch
             {
-                await transaction.RollbackAsync();
                 throw;
             }
         }
-<<<<<<< HEAD
         public Task<order_request?> GetByIdAsync(int id) => _repo.GetByIdAsync(id);
         public async Task<PagedResultLite<order_request>> GetPagedAsync(int page, int pageSize)
         {
@@ -124,11 +120,5 @@ namespace AMMS.Application.Services
                 Items = items
             };
         }
-
-=======
-
-        public Task<order_request?> GetByIdAsync(int id)
-            => _repo.GetByIdAsync(id);
->>>>>>> main
     }
 }

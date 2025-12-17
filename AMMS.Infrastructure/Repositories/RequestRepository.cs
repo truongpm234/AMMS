@@ -16,8 +16,6 @@ namespace AMMS.Infrastructure.Repositories
             _db = db;
         }
 
-        public DbContext DbContext => _db;
-
         public async Task<order_request?> GetByIdAsync(int id)
         {
             return await _db.order_requests
