@@ -1,4 +1,4 @@
-﻿namespace AMMS.Shared.DTOs.Orders
+﻿namespace AMMS.Shared.DTOs.Order_requests
 {
     public class UpdateOrderRequestResponse
     {

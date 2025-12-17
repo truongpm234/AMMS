@@ -4,7 +4,7 @@ using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Infrastructure.Repositories;
 using AMMS.Shared.DTOs.Common;
-using AMMS.Shared.DTOs.Orders;
+using AMMS.Shared.DTOs.Requests;
 using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
 
@@ -22,17 +22,17 @@ namespace AMMS.API.Controllers
         }
 
         [HttpPost]
-        [ProducesResponseType(typeof(CreateCustomerOrderResponse), StatusCodes.Status201Created)]
-        public async Task<IActionResult> Create([FromBody] CreateCustomerOrderResquest req)
+        [ProducesResponseType(typeof(CreateRequestResponse), StatusCodes.Status201Created)]
+        public async Task<IActionResult> Create([FromBody] CreateResquest req)
         {
             var result = await _service.CreateAsync(req);
             return StatusCode(StatusCodes.Status201Created, result);
         }
 
         [HttpPut("{id}")]
-        [ProducesResponseType(typeof(UpdateOrderRequestResponse), StatusCodes.Status200OK)]
-        [ProducesResponseType(typeof(UpdateOrderRequestResponse), StatusCodes.Status404NotFound)]
-        public async Task<ActionResult<UpdateOrderRequestResponse>> UpdateAsync(int id, [FromBody] UpdateOrderRequest request)
+        [ProducesResponseType(typeof(UpdateRequestResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(UpdateRequestResponse), StatusCodes.Status404NotFound)]
+        public async Task<ActionResult<UpdateRequestResponse>> UpdateAsync(int id, [FromBody] UpdateOrderRequest request)
         {
             var update = await _service.UpdateAsync(id, request);
             return StatusCode(StatusCodes.Status200OK, update);

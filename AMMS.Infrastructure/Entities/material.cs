@@ -20,9 +20,10 @@ public partial class material
     public decimal? cost_price { get; set; }
 
     public string? description { get; set; }
-    public int? sheet_width_mm { get; set; }
-    public int? sheet_height_mm { get; set; }
 
+    public int? sheet_width_mm { get; set; }
+
+    public int? sheet_height_mm { get; set; }
 
     public virtual ICollection<bom> boms { get; set; } = new List<bom>();
 

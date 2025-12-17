@@ -2,7 +2,7 @@
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Common;
-using AMMS.Shared.DTOs.Orders;
+using AMMS.Shared.DTOs.Requests;
 
 namespace AMMS.Application.Services
 {
@@ -21,7 +21,7 @@ namespace AMMS.Application.Services
             return DateTime.SpecifyKind(dateTime.Value, DateTimeKind.Unspecified);
         }
 
-        public async Task<CreateCustomerOrderResponse> CreateAsync(CreateCustomerOrderResquest req)
+        public async Task<CreateRequestResponse> CreateAsync(CreateResquest req)
         {
             var entity = new order_request
             {
@@ -43,15 +43,15 @@ namespace AMMS.Application.Services
             await _repo.AddAsync(entity);
             await _repo.SaveChangesAsync();
 
-            return new CreateCustomerOrderResponse();
+            return new CreateRequestResponse();
         }
 
-        public async Task<UpdateOrderRequestResponse> UpdateAsync(int id, UpdateOrderRequest req)
+        public async Task<UpdateRequestResponse> UpdateAsync(int id, UpdateOrderRequest req)
         {
             var entity = await _repo.GetByIdAsync(id);
             if (entity == null)
             {
-                return new UpdateOrderRequestResponse
+                return new UpdateRequestResponse
                 {
                     Success = false,
                     Message = "Order request not found",
@@ -72,11 +72,11 @@ namespace AMMS.Application.Services
             entity.detail_address = req.detail_address ?? entity.detail_address;
             entity.delivery_date = ToUnspecified(req.delivery_date);
             entity.order_request_date = ToUnspecified(req.delivery_date);
-            entity.processing_status = req.processing_status ?? entity.processing_status;
+            entity.processing_status = "Verified";
             await _repo.UpdateAsync(entity);
             await _repo.SaveChangesAsync();
 
-            return new UpdateOrderRequestResponse
+            return new UpdateRequestResponse
             {
                 Success = true,
                 Message = "Order request updated successfully",

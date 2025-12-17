@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace AMMS.Shared.DTOs.Orders
 {
-    public class CreateCustomerOrderResponse
+    public class CreateCustomerOrderRequestResponse
     {
         public string Message { get; set; } = "Create order successfully";
     }
