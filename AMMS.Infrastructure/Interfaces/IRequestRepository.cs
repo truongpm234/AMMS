@@ -1,9 +1,9 @@
 ﻿using AMMS.Infrastructure.Entities;
-<<<<<<< HEAD
+
 using AMMS.Shared.DTOs.Common;
-=======
+
 using Microsoft.EntityFrameworkCore;
->>>>>>> main
+
 
 namespace AMMS.Infrastructure.Interfaces
 {

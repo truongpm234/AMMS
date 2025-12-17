@@ -44,9 +44,7 @@ namespace AMMS.Infrastructure.Repositories
         {
             var entity = await _db.order_requests.FindAsync(id);
             if (entity != null)
-            {
                 _db.order_requests.Remove(entity);
-            }
         }
         public Task<int> CountAsync()
         {

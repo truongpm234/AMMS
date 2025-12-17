@@ -15,14 +15,13 @@
         // 1 tờ in được bao nhiêu sản phẩm
         public int n_up { get; set; }
 
-        // SL sản phẩm
         public int quantity { get; set; }
 
         // Số tờ giấy
         public int sheets_base { get; set; }
         public int sheets_with_waste { get; set; }
 
-        // (tuỳ chọn) hao hụt để FE hiển thị rõ
+        // Hao hụt thực tế dùng
         public decimal waste_percent { get; set; }
     }
 }
