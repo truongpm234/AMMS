@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AMMS.Infrastructure.Entities;
 
@@ -15,7 +16,7 @@ public partial class order_request
 
     public DateTime? delivery_date { get; set; }
 
-    public string? product_name { get; set; } = null!;
+    public string? product_name { get; set; }
 
     public int? quantity { get; set; }
 

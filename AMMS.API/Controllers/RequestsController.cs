@@ -1,6 +1,10 @@
 ﻿using AMMS.Application.Interfaces;
+using AMMS.Application.Services;
+using AMMS.Infrastructure.Interfaces;
+using AMMS.Infrastructure.Repositories;
 using AMMS.Shared.DTOs.Orders;
 using Microsoft.AspNetCore.Mvc;
+using System.Text.Json;
 
 namespace AMMS.API.Controllers
 {
@@ -23,25 +27,21 @@ namespace AMMS.API.Controllers
             return StatusCode(StatusCodes.Status201Created, result);
         }
 
-        //[HttpPut("{id:int}")]
-        //public async Task<IActionResult> Update(int id, [FromBody] CreateCustomerOrderResquest req)
-        //{
-        //    try
-        //    {
-        //        await _service.UpdateAsync(id, req);
-        //        return Ok();
-        //    }
-        //    catch (Exception ex)
-        //    {
-        //        return BadRequest(new { message = ex.Message });
-        //    }
-        //}
+        // AMMS.API.Controllers.RequestsController
+        [HttpPut("{id}")]
+        [ProducesResponseType(typeof(UpdateOrderRequestResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(UpdateOrderRequestResponse), StatusCodes.Status404NotFound)]
+        public async Task<ActionResult<UpdateOrderRequestResponse>> UpdateAsync(int id, [FromBody] UpdateOrderRequest request)
+        {  
+            var update = await _service.UpdateAsync(id, request);
+            return StatusCode(StatusCodes.Status200OK, update);
+        }
 
-        //[HttpDelete("{id:int}")]
-        //public async Task<IActionResult> Delete(int id)
-        //{
-        //    await _service.DeleteAsync(id);
-        //    return NoContent();
-        //}
+        [HttpDelete("{id:int}")]
+        public async Task<IActionResult> Delete(int id)
+        {
+            await _service.DeleteAsync(id);
+            return NoContent();
+        }
     }
 }
