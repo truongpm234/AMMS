@@ -103,6 +103,7 @@ public partial class AppDbContext : DbContext
 
         modelBuilder.Entity<material>(entity =>
         {
+            entity.ToTable("materials", "AMMS_DB");
             entity.HasKey(e => e.material_id).HasName("materials_pkey");
 
             entity.HasIndex(e => e.code, "materials_code_key").IsUnique();
@@ -117,6 +118,8 @@ public partial class AppDbContext : DbContext
                 .HasPrecision(10, 2)
                 .HasDefaultValueSql("0");
             entity.Property(e => e.unit).HasMaxLength(20);
+            entity.Property(e => e.sheet_width_mm);
+            entity.Property(e => e.sheet_height_mm);
         });
 
         modelBuilder.Entity<order>(entity =>

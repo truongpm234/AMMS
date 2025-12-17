@@ -1,18 +1,28 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace AMMS.Shared.DTOs.Estimates
+﻿namespace AMMS.Shared.DTOs.Estimates
 {
     public class PaperEstimateResponse
     {
-        public int quantity { get; set; }
-        public int paper_needed { get; set; }
+        public string paper_code { get; set; } = null!;
 
-        // trả thêm để FE show note (optional nhưng tiện)
-        public int items_per_sheet { get; set; }
-        public decimal wastage_percent { get; set; }
+        // Khổ giấy
+        public int sheet_width_mm { get; set; }
+        public int sheet_height_mm { get; set; }
+
+        // Kích thước in (1 sản phẩm)
+        public int print_width_mm { get; set; }
+        public int print_height_mm { get; set; }
+
+        // 1 tờ in được bao nhiêu sản phẩm
+        public int n_up { get; set; }
+
+        // SL sản phẩm
+        public int quantity { get; set; }
+
+        // Số tờ giấy
+        public int sheets_base { get; set; }
+        public int sheets_with_waste { get; set; }
+
+        // (tuỳ chọn) hao hụt để FE hiển thị rõ
+        public decimal waste_percent { get; set; }
     }
 }
