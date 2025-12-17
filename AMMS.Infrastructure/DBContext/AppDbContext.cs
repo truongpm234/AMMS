@@ -51,35 +51,6 @@ public partial class AppDbContext : DbContext
 
     public virtual DbSet<user> users { get; set; }
 
-    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
-    {
-        if (!optionsBuilder.IsConfigured)
-        {
-            optionsBuilder
-                .UseNpgsql("DefaultConnection")
-                .EnableSensitiveDataLogging()
-                .LogTo(Console.WriteLine, LogLevel.Information);
-        }
-    }
-
-    //public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
-    //{
-    //    foreach (var entry in ChangeTracker.Entries())
-    //    {
-    //        if (entry.State == EntityState.Added || entry.State == EntityState.Modified)
-    //        {
-    //            foreach (var property in entry.Properties)
-    //            {
-    //                if (property.CurrentValue is DateTime dateTime && dateTime.Kind != DateTimeKind.Unspecified)
-    //                {
-    //                    property.CurrentValue = DateTime.SpecifyKind(dateTime, DateTimeKind.Unspecified);
-    //                }
-    //            }
-    //        }
-    //    }
-
-    //    return await base.SaveChangesAsync(cancellationToken);
-    //}
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.HasDefaultSchema("AMMS_DB");

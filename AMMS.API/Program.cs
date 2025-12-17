@@ -14,20 +14,8 @@ using System.Text.Json.Serialization;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseNpgsql(
-        builder.Configuration.GetConnectionString("DefaultConnection"),
-        npgsqlOptions =>
-        {
-            npgsqlOptions.CommandTimeout(30);
-            npgsqlOptions.EnableRetryOnFailure(0);
-            // ✅ Thêm options để tránh connection hanging
-            npgsqlOptions.UseQuerySplittingBehavior(QuerySplittingBehavior.SingleQuery);
-        })
-        // ✅ Important: Đảm bảo dispose connection đúng cách
-        .EnableSensitiveDataLogging()
-        .EnableDetailedErrors(),
-    // ✅ ServiceLifetime phải là Scoped
-    ServiceLifetime.Scoped);
+    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection"))
+);
 
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
@@ -68,40 +56,9 @@ builder.Services.AddScoped<IProductionRepository, ProductionRepository>();
 // Logging
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
-builder.Logging.SetMinimumLevel(LogLevel.Information); // Đổi từ Debug sang Information
-NpgsqlConnection.ClearAllPools();
+builder.Logging.SetMinimumLevel(LogLevel.Information);
 
 var app = builder.Build();
-
-// Middleware
-app.Use(async (context, next) =>
-{
-    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-    var requestId = Guid.NewGuid().ToString();
-
-    context.Response.Headers.Add("X-Request-ID", requestId);
-    Console.WriteLine($"[{requestId}] Request: {context.Request.Method} {context.Request.Path}");
-
-    try
-    {
-        await next();
-        stopwatch.Stop();
-        Console.WriteLine($"[{requestId}] Response: {context.Response.StatusCode} ({stopwatch.ElapsedMilliseconds}ms)");
-    }
-    catch (Exception ex)
-    {
-        stopwatch.Stop();
-        Console.WriteLine($"[{requestId}] ERROR after {stopwatch.ElapsedMilliseconds}ms: {ex.Message}");
-        context.Response.StatusCode = 500;
-        await context.Response.WriteAsJsonAsync(new
-        {
-            Success = false,
-            Message = "Internal server error",
-            RequestId = requestId,
-            Error = ex.Message
-        });
-    }
-});
 
 app.UseSwagger();
 app.UseSwaggerUI(c =>

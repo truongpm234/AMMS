@@ -27,7 +27,6 @@ namespace AMMS.API.Controllers
             return StatusCode(StatusCodes.Status201Created, result);
         }
 
-        // AMMS.API.Controllers.RequestsController
         [HttpPut("{id}")]
         [ProducesResponseType(typeof(UpdateOrderRequestResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(UpdateOrderRequestResponse), StatusCodes.Status404NotFound)]

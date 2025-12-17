@@ -44,12 +44,6 @@ namespace AMMS.Application.Services
             return new CreateCustomerOrderResponse();
         }
 
-        private DateTime? Normalize(DateTime? dt)
-        {
-            if (!dt.HasValue) return null;
-            return DateTime.SpecifyKind(dt.Value, DateTimeKind.Unspecified);
-        }
-
         public async Task<UpdateOrderRequestResponse> UpdateAsync(int id, UpdateOrderRequest req)
         {
             var entity = await _repo.GetByIdAsync(id);
@@ -93,9 +87,20 @@ namespace AMMS.Application.Services
 
         public async Task DeleteAsync(int id)
         {
-            await _repo.DeleteAsync(id);
-            await _repo.SaveChangesAsync();
+            using var transaction = await _repo.DbContext.Database.BeginTransactionAsync();
+            try
+            {
+                await _repo.DeleteAsync(id);
+                await _repo.SaveChangesAsync();
+                await transaction.CommitAsync();
+            }
+            catch
+            {
+                await transaction.RollbackAsync();
+                throw;
+            }
         }
+
         public Task<order_request?> GetByIdAsync(int id)
             => _repo.GetByIdAsync(id);
     }
