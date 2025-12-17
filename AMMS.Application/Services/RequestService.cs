@@ -88,6 +88,10 @@ namespace AMMS.Application.Services
 
         public async Task DeleteAsync(int id)
         {
+
+            await _repo.DeleteAsync(id);
+            await _repo.SaveChangesAsync();
+        }
             try
             {
                 await _repo.DeleteAsync(id);
@@ -110,14 +114,14 @@ namespace AMMS.Application.Services
             var list = await _repo.GetPagedAsync(skip, pageSize + 1);
 
             var hasNext = list.Count > pageSize;
-            var items = list.Take(pageSize).ToList();
+            var data = list.Take(pageSize).ToList();
 
             return new PagedResultLite<order_request>
             {
                 Page = page,
                 PageSize = pageSize,
                 HasNext = hasNext,
-                Items = items
+                Items = data
             };
         }
     }

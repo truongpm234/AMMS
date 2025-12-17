@@ -1,7 +1,6 @@
 ﻿using AMMS.Infrastructure.Entities;
 using AMMS.Shared.DTOs.Common;
 using Microsoft.EntityFrameworkCore;
-
 namespace AMMS.Infrastructure.Interfaces
 {
     public interface IRequestRepository
