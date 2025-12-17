@@ -9,8 +9,8 @@ namespace AMMS.API.Controllers
     [ApiController]
     public class EstimatesController : ControllerBase
     {
-        private readonly IEstimateService _service;
-        public EstimatesController(IEstimateService service) => _service = service;
+        private readonly IPaperEstimateService _service;
+        public EstimatesController(IPaperEstimateService service) => _service = service;
 
         [HttpPost("paper")]
         public async Task<IActionResult> EstimatePaper([FromBody] PaperEstimateRequest req)

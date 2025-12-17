@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 
 namespace AMMS.Application.Interfaces
 {
-    public interface IEstimateService
+    public interface IPaperEstimateService
     {
         Task<PaperEstimateResponse> EstimatePaperAsync(PaperEstimateRequest req);
     }

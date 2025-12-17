@@ -10,16 +10,16 @@ using System.Threading.Tasks;
 
 namespace AMMS.Infrastructure.Repositories
 {
-    public class EstimateRepository : IEstimateRepository
+    public class MaterialRepository : IMaterialRepository
     {
         private readonly AppDbContext _db;
-        public EstimateRepository(AppDbContext db) => _db = db;
+        public MaterialRepository(AppDbContext db) => _db = db;
 
-        public async Task<material?> GetMaterialByIdAsync(int id)
+        public Task<material?> GetByCodeAsync(string code)
         {
-            return await _db.materials
-                .AsNoTracking()
-                .FirstOrDefaultAsync(x => x.material_id == id);
+            var c = (code ?? "").Trim().ToLower();
+            return _db.materials.AsNoTracking()
+                .FirstOrDefaultAsync(m => m.code.ToLower() == c);
         }
     }
 }

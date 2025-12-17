@@ -7,8 +7,8 @@ using System.Threading.Tasks;
 
 namespace AMMS.Infrastructure.Interfaces
 {
-    public interface IEstimateRepository
+    public interface IMaterialRepository
     {
-        Task<material>GetMaterialByIdAsync(int id);
+        Task<material?> GetByCodeAsync(string code);
     }
 }
