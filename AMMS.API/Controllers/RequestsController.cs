@@ -23,25 +23,25 @@ namespace AMMS.API.Controllers
             return StatusCode(StatusCodes.Status201Created, result);
         }
 
-        [HttpPut("{id:int}")]
-        public async Task<IActionResult> Update(int id, [FromBody] CreateCustomerOrderResquest req)
-        {
-            try
-            {
-                await _service.UpdateAsync(id, req);
-                return Ok();
-            }
-            catch (Exception ex)
-            {
-                return BadRequest(new { message = ex.Message });
-            }
-        }
+        //[HttpPut("{id:int}")]
+        //public async Task<IActionResult> Update(int id, [FromBody] CreateCustomerOrderResquest req)
+        //{
+        //    try
+        //    {
+        //        await _service.UpdateAsync(id, req);
+        //        return Ok();
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        return BadRequest(new { message = ex.Message });
+        //    }
+        //}
 
-        [HttpDelete("{id:int}")]
-        public async Task<IActionResult> Delete(int id)
-        {
-            await _service.DeleteAsync(id);
-            return NoContent();
-        }
+        //[HttpDelete("{id:int}")]
+        //public async Task<IActionResult> Delete(int id)
+        //{
+        //    await _service.DeleteAsync(id);
+        //    return NoContent();
+        //}
     }
 }

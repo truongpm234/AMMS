@@ -24,4 +24,11 @@ public partial class order_request
     public string? design_file_path { get; set; }
 
     public DateTime? order_request_date { get; set; }
+
+    public string? province { get; set; }       
+
+    public string? district { get; set; }     
+    
+    public string? detail_address { get; set; } 
+
 }
