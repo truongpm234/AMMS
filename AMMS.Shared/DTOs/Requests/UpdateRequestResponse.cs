@@ -1,6 +1,6 @@
-﻿namespace AMMS.Shared.DTOs.Order_requests
+﻿namespace AMMS.Shared.DTOs.Requests
 {
-    public class UpdateOrderRequestResponse
+    public class UpdateRequestResponse
     {
         public bool Success { get; set; }
         public string Message { get; set; } = string.Empty;

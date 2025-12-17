@@ -4,9 +4,9 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace AMMS.Shared.DTOs.Orders
+namespace AMMS.Shared.DTOs.Requests
 {
-    public class CreateCustomerOrderResquest
+    public class CreateResquest
     {
         public string? customer_name { get; set; }
 

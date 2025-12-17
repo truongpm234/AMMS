@@ -4,7 +4,7 @@ using AMMS.Shared.DTOs.Estimates;
 
 namespace AMMS.Application.Services
 {
-    public class PaperEstimateService : IPaperEstimateService
+    public class PaperEstimateService : IEstimateService
     {
         private readonly IMaterialRepository _materialRepo;
         private const decimal DEFAULT_WASTE_PERCENT = 5m;

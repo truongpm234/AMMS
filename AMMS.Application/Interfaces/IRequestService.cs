@@ -1,6 +1,6 @@
 ﻿using AMMS.Infrastructure.Entities;
 using AMMS.Shared.DTOs.Common;
-using AMMS.Shared.DTOs.Order_requests;
+using AMMS.Shared.DTOs.Requests;
 
 namespace AMMS.Application.Interfaces
 {
