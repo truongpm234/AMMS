@@ -6,8 +6,8 @@ namespace AMMS.Application.Interfaces
     public interface IRequestService
     {
         Task<CreateCustomerOrderResponse> CreateAsync(CreateCustomerOrderResquest req);
-        //Task UpdateAsync(int id, CreateCustomerOrderResquest req);
-        //Task DeleteAsync(int id);
+        Task<UpdateOrderRequestResponse> UpdateAsync(int id, UpdateOrderRequest req);
+        Task DeleteAsync(int id);
         Task<order_request?> GetByIdAsync(int id);
     }
 }

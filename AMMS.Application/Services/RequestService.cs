@@ -1,7 +1,6 @@
 ﻿using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
-using AMMS.Infrastructure.Repositories;
 using AMMS.Shared.DTOs.Orders;
 
 namespace AMMS.Application.Services
@@ -15,6 +14,12 @@ namespace AMMS.Application.Services
             _repo = repo;
         }
 
+        private DateTime? ToUnspecified(DateTime? dateTime)
+        {
+            if (!dateTime.HasValue) return null;
+            return DateTime.SpecifyKind(dateTime.Value, DateTimeKind.Unspecified);
+        }
+
         public async Task<CreateCustomerOrderResponse> CreateAsync(CreateCustomerOrderResquest req)
         {
             var entity = new order_request
@@ -22,12 +27,12 @@ namespace AMMS.Application.Services
                 customer_name = req.customer_name,
                 customer_phone = req.customer_phone,
                 customer_email = req.customer_email,
-                delivery_date = req.delivery_date,
+                delivery_date = ToUnspecified(req.delivery_date),
                 product_name = req.product_name,
                 quantity = req.quantity,
                 description = req.description,
                 design_file_path = req.design_file_path,
-                order_request_date = req.order_request_date,
+                order_request_date = ToUnspecified(req.order_request_date),
                 province = req.province,
                 district = req.district,
                 detail_address = req.detail_address
@@ -39,31 +44,58 @@ namespace AMMS.Application.Services
             return new CreateCustomerOrderResponse();
         }
 
-        //public async Task UpdateAsync(int id, CreateCustomerOrderResquest req)
-        //{
-        //    var entity = await _repo.GetByIdAsync(id);
-        //    if (entity == null)
-        //        throw new KeyNotFoundException("Order request not found");
+        private DateTime? Normalize(DateTime? dt)
+        {
+            if (!dt.HasValue) return null;
+            return DateTime.SpecifyKind(dt.Value, DateTimeKind.Unspecified);
+        }
 
-        //    entity.customer_name = req.customer_name;
-        //    entity.customer_phone = req.customer_phone;
-        //    entity.customer_email = req.customer_email;
-        //    entity.product_name = req.product_name;
-        //    entity.quantity = req.quantity;
-        //    entity.description = req.description;
-        //    entity.design_file_path = req.design_file_path;
-        //    entity.delivery_date = DateTime.SpecifyKind(req.delivery_date.Value, DateTimeKind.Unspecified);
-        //    entity.order_request_date = DateTime.SpecifyKind(req.order_request_date.Value, DateTimeKind.Unspecified);
+        public async Task<UpdateOrderRequestResponse> UpdateAsync(int id, UpdateOrderRequest req)
+        {
+            var entity = await _repo.GetByIdAsync(id);
+            if (entity == null)
+            {
+                return new UpdateOrderRequestResponse
+                {
+                    Success = false,
+                    Message = "Order request not found",
+                    UpdatedId = id
+                };
+            }
 
-        //    _repo.Update(entity);
-        //    await _repo.SaveChangesAsync();
-        //}
+            // Update fields
+            entity.customer_name = req.customer_name ?? entity.customer_name;
+            entity.customer_phone = req.customer_phone ?? entity.customer_phone;
+            entity.customer_email = req.customer_email ?? entity.customer_email;
+            entity.product_name = req.product_name ?? entity.product_name;
+            entity.quantity = req.quantity ?? entity.quantity;
+            entity.description = req.description ?? entity.description;
+            entity.design_file_path = req.design_file_path ?? entity.design_file_path;
+            entity.province = req.province ?? entity.province;
+            entity.district = req.district ?? entity.district;
+            entity.detail_address = req.detail_address ?? entity.detail_address;
 
-        //public async Task DeleteAsync(int id)
-        //{
-        //    await _repo.DeleteAsync(id);
-        //    await _repo.SaveChangesAsync();
-        //}
+            entity.delivery_date = ToUnspecified(req.delivery_date);
+
+
+            entity.order_request_date = ToUnspecified(req.delivery_date);
+            await _repo.UpdateAsync(entity);
+            await _repo.SaveChangesAsync();
+
+            return new UpdateOrderRequestResponse
+            {
+                Success = true,
+                Message = "Order request updated successfully",
+                UpdatedId = id,
+                UpdatedAt = DateTime.Now
+            };
+        }
+
+        public async Task DeleteAsync(int id)
+        {
+            await _repo.DeleteAsync(id);
+            await _repo.SaveChangesAsync();
+        }
         public Task<order_request?> GetByIdAsync(int id)
             => _repo.GetByIdAsync(id);
     }

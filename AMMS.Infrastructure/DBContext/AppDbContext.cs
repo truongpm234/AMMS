@@ -1,7 +1,8 @@
-﻿using System;
-using System.Collections.Generic;
-using AMMS.Infrastructure.Entities;
+﻿using AMMS.Infrastructure.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using System;
+using System.Collections.Generic;
 
 namespace AMMS.Infrastructure.DBContext;
 
@@ -50,6 +51,35 @@ public partial class AppDbContext : DbContext
 
     public virtual DbSet<user> users { get; set; }
 
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        if (!optionsBuilder.IsConfigured)
+        {
+            optionsBuilder
+                .UseNpgsql("DefaultConnection")
+                .EnableSensitiveDataLogging()
+                .LogTo(Console.WriteLine, LogLevel.Information);
+        }
+    }
+
+    //public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    //{
+    //    foreach (var entry in ChangeTracker.Entries())
+    //    {
+    //        if (entry.State == EntityState.Added || entry.State == EntityState.Modified)
+    //        {
+    //            foreach (var property in entry.Properties)
+    //            {
+    //                if (property.CurrentValue is DateTime dateTime && dateTime.Kind != DateTimeKind.Unspecified)
+    //                {
+    //                    property.CurrentValue = DateTime.SpecifyKind(dateTime, DateTimeKind.Unspecified);
+    //                }
+    //            }
+    //        }
+    //    }
+
+    //    return await base.SaveChangesAsync(cancellationToken);
+    //}
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.HasDefaultSchema("AMMS_DB");
@@ -177,14 +207,14 @@ public partial class AppDbContext : DbContext
         modelBuilder.Entity<order_request>(entity =>
         {
             entity.HasKey(e => e.order_request_id).HasName("order_request_pkey");
-
-
+            entity.ToTable("order_request", "AMMS_DB");
 
             entity.Property(e => e.customer_email).HasMaxLength(100);
             entity.Property(e => e.customer_name).HasMaxLength(100);
             entity.Property(e => e.customer_phone).HasMaxLength(20);
-            entity.Property(e => e.delivery_date).HasColumnType("timestamp with time zone");
-            entity.Property(e => e.order_request_date).HasColumnType("timestamp with time zone");
+
+            entity.Property(e => e.delivery_date).HasColumnType("timestamp without time zone");
+            entity.Property(e => e.order_request_date).HasColumnType("timestamp without time zone");
 
             entity.Property(e => e.product_name).HasMaxLength(200);
         });

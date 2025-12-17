@@ -2,6 +2,7 @@
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace AMMS.Infrastructure.Repositories
 {
@@ -14,35 +15,36 @@ namespace AMMS.Infrastructure.Repositories
             _db = db;
         }
 
-        public async Task AddAsync(order_request entity)
-        {
-            await _db.order_requests.AddAsync(entity);
-        }
-        public void Update(order_request entity)
-        {
-            if (_db.Entry(entity).State == EntityState.Detached)
-            {
-                _db.order_requests.Attach(entity);
-                _db.Entry(entity).State = EntityState.Modified;
-            }
-        }
-
         public async Task<order_request?> GetByIdAsync(int id)
         {
             return await _db.order_requests
                 .FirstOrDefaultAsync(x => x.order_request_id == id);
         }
-        public async Task DeleteAsync(int id)
-        {
-            var entity = new order_request { order_request_id = id };
-            _db.Attach(entity);
-            _db.order_requests.Remove(entity);
-        }
 
+        public Task UpdateAsync(order_request entity)
+        {
+            _db.order_requests.Update(entity);
+            return Task.CompletedTask;
+        }
 
         public async Task<int> SaveChangesAsync()
         {
             return await _db.SaveChangesAsync();
         }
+
+        public async Task AddAsync(order_request entity)
+        {
+            await _db.order_requests.AddAsync(entity);
+        }
+
+        public async Task DeleteAsync(int id)
+        {
+            var entity = await _db.order_requests.FindAsync(id);
+            if (entity != null)
+            {
+                _db.order_requests.Remove(entity);
+            }
+        }
     }
+
 }
