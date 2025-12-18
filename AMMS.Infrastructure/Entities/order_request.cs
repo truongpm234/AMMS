@@ -58,8 +58,4 @@ public partial class order_request
     public int? order_id { get; set; }
 
     public virtual order? order { get; set; }
-<<<<<<< HEAD
-
-=======
->>>>>>> main
 }
