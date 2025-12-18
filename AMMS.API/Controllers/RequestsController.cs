@@ -60,6 +60,12 @@ namespace AMMS.API.Controllers
             var result = await _service.GetPagedAsync(page, pageSize);
             return Ok(result);
         }
-
+        [HttpPost("{id:int}/convert-to-order")]
+        public async Task<IActionResult> ConvertToOrder(int id)
+        {
+            var result = await _service.ConvertToOrderAsync(id);
+            if (!result.Success) return BadRequest(result);
+            return Ok(result);
+        }
     }
 }

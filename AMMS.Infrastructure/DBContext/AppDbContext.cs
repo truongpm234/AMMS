@@ -256,7 +256,11 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.product_name).HasMaxLength(200);
             entity.Property(e => e.order_id);
             entity.HasOne(d => d.order)
+<<<<<<< HEAD
+      .WithMany()                 
+=======
       .WithMany()
+>>>>>>> main
       .HasForeignKey(d => d.order_id)
       .OnDelete(DeleteBehavior.SetNull)
       .HasConstraintName("fk_order_request_order");

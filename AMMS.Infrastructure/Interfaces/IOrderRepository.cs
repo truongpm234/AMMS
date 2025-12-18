@@ -4,10 +4,12 @@ namespace AMMS.Infrastructure.Interfaces
 {
     public interface IOrderRepository
     {
-        Task AddAsync(order entity);
+        Task AddOrderAsync(order entity);
+        Task AddOrderItemAsync(order_item entity);
         void Update(order entity);
         Task<order?> GetByIdAsync(int id);
         Task DeleteAsync(int id);
         Task<int> SaveChangesAsync();
+        Task<string> GenerateNextOrderCodeAsync();
     }
 }

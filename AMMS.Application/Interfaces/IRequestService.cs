@@ -11,5 +11,6 @@ namespace AMMS.Application.Interfaces
         Task DeleteAsync(int id);
         Task<order_request?> GetByIdAsync(int id);
         Task<PagedResultLite<order_request>> GetPagedAsync(int page, int pageSize);
+        Task<ConvertRequestToOrderResponse> ConvertToOrderAsync(int requestId);
     }
 }

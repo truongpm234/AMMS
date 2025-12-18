@@ -12,5 +12,6 @@ namespace AMMS.Infrastructure.Interfaces
         Task<int> SaveChangesAsync();
         Task<int> CountAsync();
         Task<List<order_request>> GetPagedAsync(int skip, int take);
+        Task<bool> AnyOrderLinkedAsync(int requestId);
     }
 }

@@ -8,11 +8,13 @@ namespace AMMS.Application.Services
 {
     public class RequestService : IRequestService
     {
-        private readonly IRequestRepository _repo;
+        private readonly IRequestRepository _requestRepo;
+        private readonly IOrderRepository _orderRepo;
 
-        public RequestService(IRequestRepository repo)
+        public RequestService(IRequestRepository requestRepo, IOrderRepository orderRepo)
         {
-            _repo = repo;
+            _requestRepo = requestRepo;
+            _orderRepo = orderRepo;
         }
 
         private DateTime? ToUnspecified(DateTime? dateTime)
@@ -40,15 +42,15 @@ namespace AMMS.Application.Services
                 process_status = "Pending"
             };
 
-            await _repo.AddAsync(entity);
-            await _repo.SaveChangesAsync();
+            await _requestRepo.AddAsync(entity);
+            await _requestRepo.SaveChangesAsync();
 
             return new CreateRequestResponse();
         }
 
         public async Task<UpdateRequestResponse> UpdateAsync(int id, UpdateOrderRequest req)
         {
-            var entity = await _repo.GetByIdAsync(id);
+            var entity = await _requestRepo.GetByIdAsync(id);
             if (entity == null)
             {
                 return new UpdateRequestResponse
@@ -74,8 +76,8 @@ namespace AMMS.Application.Services
             entity.order_request_date = ToUnspecified(req.delivery_date);
             entity.product_type = req.product_type ?? entity.product_type;
             entity.process_status = "Verified";
-            await _repo.UpdateAsync(entity);
-            await _repo.SaveChangesAsync();
+            await _requestRepo.UpdateAsync(entity);
+            await _requestRepo.SaveChangesAsync();
 
             return new UpdateRequestResponse
             {
@@ -89,10 +91,10 @@ namespace AMMS.Application.Services
         public async Task DeleteAsync(int id)
         {
 
-            await _repo.DeleteAsync(id);
-            await _repo.SaveChangesAsync();
+            await _requestRepo.DeleteAsync(id);
+            await _requestRepo.SaveChangesAsync();
         }
-        public Task<order_request?> GetByIdAsync(int id) => _repo.GetByIdAsync(id);
+        public Task<order_request?> GetByIdAsync(int id) => _requestRepo.GetByIdAsync(id);
         public async Task<PagedResultLite<order_request>> GetPagedAsync(int page, int pageSize)
         {
             if (page <= 0) page = 1;
@@ -101,7 +103,7 @@ namespace AMMS.Application.Services
             var skip = (page - 1) * pageSize;
 
             // lấy dư 1 record để biết có trang sau
-            var list = await _repo.GetPagedAsync(skip, pageSize + 1);
+            var list = await _requestRepo.GetPagedAsync(skip, pageSize + 1);
 
             var hasNext = list.Count > pageSize;
             var data = list.Take(pageSize).ToList();
@@ -112,6 +114,89 @@ namespace AMMS.Application.Services
                 PageSize = pageSize,
                 HasNext = hasNext,
                 Data = data
+            };
+        }
+
+        public async Task<ConvertRequestToOrderResponse> ConvertToOrderAsync(int requestId)
+        {
+            var req = await _requestRepo.GetByIdAsync(requestId);
+            if (req == null)
+            {
+                return new ConvertRequestToOrderResponse
+                {
+                    Success = false,
+                    Message = "Order request not found",
+                    RequestId = requestId
+                };
+            }
+
+            // chỉ accept mới convert
+            if (!string.Equals(req.process_status?.Trim(), "accepted", StringComparison.OrdinalIgnoreCase))
+            {
+                return new ConvertRequestToOrderResponse
+                {
+                    Success = false,
+                    Message = "Only process_status = 'accepted' can be converted to order",
+                    RequestId = requestId
+                };
+            }
+
+            // chống tạo trùng
+            if (req.order_id != null || await _requestRepo.AnyOrderLinkedAsync(requestId))
+            {
+                return new ConvertRequestToOrderResponse
+                {
+                    Success = true,
+                    Message = "This request was already converted",
+                    RequestId = requestId,
+                    OrderId = req.order_id
+                };
+            }
+
+            // tạo order
+            var code = await _orderRepo.GenerateNextOrderCodeAsync();
+            var newOrder = new order
+            {
+                code = code,
+                order_date = DateTime.Now,
+                delivery_date = req.delivery_date,
+                status = "New",
+                payment_status = "Unpaid",
+                // customer_id/consultant_id/quote_id nếu chưa có thì để null
+            };
+
+            await _orderRepo.AddOrderAsync(newOrder);
+            await _orderRepo.SaveChangesAsync(); // để lấy order_id
+
+            // tạo order_item (1 sp / 1 đơn)
+            var newItem = new order_item
+            {
+                order_id = newOrder.order_id,
+                product_name = req.product_name,
+                quantity = (int)req.quantity,
+                design_url = req.design_file_path,
+                // các field khác bạn có thể map thêm nếu UI có
+                // product_type_id = ...
+            };
+
+            await _orderRepo.AddOrderItemAsync(newItem);
+
+            // đánh dấu request đã convert
+            req.order_id = newOrder.order_id;
+            await _requestRepo.UpdateAsync(req);
+
+            // save chung
+            await _orderRepo.SaveChangesAsync();
+            await _requestRepo.SaveChangesAsync();
+
+            return new ConvertRequestToOrderResponse
+            {
+                Success = true,
+                Message = "Converted order request to order successfully",
+                RequestId = requestId,
+                OrderId = newOrder.order_id,
+                OrderItemId = newItem.item_id,
+                OrderCode = newOrder.code
             };
         }
     }
