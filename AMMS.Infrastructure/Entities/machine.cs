@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 
 namespace AMMS.Infrastructure.Entities
 {
-    [Table("machine", Schema = "AMMS_DB")]
+    [Table("machines", Schema = "AMMS_DB")]
     public partial class machine
     {
         public int machine_id { get; set; }

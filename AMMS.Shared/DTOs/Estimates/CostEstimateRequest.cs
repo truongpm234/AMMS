@@ -10,7 +10,7 @@ namespace AMMS.Shared.DTOs.Estimates
     public class CostEstimateRequest
     {
         public int order_request_id { get; set; }
-        public PaperEstimateResponse paper { get; set; } = null!;
+        public AMMS.Shared.DTOs.Estimates.PaperEstimateResponse paper { get; set; } = null!;
         public DateTime desired_delivery_date { get; set; }
 
         // Thông tin để tính chi phí vật liệu

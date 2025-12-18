@@ -126,7 +126,6 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.unit).HasMaxLength(20);
             entity.Property(e => e.sheet_width_mm);
             entity.Property(e => e.sheet_height_mm);
-            entity.Property(e => e.sheet_length_mm);
         });
 
         modelBuilder.Entity<machine>(entity =>
