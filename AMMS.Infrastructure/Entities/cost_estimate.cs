@@ -49,5 +49,11 @@ public partial class cost_estimate
 
     public decimal total_area_m2 { get; set; }            // Tổng diện tích in (m2)
 
+    public decimal? manual_adjust_cost { get; set; }  
+
+    public decimal? final_total_cost { get; set; } 
+
+    public string? cost_note { get; set; }
+
     public virtual order_request order_request { get; set; } = null!;
 }

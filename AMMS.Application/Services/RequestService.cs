@@ -74,6 +74,7 @@ namespace AMMS.Application.Services
             entity.detail_address = req.detail_address ?? entity.detail_address;
             entity.delivery_date = ToUnspecified(req.delivery_date);
             entity.order_request_date = ToUnspecified(req.delivery_date);
+            entity.product_type = req.product_type ?? entity.product_type;
             entity.process_status = "Verified";
             await _requestRepo.UpdateAsync(entity);
             await _requestRepo.SaveChangesAsync();

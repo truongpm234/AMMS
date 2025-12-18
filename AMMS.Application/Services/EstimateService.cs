@@ -339,6 +339,9 @@ namespace AMMS.Application.Services
                 rush_percent = rushPercent,
                 rush_amount = Math.Round(rushAmount, 2),
                 system_total_cost = Math.Round(systemTotalCost, 2),
+                manual_adjust_cost = 0m,
+                final_total_cost = Math.Round(systemTotalCost, 2),
+                cost_note = null,
                 estimated_finish_date = DateTime.SpecifyKind(estimatedFinish, DateTimeKind.Unspecified),
                 desired_delivery_date = DateTime.SpecifyKind(req.desired_delivery_date, DateTimeKind.Unspecified),
                 created_at = DateTime.SpecifyKind(now, DateTimeKind.Unspecified),
@@ -381,6 +384,18 @@ namespace AMMS.Application.Services
                 ProductTypeCode.GACH_NOI_DIA_6SP => INK_RATE_GACH_NHIEU_MAU,
                 _ => INK_RATE_HOP_MAU
             };
+        }
+
+        public async Task AdjustManualCostAsync(int estimateId, decimal adjustCost, string? note)
+        {
+            var estimate = await _estimateRepo.GetByIdAsync(estimateId)
+                ?? throw new Exception("Estimate not found");
+
+            estimate.manual_adjust_cost = adjustCost;
+            estimate.final_total_cost = adjustCost + (estimate.rush_amount);
+            estimate.cost_note = note;
+
+            await _estimateRepo.SaveChangesAsync();
         }
 
     }

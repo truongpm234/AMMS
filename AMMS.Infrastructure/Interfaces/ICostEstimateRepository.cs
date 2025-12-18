@@ -11,6 +11,10 @@ namespace AMMS.Infrastructure.Interfaces
     {
         Task AddAsync(cost_estimate entity);
         Task SaveChangesAsync();
+        Task<cost_estimate?> GetByOrderRequestIdAsync(int orderRequestId);
+        Task<cost_estimate?> GetByIdAsync(int id);
+        Task UpdateAsync(cost_estimate entity);
+        Task UpdateSystemTotalCodeAsync(decimal costTotal, int id);
     }
 }
 
