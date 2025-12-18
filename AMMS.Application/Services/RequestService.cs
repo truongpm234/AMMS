@@ -110,7 +110,7 @@ namespace AMMS.Application.Services
                 Page = page,
                 PageSize = pageSize,
                 HasNext = hasNext,
-                Items = data
+                Data = data
             };
         }
     }
