@@ -32,6 +32,8 @@ namespace AMMS.Shared.DTOs.Requests
 
         public string? detail_address { get; set; }
 
+        public string? product_type { get; set; }
+
         public string? processing_status { get; set; }
     }
 }

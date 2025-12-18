@@ -30,5 +30,13 @@ namespace AMMS.API.Controllers
             var result = await _service.CalculateCostEstimateAsync(req);
             return Ok(result);
         }
+
+        [HttpPut("adjust-final-total-cost/{id}")]
+        public async Task<IActionResult> AdjustCost(int id, [FromBody] AdjustCostRequest req)
+        {
+            await _service.AdjustManualCostAsync(id, req.manual_adjust_cost, req.cost_note);
+            return NoContent();
+        }
+
     }
 }
