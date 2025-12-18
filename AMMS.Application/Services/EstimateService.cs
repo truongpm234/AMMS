@@ -295,25 +295,27 @@ namespace AMMS.Application.Services
             var now = DateTime.UtcNow;
             var estimatedFinish = now.AddDays(5);
 
-            // Rush order
             bool isRush = false;
-            decimal rushPercent = 0;
+            decimal rushPercent = 0m;
 
             if (req.desired_delivery_date < estimatedFinish)
             {
-                TimeSpan timeDiff = estimatedFinish - req.desired_delivery_date;
-                int daysDiff = (int)timeDiff.TotalDays;
+                int daysEarly = (int)(estimatedFinish - req.desired_delivery_date).TotalDays;
 
-                if (daysDiff >= 3)
+                if (daysEarly == 1)
                 {
                     isRush = true;
-                    rushPercent = baseCost switch
-                    {
-                        < 500_000m => 15m,
-                        < 1_000_000m => 10m,
-                        < 5_000_000m => 8m,
-                        _ => 5m
-                    };
+                    rushPercent = 5m;
+                }
+                else if (daysEarly >= 2 && daysEarly <= 3)
+                {
+                    isRush = true;
+                    rushPercent = 20m;
+                }
+                else if (daysEarly >= 4)
+                {
+                    isRush = true;
+                    rushPercent = 40m;
                 }
             }
 
