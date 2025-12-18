@@ -53,9 +53,12 @@ public partial class AppDbContext : DbContext
 
     public virtual DbSet<cost_estimate> cost_estimates { get; set; }
 
+    public virtual DbSet<machine> machines { get; set; }
+
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        modelBuilder.HasDefaultSchema("AMMS_DB");
+        modelBuilder.HasDefaultSchema("public");
         modelBuilder.Entity<bom>(entity =>
         {
             entity.HasKey(e => e.bom_id).HasName("boms_pkey");
@@ -124,6 +127,15 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.sheet_width_mm);
             entity.Property(e => e.sheet_height_mm);
             entity.Property(e => e.sheet_length_mm);
+        });
+
+        modelBuilder.Entity<machine>(entity =>
+        {
+            entity.HasKey(e => e.machine_id).HasName("machines_pkey");
+            entity.HasIndex(e => e.machine_code, "machines_machine_code_key").IsUnique();
+            entity.Property(e => e.process_name).HasMaxLength(100);
+            entity.Property(e => e.machine_code).HasMaxLength(50);
+            entity.Property(e => e.is_active).HasDefaultValue(true);
         });
 
         modelBuilder.Entity<order>(entity =>
