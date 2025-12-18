@@ -190,10 +190,61 @@ public partial class AppDbContext : DbContext
                 .HasConstraintName("order_items_product_type_id_fkey");
         });
 
+        modelBuilder.Entity<order>(entity =>
+        {
+            entity.HasKey(e => e.order_id).HasName("orders_pkey");
+
+            entity.HasIndex(e => e.code, "orders_code_key").IsUnique();
+
+            entity.Property(e => e.code).HasMaxLength(20);
+            entity.Property(e => e.delivery_date).HasColumnType("timestamp without time zone");
+            entity.Property(e => e.order_date)
+                .HasDefaultValueSql("CURRENT_TIMESTAMP")
+                .HasColumnType("timestamp without time zone");
+            entity.Property(e => e.payment_status)
+                .HasMaxLength(20)
+                .HasDefaultValueSql("'Unpaid'::character varying");
+            entity.Property(e => e.status)
+                .HasMaxLength(20)
+                .HasDefaultValueSql("'New'::character varying");
+            entity.Property(e => e.total_amount).HasPrecision(15, 2);
+
+            entity.HasOne(d => d.consultant).WithMany(p => p.orders)
+                .HasForeignKey(d => d.consultant_id)
+                .HasConstraintName("orders_consultant_id_fkey");
+
+            entity.HasOne(d => d.customer).WithMany(p => p.orders)
+                .HasForeignKey(d => d.customer_id)
+                .HasConstraintName("orders_customer_id_fkey");
+
+            entity.HasOne(d => d.quote).WithMany(p => p.orders)
+                .HasForeignKey(d => d.quote_id)
+                .HasConstraintName("orders_quote_id_fkey");
+        });
+
+        modelBuilder.Entity<order_item>(entity =>
+        {
+            entity.HasKey(e => e.item_id).HasName("order_items_pkey");
+
+            entity.Property(e => e.colors).HasMaxLength(50);
+            entity.Property(e => e.finished_size).HasMaxLength(50);
+            entity.Property(e => e.paper_type).HasMaxLength(100);
+            entity.Property(e => e.print_size).HasMaxLength(50);
+            entity.Property(e => e.product_name).HasMaxLength(200);
+
+            entity.HasOne(d => d.order).WithMany(p => p.order_items)
+                .HasForeignKey(d => d.order_id)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("order_items_order_id_fkey");
+
+            entity.HasOne(d => d.product_type).WithMany(p => p.order_items)
+                .HasForeignKey(d => d.product_type_id)
+                .HasConstraintName("order_items_product_type_id_fkey");
+        });
+
         modelBuilder.Entity<order_request>(entity =>
         {
             entity.HasKey(e => e.order_request_id).HasName("order_request_pkey");
-            entity.ToTable("order_request", "AMMS_DB");
 
             entity.Property(e => e.customer_email).HasMaxLength(100);
             entity.Property(e => e.customer_name).HasMaxLength(100);
@@ -203,6 +254,12 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.order_request_date).HasColumnType("timestamp without time zone");
 
             entity.Property(e => e.product_name).HasMaxLength(200);
+            entity.Property(e => e.order_id);
+            entity.HasOne(d => d.order)
+      .WithMany()
+      .HasForeignKey(d => d.order_id)
+      .OnDelete(DeleteBehavior.SetNull)
+      .HasConstraintName("fk_order_request_order");
         });
 
         modelBuilder.Entity<product_type>(entity =>

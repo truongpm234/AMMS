@@ -1,12 +1,14 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations.Schema;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
 namespace AMMS.Infrastructure.Entities
 {
-    public class machine
+    [Table("machine", Schema = "AMMS_DB")]
+    public partial class machine
     {
         public int machine_id { get; set; }
         public string process_name { get; set; } = null!;

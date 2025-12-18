@@ -4,6 +4,8 @@ using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AMMS.Infrastructure.Entities;
 
+[Table("order_request", Schema = "AMMS_DB")]
+
 public partial class order_request
 {
     public int order_request_id { get; set; }
@@ -53,4 +55,7 @@ public partial class order_request
     // Có cán màng không
     public bool has_lamination { get; set; }
 
+    public int? order_id { get; set; }
+
+    public virtual order? order { get; set; }
 }
