@@ -6,6 +6,7 @@ using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.FileStorage;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Infrastructure.Repositories;
+using AMMS.Shared.DTOs.Email;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using System.Text.Json;
@@ -55,7 +56,11 @@ builder.Services.AddCors(options =>
 // Configuration
 builder.Services.Configure<CloudinaryOptions>(
     builder.Configuration.GetSection("Cloudinary"));
+builder.Services.Configure<EmailSettings>(
+    builder.Configuration.GetSection("Smtp")
+);
 
+builder.Services.AddScoped<IEmailService, SmtpEmailSender>();
 // Services
 builder.Services.AddScoped<IUploadFileService, UploadFileService>();
 builder.Services.AddScoped<ICloudinaryFileStorageService, CloudinaryFileStorageService>();
@@ -73,7 +78,7 @@ builder.Services.AddScoped<IProductTypeRepository, ProductTypeRepository>();
 builder.Services.AddScoped<IProductTypeService, ProductTypeService>();
 builder.Services.AddScoped<IMachineRepository, MachineRepository>();
 builder.Services.AddScoped<IMaterialService, MaterialService>();
-
+builder.Services.AddScoped<IDealService, DealService>();
 
 // Logging
 builder.Logging.ClearProviders();
