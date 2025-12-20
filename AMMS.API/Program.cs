@@ -30,7 +30,6 @@ builder.Services.AddDbContext<AppDbContext>(options =>
         });
 });
 
-
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {

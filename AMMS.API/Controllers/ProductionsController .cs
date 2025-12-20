@@ -1,4 +1,5 @@
 ﻿using AMMS.Application.Interfaces;
+using AMMS.Application.Services;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AMMS.API.Controllers
@@ -21,6 +22,13 @@ namespace AMMS.API.Controllers
         {
             var result = await _service.GetNearestDeliveryAsync();
             return Ok(result);
+        }
+
+        [HttpGet("get-all-process-type")]
+        public async Task<ActionResult<List<string>>> GetAllProcessTypeAsync()
+        {
+            var data = await _service.GetAllProcessTypeAsync();
+            return Ok(data);
         }
     }
 }

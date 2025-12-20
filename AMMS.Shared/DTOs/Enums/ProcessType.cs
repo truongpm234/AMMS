@@ -9,12 +9,14 @@ namespace AMMS.Shared.DTOs.Enums
     public enum ProcessType
     {
         IN,
+        RALO,
+        CAT,
         BOI,
         PHU,
         CAN_MANG,
         BE,
         DUT,
-        DAN
+        DAN,
+        DOT
     }
-
 }

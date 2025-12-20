@@ -8,7 +8,6 @@ namespace AMMS.Shared.DTOs.Enums
 {
     public enum CoatingType
     {
-        NONE,
         KEO_NUOC,
         KEO_DAU
     }

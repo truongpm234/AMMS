@@ -37,7 +37,7 @@ namespace AMMS.Shared.DTOs.Estimates
         /// Tab dán (glue flap) - Mặc định 20mm
         /// Đây là phần giấy dư để dán hộp
         /// </summary>
-        public int glue_tab_mm { get; set; } = 20;
+        public int glue_tab_mm { get; set; } = 15;
 
         /// <summary>
         /// Chừa xén (bleed) - Mặc định 1mm mỗi bên
@@ -57,7 +57,9 @@ namespace AMMS.Shared.DTOs.Estimates
         /// Loại sản phẩm in
         /// VD: "HOP_MAU_1LUOT_THUONG", "GACH_NOI_DIA_4SP"
         /// </summary>
-        public string product_type { get; set; } = "HOP_MAU_1LUOT_THUONG";
+        public string product_type { get; set; } = "";
+
+        public string? form_product { get; set; }
 
         /// <summary>
         /// Số cao bản (plates) - Chỉ áp dụng cho hộp màu

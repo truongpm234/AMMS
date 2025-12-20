@@ -10,5 +10,6 @@ namespace AMMS.Application.Interfaces
     public interface IProductionService
     {
         Task<NearestDeliveryResponse> GetNearestDeliveryAsync();
+        Task<List<string>> GetAllProcessTypeAsync();
     }
 }

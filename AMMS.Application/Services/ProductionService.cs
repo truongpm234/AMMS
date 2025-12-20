@@ -1,5 +1,6 @@
 ﻿using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.Interfaces;
+using AMMS.Shared.DTOs.Enums;
 using AMMS.Shared.DTOs.Productions;
 using System;
 using System.Collections.Generic;
@@ -30,6 +31,12 @@ namespace AMMS.Application.Services
                 nearest_delivery_date = nearestDate,
                 days_until_free = days
             };
+        }
+
+        public Task<List<string>> GetAllProcessTypeAsync()
+        {
+            var result = Enum.GetNames(typeof(ProcessType)).ToList();
+            return Task.FromResult(result);
         }
     }
 }

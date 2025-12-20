@@ -6,7 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 namespace AMMS.API.Controllers
 {
     [ApiController]
-    [Route("api/requests")]
+    [Route("api/[controller]")]
     public class RequestsController : ControllerBase
     {
         private readonly IRequestService _service;
@@ -59,7 +59,7 @@ namespace AMMS.API.Controllers
             return Ok(result);
         }
 
-        [HttpPost("{id:int}/convert-to-order")]
+        [HttpPost("convert-to-order-by-{id:int}")]
         public async Task<IActionResult> ConvertToOrder(int id)
         {
             var result = await _service.ConvertToOrderAsync(id);
@@ -67,7 +67,6 @@ namespace AMMS.API.Controllers
             return Ok(result);
         }
 
-        // ✅ Không để API sập 500 nếu email fail
         [HttpPost("send-deal")]
         public async Task<IActionResult> SendDealEmail([FromBody] SendDealEmailRequest req)
         {
@@ -94,6 +93,7 @@ namespace AMMS.API.Controllers
         public async Task<IActionResult> Accept([FromQuery] int orderRequestId, [FromQuery] string token)
         {
             await _dealService.AcceptDealAsync(orderRequestId);
+            await _service.ConvertToOrderAsync(orderRequestId);
             return Ok("Bạn đã đồng ý báo giá. Nhân viên sẽ liên hệ sớm.");
         }
 

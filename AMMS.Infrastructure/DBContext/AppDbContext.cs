@@ -111,21 +111,13 @@ public partial class AppDbContext : DbContext
         {
             entity.ToTable("materials", "AMMS_DB");
             entity.HasKey(e => e.material_id).HasName("materials_pkey");
-
             entity.HasIndex(e => e.code, "materials_code_key").IsUnique();
-
             entity.Property(e => e.code).HasMaxLength(50);
             entity.Property(e => e.cost_price).HasPrecision(15, 2);
-            entity.Property(e => e.min_stock)
-                .HasPrecision(10, 2)
-                .HasDefaultValueSql("100");
+            entity.Property(e => e.min_stock).HasPrecision(10, 2).HasDefaultValueSql("100");
             entity.Property(e => e.name).HasMaxLength(150);
-            entity.Property(e => e.stock_qty)
-                .HasPrecision(10, 2)
-                .HasDefaultValueSql("0");
+            entity.Property(e => e.stock_qty).HasPrecision(10, 2).HasDefaultValueSql("0");
             entity.Property(e => e.unit).HasMaxLength(20);
-            entity.Property(e => e.sheet_width_mm);
-            entity.Property(e => e.sheet_height_mm);
         });
 
         modelBuilder.Entity<machine>(entity =>
@@ -244,29 +236,28 @@ public partial class AppDbContext : DbContext
         modelBuilder.Entity<order_request>(entity =>
         {
             entity.HasKey(e => e.order_request_id).HasName("order_request_pkey");
-
             entity.Property(e => e.customer_email).HasMaxLength(100);
             entity.Property(e => e.customer_name).HasMaxLength(100);
             entity.Property(e => e.customer_phone).HasMaxLength(20);
-
             entity.Property(e => e.delivery_date).HasColumnType("timestamp without time zone");
             entity.Property(e => e.order_request_date).HasColumnType("timestamp without time zone");
-
             entity.Property(e => e.product_name).HasMaxLength(200);
-            entity.Property(e => e.order_id);
+            entity.Property(e => e.product_type).HasMaxLength(50);
+            entity.Property(e => e.number_of_plates).HasDefaultValue(0);
+            entity.Property(e => e.coating_type).HasMaxLength(20).HasDefaultValue("NONE");
+            entity.Property(e => e.has_lamination).HasDefaultValue(false);
+
             entity.HasOne(d => d.order)
-      .WithMany()                 
-      .HasForeignKey(d => d.order_id)
-      .OnDelete(DeleteBehavior.SetNull)
-      .HasConstraintName("fk_order_request_order");
+                .WithMany()
+                .HasForeignKey(d => d.order_id)
+                .OnDelete(DeleteBehavior.SetNull)
+                .HasConstraintName("fk_order_request_order");
         });
 
         modelBuilder.Entity<product_type>(entity =>
         {
             entity.HasKey(e => e.product_type_id).HasName("product_types_pkey");
-
             entity.HasIndex(e => e.code, "product_types_code_key").IsUnique();
-
             entity.Property(e => e.code).HasMaxLength(50);
             entity.Property(e => e.is_active).HasDefaultValue(true);
             entity.Property(e => e.name).HasMaxLength(100);
@@ -275,14 +266,13 @@ public partial class AppDbContext : DbContext
         modelBuilder.Entity<product_type_process>(entity =>
         {
             entity.HasKey(e => e.process_id).HasName("product_type_process_pkey");
-
             entity.ToTable("product_type_process");
-
             entity.Property(e => e.is_active).HasDefaultValue(true);
             entity.Property(e => e.machine).HasMaxLength(50);
             entity.Property(e => e.process_name).HasMaxLength(100);
 
-            entity.HasOne(d => d.product_type).WithMany(p => p.product_type_processes)
+            entity.HasOne(d => d.product_type)
+                .WithMany(p => p.product_type_processes)
                 .HasForeignKey(d => d.product_type_id)
                 .OnDelete(DeleteBehavior.ClientSetNull)
                 .HasConstraintName("product_type_process_product_type_id_fkey");
@@ -486,24 +476,63 @@ public partial class AppDbContext : DbContext
         modelBuilder.Entity<cost_estimate>(entity =>
         {
             entity.HasKey(e => e.estimate_id).HasName("cost_estimate_pkey");
-
             entity.ToTable("cost_estimate", "AMMS_DB");
 
-            entity.Property(e => e.base_cost).HasPrecision(15, 2);
-            entity.Property(e => e.rush_percent).HasPrecision(5, 2);
-            entity.Property(e => e.rush_amount).HasPrecision(15, 2);
-            entity.Property(e => e.system_total_cost).HasPrecision(15, 2);
-
+            // Chi phí giấy
+            entity.Property(e => e.paper_cost).HasPrecision(18, 2);
+            entity.Property(e => e.paper_sheets_used).HasDefaultValue(0);
+            entity.Property(e => e.paper_unit_price).HasPrecision(18, 2).HasDefaultValue(0);
+            // Chi phí mực
+            entity.Property(e => e.ink_cost).HasPrecision(18, 2).HasDefaultValue(0);
+            entity.Property(e => e.ink_weight_kg).HasPrecision(18, 4).HasDefaultValue(0);
+            entity.Property(e => e.ink_rate_per_m2).HasPrecision(18, 6).HasDefaultValue(0);
+            // Chi phí keo phủ
+            entity.Property(e => e.coating_glue_cost).HasPrecision(18, 2).HasDefaultValue(0);
+            entity.Property(e => e.coating_glue_weight_kg).HasPrecision(18, 4).HasDefaultValue(0);
+            entity.Property(e => e.coating_glue_rate_per_m2).HasPrecision(18, 6).HasDefaultValue(0);
+            entity.Property(e => e.coating_type).HasMaxLength(20).HasDefaultValue("NONE");
+            // Chi phí keo bồi
+            entity.Property(e => e.mounting_glue_cost).HasPrecision(18, 2).HasDefaultValue(0);
+            entity.Property(e => e.mounting_glue_weight_kg).HasPrecision(18, 4).HasDefaultValue(0);
+            entity.Property(e => e.mounting_glue_rate_per_m2).HasPrecision(18, 6).HasDefaultValue(0);
+            // Chi phí màng
+            entity.Property(e => e.lamination_cost).HasPrecision(18, 2).HasDefaultValue(0);
+            entity.Property(e => e.lamination_weight_kg).HasPrecision(18, 4).HasDefaultValue(0);
+            entity.Property(e => e.lamination_rate_per_m2).HasPrecision(18, 6).HasDefaultValue(0);
+            // Tổng vật liệu
+            entity.Property(e => e.material_cost).HasPrecision(18, 2).HasDefaultValue(0);
+            // Khấu hao (5%)
+            entity.Property(e => e.overhead_percent).HasPrecision(5, 2).HasDefaultValue(5);
+            entity.Property(e => e.overhead_cost).HasPrecision(18, 2).HasDefaultValue(0);
+            // Chi phí cơ bản
+            entity.Property(e => e.base_cost).HasPrecision(18, 2);
+            // Rush order
+            entity.Property(e => e.is_rush).HasDefaultValue(false);
+            entity.Property(e => e.rush_percent).HasPrecision(5, 2).HasDefaultValue(0);
+            entity.Property(e => e.rush_amount).HasPrecision(18, 2).HasDefaultValue(0);
+            entity.Property(e => e.days_early).HasDefaultValue(0);
+            // Subtotal
+            entity.Property(e => e.subtotal).HasPrecision(18, 2).HasDefaultValue(0);
+            // Chiết khấu
+            entity.Property(e => e.discount_percent).HasPrecision(5, 2).HasDefaultValue(0);
+            entity.Property(e => e.discount_amount).HasPrecision(18, 2).HasDefaultValue(0);
+            // Tổng cuối
+            entity.Property(e => e.final_total_cost).HasPrecision(18, 2).HasDefaultValue(0);
+            // Timestamps
             entity.Property(e => e.created_at)
                 .HasDefaultValueSql("CURRENT_TIMESTAMP")
                 .HasColumnType("timestamp without time zone");
-
             entity.Property(e => e.estimated_finish_date)
                 .HasColumnType("timestamp without time zone");
-
             entity.Property(e => e.desired_delivery_date)
                 .HasColumnType("timestamp without time zone");
-
+            // Chi tiết giấy
+            entity.Property(e => e.sheets_required).HasDefaultValue(0);
+            entity.Property(e => e.sheets_waste).HasDefaultValue(0);
+            entity.Property(e => e.sheets_total).HasDefaultValue(0);
+            // Diện tích
+            entity.Property(e => e.total_area_m2).HasPrecision(18, 4).HasDefaultValue(0);
+            // Navigation
             entity.HasOne(d => d.order_request)
                 .WithMany()
                 .HasForeignKey(d => d.order_request_id)

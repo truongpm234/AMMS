@@ -14,7 +14,7 @@ namespace AMMS.API.Controllers
             _productTypeService = productTypeService;
         }
 
-        [HttpGet]
+        [HttpGet("Get-All-Product-Types")]
         public async Task<IActionResult> GetAllProductTypes()
         {
             var productTypes = await _productTypeService.GetAllAsync();
