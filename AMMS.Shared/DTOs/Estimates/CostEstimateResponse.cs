@@ -71,6 +71,6 @@ namespace AMMS.Shared.DTOs.Estimates
         /// <summary>
         /// Chi tiết chi phí từng công đoạn
         /// </summary>
-        public List<ProcessCostDetail> process_details { get; set; } = new();
+        public List<MaterialCostDetail> material_cost_details { get; set; } = new();
     }
 }

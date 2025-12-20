@@ -679,7 +679,7 @@ namespace AMMS.Application.Services
                 total_area_m2 = Math.Round(totalAreaM2, 4),
 
                 // Chi tiết công đoạn
-                process_details = BuildProcessDetails(
+                material_cost_details = BuildProcessDetails(
                     paperCost, paperSheetsUsed, paperUnitPrice,
                     materialCosts, coatingType
                 )
@@ -688,79 +688,79 @@ namespace AMMS.Application.Services
             return response;
         }
 
-        private List<ProcessCostDetail> BuildProcessDetails(
+        private List<MaterialCostDetail> BuildProcessDetails(
             decimal paperCost,
             int paperSheetsUsed,
             decimal paperUnitPrice,
             MaterialCostResult materialCosts,
             CoatingType coatingType)
         {
-            var details = new List<ProcessCostDetail>();
+            var details = new List<MaterialCostDetail>();
 
-            // Giấy
-            details.Add(new ProcessCostDetail
+            // 1) Giấy (tờ)
+            details.Add(new MaterialCostDetail
             {
-                process_name = "Giấy",
-                waste_sheets = paperSheetsUsed,
-                material_used_kg = 0,
-                unit_price = paperUnitPrice,
-                total_cost = paperCost,
+                material_name = "Giấy",
+                quantity = paperSheetsUsed,
+                unit = "tờ",
+                unit_price = Math.Round(paperUnitPrice, 0),
+                total_cost = Math.Round(paperCost, 0),
                 note = $"Sử dụng {paperSheetsUsed} tờ"
             });
 
-            // Mực in
+            // 2) Mực in (kg)
             if (materialCosts.InkCost > 0)
             {
-                details.Add(new ProcessCostDetail
+                details.Add(new MaterialCostDetail
                 {
-                    process_name = "Mực in",
-                    waste_sheets = 0,
-                    material_used_kg = materialCosts.InkWeightKg,
-                    unit_price = MaterialPrices.INK_PRICE_PER_KG,
-                    total_cost = materialCosts.InkCost,
+                    material_name = "Mực in",
+                    quantity = Math.Round(materialCosts.InkWeightKg, 4),
+                    unit = "kg",
+                    unit_price = Math.Round(MaterialPrices.INK_PRICE_PER_KG, 0),
+                    total_cost = Math.Round(materialCosts.InkCost, 0),
                     note = $"Định mức: {materialCosts.InkRate:F6} kg/m²"
                 });
             }
 
-            // Keo phủ
+            // 3) Keo phủ (kg)
             if (materialCosts.CoatingGlueCost > 0)
             {
-                details.Add(new ProcessCostDetail
+                details.Add(new MaterialCostDetail
                 {
-                    process_name = $"Keo phủ ({coatingType})",
-                    waste_sheets = 0,
-                    material_used_kg = materialCosts.CoatingGlueWeightKg,
-                    unit_price = MaterialPrices.GetCoatingGluePrice(coatingType),
-                    total_cost = materialCosts.CoatingGlueCost,
+                    material_name = $"Keo phủ ({coatingType})",
+                    quantity = Math.Round(materialCosts.CoatingGlueWeightKg, 4),
+                    unit = "kg",
+                    unit_price = Math.Round(MaterialPrices.GetCoatingGluePrice(coatingType), 0),
+                    total_cost = Math.Round(materialCosts.CoatingGlueCost, 0),
                     note = $"Định mức: {materialCosts.CoatingGlueRate:F6} kg/m²"
                 });
             }
 
-            // Keo bồi
+            // 4) Keo bồi (kg)
             if (materialCosts.MountingGlueCost > 0)
             {
-                details.Add(new ProcessCostDetail
+                details.Add(new MaterialCostDetail
                 {
-                    process_name = "Keo bồi",
-                    waste_sheets = 0,
-                    material_used_kg = materialCosts.MountingGlueWeightKg,
-                    unit_price = MaterialPrices.MOUNTING_GLUE_PER_KG,
-                    total_cost = materialCosts.MountingGlueCost,
+                    material_name = "Keo bồi",
+                    quantity = Math.Round(materialCosts.MountingGlueWeightKg, 4),
+                    unit = "kg",
+                    unit_price = Math.Round(MaterialPrices.MOUNTING_GLUE_PER_KG, 0),
+                    total_cost = Math.Round(materialCosts.MountingGlueCost, 0),
                     note = $"Định mức: {materialCosts.MountingGlueRate:F6} kg/m²"
                 });
             }
 
-            // Màng cán
+            // 5) Màng cán (kg)
             if (materialCosts.LaminationCost > 0)
             {
-                details.Add(new ProcessCostDetail
+                details.Add(new MaterialCostDetail
                 {
-                    process_name = "Màng cán",
-                    waste_sheets = 0,
-                    material_used_kg = materialCosts.LaminationWeightKg,
-                    unit_price = MaterialPrices.LAMINATION_PER_KG,
-                    total_cost = materialCosts.LaminationCost,
-                    note = $"Định mức: {materialCosts.LaminationRate:F6} kg/m² (12g màng + 5g keo)"
+                    material_name = "Màng cán",
+                    quantity = Math.Round(materialCosts.LaminationWeightKg, 4),
+                    unit = "kg",
+                    unit_price = Math.Round(MaterialPrices.LAMINATION_PER_KG, 0),
+                    total_cost = Math.Round(materialCosts.LaminationCost, 0),
+                    note = $"Định mức: {materialCosts.LaminationRate:F6} kg/m²"
                 });
             }
 
@@ -797,6 +797,7 @@ namespace AMMS.Application.Services
 
             await _estimateRepo.SaveChangesAsync();
         }
+
 
         public async Task<cost_estimate?> GetEstimateByIdAsync(int estimateId)
         {

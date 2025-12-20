@@ -1,4 +1,6 @@
-﻿using AMMS.Application.Interfaces;
+﻿using AMMS.Application.Helpers;
+using AMMS.Application.Interfaces;
+using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using Microsoft.Extensions.Configuration;
 
@@ -8,107 +10,140 @@ namespace AMMS.Application.Services
     {
         private readonly IRequestRepository _requestRepo;
         private readonly ICostEstimateRepository _estimateRepo;
+        private readonly IOrderRepository _orderRepo;
         private readonly IConfiguration _config;
         private readonly IEmailService _emailService;
 
         public DealService(
             IRequestRepository requestRepo,
             ICostEstimateRepository estimateRepo,
+            IOrderRepository orderRepo,
             IConfiguration config,
             IEmailService emailService)
         {
             _requestRepo = requestRepo;
             _estimateRepo = estimateRepo;
+            _orderRepo = orderRepo;
             _config = config;
             _emailService = emailService;
         }
 
+        // ================= SEND QUOTE =================
+
         public async Task SendDealAndEmailAsync(int orderRequestId)
         {
-            Console.WriteLine($"[DEAL] Start SendDealAndEmailAsync - OrderRequestId: {orderRequestId}");
+            var req = await _requestRepo.GetByIdAsync(orderRequestId)
+                ?? throw new Exception("Order request not found");
 
-            var order = await _requestRepo.GetByIdAsync(orderRequestId)
-                ?? throw new Exception("Order not found");
-
-            var estimate = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId)
+            var est = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId)
                 ?? throw new Exception("Estimate not found");
 
-            Console.WriteLine($"[DEAL] CustomerEmail: {order.customer_email}");
+            if (string.IsNullOrWhiteSpace(req.customer_email))
+                throw new Exception("Customer email missing");
 
-            var baseUrl = _config["Deal:BaseUrl"];
-            if (string.IsNullOrWhiteSpace(baseUrl))
-                throw new Exception("Deal:BaseUrl missing");
-
-            var token = Guid.NewGuid().ToString();
+            var baseUrl = _config["Deal:BaseUrl"]!;
+            var token = Guid.NewGuid().ToString("N");
 
             var acceptUrl = $"{baseUrl}/api/requests/deal/accept?orderRequestId={orderRequestId}&token={token}";
-            var rejectUrl = $"{baseUrl}/api/requests/deal/reject?orderRequestId={orderRequestId}&token={token}&reason=Khong%20dong%20y";
+            var rejectUrl = $"{baseUrl}/api/requests/deal/reject?orderRequestId={orderRequestId}&token={token}";
 
-            Console.WriteLine($"[DEAL] AcceptUrl: {acceptUrl}");
-            Console.WriteLine($"[DEAL] RejectUrl: {rejectUrl}");
+            var html = DealEmailTemplates.QuoteEmail(req, est, acceptUrl, rejectUrl);
 
-            var html = $@"
-<h3>BÁO GIÁ ĐƠN HÀNG</h3>
-<p>Sản phẩm: {order.product_name}</p>
-<p>Số lượng: {order.quantity}</p>
-<p><b>Giá đề xuất: {estimate.final_total_cost:N0} VND</b></p>
+            await _emailService.SendAsync(
+                req.customer_email,
+                "Báo giá đơn hàng in ấn",
+                html
+            );
 
-<a href='{acceptUrl}' style='padding:10px 15px;background:green;color:white;text-decoration:none'>
-   Đồng ý
-</a>
-
-<a href='{rejectUrl}' style='padding:10px 15px;background:red;color:white;text-decoration:none;margin-left:10px'>
-   Từ chối
-</a>
-";
-
-            // ✅ Chỉ gọi email service (không đọc Mailtrap/Smtp trong DealService nữa)
-            await _emailService.SendAsync(order.customer_email!, "Báo giá đơn hàng in ấn", html);
-
-            // ✅ Update status sau khi gửi thành công
-            order.process_status = "Waiting";
+            req.process_status = "Waiting";
             await _requestRepo.SaveChangesAsync();
-
-            Console.WriteLine("[DEAL] SendDealAndEmailAsync finished");
         }
+
+        // ================= ACCEPT =================
 
         public async Task AcceptDealAsync(int orderRequestId)
         {
-            Console.WriteLine($"[DEAL] AcceptDealAsync - OrderRequestId: {orderRequestId}");
+            var req = await _requestRepo.GetByIdAsync(orderRequestId)
+                ?? throw new Exception("Order request not found");
 
-            var order = await _requestRepo.GetByIdAsync(orderRequestId)
-                ?? throw new Exception("Order not found");
+            var est = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId)
+                ?? throw new Exception("Estimate not found");
 
-            order.process_status = "Accepted";
+            req.process_status = "Accepted";
 
-            var consultantEmail = _config["Deal:ConsultantEmail"]
-                ?? throw new Exception("Deal:ConsultantEmail missing");
+            order? order;
 
+            if (req.order_id.HasValue)
+            {
+                order = await _orderRepo.GetByIdAsync(req.order_id.Value)
+                    ?? throw new Exception("Order not found");
+            }
+            else
+            {
+                var code = await _orderRepo.GenerateNextOrderCodeAsync();
+
+                order = new order
+                {
+                    code = code,
+                    order_date = DateTime.Now,
+                    delivery_date = req.delivery_date,
+                    status = "New",
+                    payment_status = "Unpaid",
+                    total_amount = est.final_total_cost
+                };
+
+                await _orderRepo.AddOrderAsync(order);
+                await _orderRepo.SaveChangesAsync();
+
+                var item = new order_item
+                {
+                    order_id = order.order_id,
+                    product_name = req.product_name,
+                    quantity = (int)req.quantity,
+                    design_url = req.design_file_path
+                };
+
+                await _orderRepo.AddOrderItemAsync(item);
+
+                req.order_id = order.order_id;
+            }
+
+            // Email cho khách hàng
+            if (!string.IsNullOrWhiteSpace(req.customer_email))
+            {
+                var trackingUrl = $"{_config["Deal:BaseUrl"]}/track?code={order.code}";
+
+                await _emailService.SendAsync(
+                    req.customer_email,
+                    $"Đơn hàng {order.code} đã được phê duyệt",
+                    DealEmailTemplates.AcceptCustomerEmail(req, order, est, trackingUrl)
+                );
+            }
+
+            // Email cho consultant
             await _emailService.SendAsync(
-                consultantEmail,
+                _config["Deal:ConsultantEmail"]!,
                 "Khách hàng đã đồng ý báo giá",
-                $"<p>Order #{orderRequestId} đã được chấp nhận</p>"
+                DealEmailTemplates.AcceptConsultantEmail(req, order)
             );
 
+            await _orderRepo.SaveChangesAsync();
             await _requestRepo.SaveChangesAsync();
         }
 
+        // ================= REJECT =================
+
         public async Task RejectDealAsync(int orderRequestId, string reason)
         {
-            Console.WriteLine($"[DEAL] RejectDealAsync - OrderRequestId: {orderRequestId} - Reason: {reason}");
+            var req = await _requestRepo.GetByIdAsync(orderRequestId)
+                ?? throw new Exception("Order request not found");
 
-            var order = await _requestRepo.GetByIdAsync(orderRequestId)
-                ?? throw new Exception("Order not found");
-
-            order.process_status = "Rejected";
-
-            var consultantEmail = _config["Deal:ConsultantEmail"]
-                ?? throw new Exception("Deal:ConsultantEmail missing");
+            req.process_status = "Rejected";
 
             await _emailService.SendAsync(
-                consultantEmail,
+                _config["Deal:ConsultantEmail"]!,
                 "Khách hàng từ chối báo giá",
-                $"<p>Order #{orderRequestId} bị từ chối. Lý do: {reason}</p>"
+                $"<p>Request #{orderRequestId} bị từ chối. Lý do: {reason}</p>"
             );
 
             await _requestRepo.SaveChangesAsync();

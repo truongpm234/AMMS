@@ -1,5 +1,7 @@
 ﻿using AMMS.Application.Interfaces;
+using AMMS.Shared.DTOs.Email;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 using SendGrid;
 using SendGrid.Helpers.Mail;
 using System;
@@ -12,23 +14,21 @@ namespace AMMS.Application.Services
 {
     public class EmailService : IEmailService
     {
-        private readonly IConfiguration _config;
+        private readonly SendGridSettings _settings;
 
-        public EmailService(IConfiguration config)
+        public EmailService(IOptions<SendGridSettings> options)
         {
-            _config = config;
+            _settings = options.Value;
         }
 
         public async Task SendAsync(string toEmail, string subject, string htmlContent)
         {
-            var apiKey = _config["SendGrid:ApiKey"];
-            var client = new SendGridClient(apiKey);
+            if (string.IsNullOrWhiteSpace(_settings.ApiKey))
+                throw new Exception("SendGrid:ApiKey missing");
 
-            var from = new EmailAddress(
-                _config["SendGrid:FromEmail"],
-                _config["SendGrid:FromName"]
-            );
+            var client = new SendGridClient(_settings.ApiKey);
 
+            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
             var to = new EmailAddress(toEmail);
 
             var msg = MailHelper.CreateSingleEmail(
@@ -39,7 +39,13 @@ namespace AMMS.Application.Services
                 htmlContent: htmlContent
             );
 
-            await client.SendEmailAsync(msg);
+            var response = await client.SendEmailAsync(msg);
+
+            if ((int)response.StatusCode >= 400)
+            {
+                var body = await response.Body.ReadAsStringAsync();
+                throw new Exception($"SendGrid failed: {response.StatusCode} - {body}");
+            }
         }
     }
 }

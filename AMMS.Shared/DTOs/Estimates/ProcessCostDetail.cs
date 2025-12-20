@@ -6,13 +6,13 @@ using System.Threading.Tasks;
 
 namespace AMMS.Shared.DTOs.Estimates
 {
-    public class ProcessCostDetail
+    public class MaterialCostDetail
     {
-        public string process_name { get; set; } = null!;
-        public int waste_sheets { get; set; }
-        public decimal material_used_kg { get; set; }
+        public string material_name { get; set; } = null!;
+        public decimal quantity { get; set; }
+        public string unit { get; set; } = null!;
         public decimal unit_price { get; set; }
         public decimal total_cost { get; set; }
-        public string note { get; set; } = string.Empty;
+        public string? note { get; set; }
     }
 }
