@@ -97,12 +97,14 @@ namespace AMMS.API.Controllers
             return Ok("Bạn đã đồng ý báo giá. Nhân viên sẽ liên hệ sớm.");
         }
 
-        [HttpGet("deal/reject")]
-        public async Task<IActionResult> Reject([FromQuery] int orderRequestId, [FromQuery] string token, [FromQuery] string? reason)
+        [HttpPost("deal/reject")]
+        public async Task<IActionResult> RejectDeal([FromBody] RejectDealRequest body)
         {
-            await _dealService.RejectDealAsync(orderRequestId, reason ?? "No reason provided");
-            return Ok("Bạn đã từ chối báo giá.");
-        }
+            if (string.IsNullOrWhiteSpace(body.reason))
+                return BadRequest("reason is required");
 
+            await _dealService.RejectDealAsync(body.orderRequestId, body.reason);
+            return Ok(new { message = "Rejected" });
+        }
     }
 }

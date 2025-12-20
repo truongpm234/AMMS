@@ -29,6 +29,12 @@ namespace AMMS.Infrastructure.Repositories
         {
             return await _db.orders.FindAsync(id);
         }
+        public async Task<order?> GetByCodeAsync(string code)
+        {
+            return await _db.orders
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.code == code);
+        }
         public async Task DeleteAsync(int id)
         {
             var order = await GetByIdAsync(id);

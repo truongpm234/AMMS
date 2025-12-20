@@ -40,5 +40,12 @@ namespace AMMS.API.Controllers
             var data = await _materialService.GetAllPaperTypeAsync();
             return Ok(data);
         }
+
+        [HttpGet("get-all-form-type")]
+        public async Task<ActionResult<List<string>>> GetAllTypeFormAsync()
+        {
+            var data = await _materialService.GetAllTypeFormAsync();
+            return Ok(data);
+        }
     }
 }

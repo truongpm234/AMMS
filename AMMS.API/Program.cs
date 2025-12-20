@@ -83,6 +83,10 @@ builder.Services.AddScoped<IMachineRepository, MachineRepository>();
 builder.Services.AddScoped<IMaterialService, MaterialService>();
 builder.Services.AddScoped<IDealService, DealService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddScoped<IOrderService, OrderService>();
+builder.Services.AddScoped<IOrderRepository, OrderRepository>();
+
+
 // Logging
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();

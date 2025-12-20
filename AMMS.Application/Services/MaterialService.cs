@@ -40,5 +40,11 @@ namespace AMMS.Application.Services
             var result = Enum.GetNames(typeof(PaperCode)).ToList();
             return Task.FromResult(result);
         }
+
+        public Task<List<string>> GetAllTypeFormAsync()
+        {
+            var result = Enum.GetNames(typeof(ProductTypeCode)).ToList();
+            return Task.FromResult(result);
+        }
     }
 }
