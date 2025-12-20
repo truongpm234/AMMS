@@ -16,7 +16,7 @@ namespace AMMS.API.Controllers
             _materialService = materialService;
         }
 
-        [HttpGet("{id}")]
+        [HttpGet("get-material-by-{id}")]
         public async Task<IActionResult> GetMaterialById(int id)
         {
             var material = await _materialService.GetByIdAsync(id);
@@ -27,11 +27,25 @@ namespace AMMS.API.Controllers
             return Ok(material);
         }
 
-        [HttpGet("get-all")]
+        [HttpGet("get-all-materials")]
         public async Task<IActionResult> GetAllMaterials()
         {
             var materials = await _materialService.GetAllAsync();
             return Ok(materials);
+        }
+
+        [HttpGet("get-all-paper-type")]
+        public async Task<ActionResult<List<string>>> GetAllPaperTypeAsync()
+        {
+            var data = await _materialService.GetAllPaperTypeAsync();
+            return Ok(data);
+        }
+
+        [HttpGet("get-all-form-type")]
+        public async Task<ActionResult<List<string>>> GetAllTypeFormAsync()
+        {
+            var data = await _materialService.GetAllTypeFormAsync();
+            return Ok(data);
         }
     }
 }

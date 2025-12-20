@@ -1,7 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AMMS.Infrastructure.Entities;
+
+[Table("tasks", Schema = "AMMS_DB")]
 
 public partial class task
 {

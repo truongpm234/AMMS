@@ -12,6 +12,7 @@ namespace AMMS.Application.Interfaces
         Task<List<material>> GetAllAsync();
         Task<material?> GetByIdAsync(int id);
         Task UpdateAsync(material material);
-        
+        Task<List<string>> GetAllPaperTypeAsync();
+        Task<List<string>> GetAllTypeFormAsync();
     }
 }

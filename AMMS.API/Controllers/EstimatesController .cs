@@ -1,5 +1,6 @@
 ﻿using AMMS.Application.Interfaces;
 using AMMS.Shared.DTOs.Estimates;
+using AMMS.Shared.DTOs.Estimates.AMMS.Shared.DTOs.Estimates;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
@@ -34,9 +35,8 @@ namespace AMMS.API.Controllers
         [HttpPut("adjust-final-total-cost/{id}")]
         public async Task<IActionResult> AdjustCost(int id, [FromBody] AdjustCostRequest req)
         {
-            await _service.AdjustManualCostAsync(id, req.manual_adjust_cost, req.cost_note);
+            await _service.AdjustManualCostAsync(id, (decimal)req.discount_percent, req.cost_note);
             return NoContent();
         }
-
     }
 }

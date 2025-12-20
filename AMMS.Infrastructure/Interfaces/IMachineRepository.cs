@@ -1,4 +1,5 @@
-﻿using AMMS.Shared.DTOs.Estimates;
+﻿using AMMS.Infrastructure.Entities;
+using AMMS.Shared.DTOs.Estimates;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -13,5 +14,8 @@ namespace AMMS.Infrastructure.Interfaces
         Task<int> CountAllAsync();
         Task<int> CountActiveAsync();
         Task<int> CountRunningAsync();
+        Task<List<machine>> GetActiveMachinesAsync();
+        Task<List<machine>> GetMachinesByProcessAsync(string processName);
+        Task<Dictionary<string, decimal>> GetDailyCapacityByProcessAsync();
     }
 }

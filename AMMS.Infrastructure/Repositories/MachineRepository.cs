@@ -1,4 +1,5 @@
 ﻿using AMMS.Infrastructure.DBContext;
+using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Estimates;
 using Microsoft.EntityFrameworkCore;
@@ -49,5 +50,36 @@ public class MachineRepository : IMachineRepository
             .Select(t => t.machine)
             .Distinct()
             .CountAsync();
+
+    public async Task<List<machine>> GetActiveMachinesAsync()
+    {
+        return await _db.machines
+            .Where(m => m.is_active == true)
+            .ToListAsync();
+    }
+
+    public async Task<List<machine>> GetMachinesByProcessAsync(string processName)
+    {
+        return await _db.machines
+            .Where(m => m.process_name == processName && m.is_active == true)
+            .ToListAsync();
+    }
+
+    public async Task<Dictionary<string, decimal>> GetDailyCapacityByProcessAsync()
+    {
+        var result = await _db.machines
+            .Where(m => m.is_active == true)
+            .GroupBy(m => m.process_name)
+            .Select(g => new
+            {
+                ProcessName = g.Key,
+                DailyCapacity = g.Sum(m =>
+                    m.quantity * m.capacity_per_hour * m.working_hours_per_day * m.efficiency_percent / 100m
+                )
+            })
+            .ToDictionaryAsync(x => x.ProcessName, x => x.DailyCapacity);
+
+        return result;
+    }
 }
 

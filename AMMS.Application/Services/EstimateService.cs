@@ -1,38 +1,34 @@
 ﻿using AMMS.Application.Interfaces;
+using AMMS.Application.Rules;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
+using AMMS.Shared.DTOs.Delivery;
+using AMMS.Shared.DTOs.Discount;
 using AMMS.Shared.DTOs.Enums;
 using AMMS.Shared.DTOs.Estimates;
+using AMMS.Shared.DTOs.Estimates.AMMS.Shared.DTOs.Estimates;
+using AMMS.Shared.DTOs.Materials;
 
 namespace AMMS.Application.Services
 {
+    /// <summary>
+    /// Service ước lượng chi phí sản xuất với logic chi tiết
+    /// </summary>
     public class EstimateService : IEstimateService
     {
         private readonly IMaterialRepository _materialRepo;
         private readonly ICostEstimateRepository _estimateRepo;
+        private readonly IMachineRepository _machineRepo;
 
-        // Định mức vật liệu
-        private const decimal INK_RATE_GACH_NOI_DIA = 0.0003m; // kg/m2
-        private const decimal INK_RATE_HOP_MAU = 0.0009m; // kg/m2
-        private const decimal INK_RATE_GACH_NHIEU_MAU = 0.001m; // kg/m2
-        private const decimal COATING_GLUE_RATE = 0.004m; // kg/m2
-        private const decimal MOUNTING_GLUE_RATE = 0.004m; // kg/m2
-        private const decimal LAMINATION_RATE = 0.017m; // kg/m2 (12g màng + 5g keo)
-
-        // Giá vật liệu (VND)
-        private const decimal INK_PRICE_PER_KG = 150000m; // Giả định giá mực
-        private const decimal COATING_GLUE_PRICE_PER_KG = 80000m; // Giả định giá keo phủ
-        private const decimal MOUNTING_GLUE_PRICE_PER_KG = 60000m; // Giả định giá keo bồi
-        private const decimal LAMINATION_PRICE_PER_KG = 200000m; // Giả định giá màng
-
-        public EstimateService(IMaterialRepository materialRepo, ICostEstimateRepository costEstimateRepository)
+        public EstimateService(IMaterialRepository materialRepo, ICostEstimateRepository costEstimateRepository, IMachineRepository machineRepo)
         {
             _materialRepo = materialRepo;
             _estimateRepo = costEstimateRepository;
+            _machineRepo = machineRepo;
         }
 
         private static TEnum ParseEnum<TEnum>(string value, string fieldName)
-    where TEnum : struct, Enum
+            where TEnum : struct, Enum
         {
             if (string.IsNullOrWhiteSpace(value))
                 throw new ArgumentException($"{fieldName} is required");
@@ -42,361 +38,764 @@ namespace AMMS.Application.Services
 
             return result;
         }
+
+        /// <summary>
+        /// Resolve ProductTypeCode từ product_type và form_product
+        /// </summary>
+        private static ProductTypeCode ResolveProductType(string productType, string? formProduct)
+        {
+            // Nếu product_type là dạng chung (HOP_MAU hoặc VO_HOP_GACH)
+            if (productType.Equals("HOP_MAU", StringComparison.OrdinalIgnoreCase) ||
+                productType.Equals("VO_HOP_GACH", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(formProduct))
+                {
+                    throw new ArgumentException(
+                        $"form_product is required when product_type is '{productType}'. " +
+                        $"Please specify the detailed product form (e.g., HOP_MAU_1LUOT_DON_GIAN, GACH_NOI_DIA_4SP)");
+                }
+
+                // Parse form_product
+                return ParseEnum<ProductTypeCode>(formProduct, "form_product");
+            }
+
+            // Nếu product_type đã là giá trị cụ thể, parse trực tiếp
+            return ParseEnum<ProductTypeCode>(productType, "product_type");
+        }
+
         public async Task<PaperEstimateResponse> EstimatePaperAsync(PaperEstimateRequest req)
         {
-            // Validation
-            if (string.IsNullOrWhiteSpace(req.paper_code))
-                throw new ArgumentException("paper_code is required");
-            if (req.quantity <= 0)
-                throw new ArgumentException("quantity must be > 0");
-            if (req.length_mm < 0 || req.width_mm < 0 || req.height_mm < 0)
-                throw new ArgumentException("length_mm/width_mm/height_mm must be >= 0");
-            if (req.allowance_mm < 0 || req.bleed_mm < 0)
-                throw new ArgumentException("allowance_mm/bleed_mm must be >= 0");
+            // =====================
+            // 1. VALIDATION
+            // =====================
+            ValidateRequest(req);
 
-            var paper = await _materialRepo.GetByCodeAsync(req.paper_code)
-                ?? throw new KeyNotFoundException($"Paper not found: {req.paper_code}");
+            // =====================
+            // 2. LẤY THÔNG TIN GIẤY
+            // =====================
+            var paper = await GetPaperMaterial(req.paper_code);
+            int sheetW = paper.sheet_width_mm!.Value;
+            int sheetH = paper.sheet_height_mm!.Value;
 
-            if (paper.sheet_width_mm is null || paper.sheet_height_mm is null || paper.sheet_length_mm is null)
-                throw new InvalidOperationException("Missing sheet size in materials.");
+            // =====================
+            // 3. RESOLVE PRODUCT TYPE
+            // =====================
+            var productType = ResolveProductType(req.product_type, req.form_product);
 
-            int sheetW = paper.sheet_width_mm.Value;
-            int sheetH = paper.sheet_height_mm.Value;
-            int sheetL = paper.sheet_length_mm.Value;
+            // =====================
+            // 4. TÍNH KÍCH THƯỚC TRIỂN KHAI
+            // =====================
+            var (printW, printH) = CalculatePrintSize(req, productType);
 
-            // KÍCH THƯỚC KHI IN
-            // Chiều rộng in (W) = 2 * chu vi đáy + chừa gấp + chừa xén
-            int printW = 2 * (req.length_mm + req.width_mm) + req.allowance_mm + 2 * req.bleed_mm;
+            // =====================
+            // 5. TÍNH N-UP
+            // =====================
+            int nUp = CalculateNUp(sheetW, sheetH, printW, printH);
 
-            // Chiều cao in (H) = chiều cao hộp + chiều rộng hộp + chừa gấp + chừa xén
-            int printH = (req.height_mm + req.width_mm) + req.allowance_mm + 2 * req.bleed_mm;
-
-            int printL = req.length_mm + req.allowance_mm + 2 * req.bleed_mm;
-
-            // Kiểm tra khả năng in
-            bool fitWH = printW <= sheetW && printH <= sheetH;
-            bool fitHW = printH <= sheetW && printW <= sheetH;
-            bool fitWL = printW <= sheetW && printL <= sheetL;
-            bool fitLW = printL <= sheetW && printW <= sheetL;
-            bool fitHL = printH <= sheetW && printL <= sheetL;
-            bool fitLH = printL <= sheetW && printH <= sheetL;
-
-            if (!fitWH && !fitHW && !fitWL && !fitLW && !fitHL && !fitLH)
-                throw new InvalidOperationException("Print size does not fit paper in any orientation.");
-
-            // Tính N-up
-            int n_wh = fitWH ? (sheetW / printW) * (sheetH / printH) : 0;
-            int n_hw = fitHW ? (sheetW / printH) * (sheetH / printW) : 0;
-            int n_wl = fitWL ? (sheetW / printW) * (sheetL / printL) : 0;
-            int n_lw = fitLW ? (sheetW / printL) * (sheetL / printW) : 0;
-            int n_hl = fitHL ? (sheetW / printH) * (sheetL / printL) : 0;
-            int n_lh = fitLH ? (sheetW / printL) * (sheetL / printH) : 0;
-
-            int nUp = Math.Max(
-                Math.Max(n_wh, n_hw),
-                Math.Max(Math.Max(n_wl, n_lw), Math.Max(n_hl, n_lh))
-            );
-
-            if (nUp <= 0) nUp = 1;
-
-            // Số tờ cơ bản (không tính hao hụt)
+            // =====================
+            // 6. TÍNH SỐ TỜ CƠ BẢN
+            // =====================
             int sheetsBase = (int)Math.Ceiling(req.quantity / (decimal)nUp);
 
-            // TÍNH HAO HỤT THEO TỪNG CÔNG ĐOẠN
-            var productType = ParseEnum<ProductTypeCode>(req.product_type, "product_type");
-            var coatingType = ParseEnum<CoatingType>(req.coating_type ?? "NONE", "coating_type");
+            // =====================
+            // 7. TÍNH HAO HỤT THEO CÔNG ĐOẠN
+            // =====================
+            var wasteResult = CalculateWasteWithSmartScaling(req, sheetsBase, productType);
 
-            var processes = req.production_processes.Split(',', StringSplitOptions.RemoveEmptyEntries)
-                .Select(p => ParseEnum<ProcessType>(p.Trim(), "process"))
-                .ToList();
-
-
-            int wastePrinting = CalculatePrintingWaste(productType, req.number_of_plates);
-            int wasteDieCutting = processes.Contains(ProcessType.BE) ? CalculateProcessWaste(sheetsBase, ProcessType.BE) : 0;
-            int wasteMounting = processes.Contains(ProcessType.BOI) ? CalculateProcessWaste(sheetsBase, ProcessType.BOI) : 0;
-            int wasteCoating = processes.Contains(ProcessType.PHU) ? CalculateCoatingWaste(sheetsBase, coatingType) : 0;
-            int wasteLamination = processes.Contains(ProcessType.CAN_MANG) ? CalculateLaminationWaste(sheetsBase) : 0;
-            int wasteGluing = processes.Contains(ProcessType.DAN) ? CalculateGluingWaste(req.quantity) : 0;
-
-            int totalWaste = wastePrinting + wasteDieCutting + wasteMounting + wasteCoating + wasteLamination + wasteGluing;
-
-            int sheetsWithWaste = sheetsBase + totalWaste;
-            decimal wastePercent = sheetsBase > 0 ? (totalWaste / (decimal)sheetsBase) * 100m : 0m;
+            // =====================
+            // 8. CẢNH BÁO ĐƠN NHỎ
+            // =====================
+            string? warningMessage = GenerateWarningMessage(sheetsBase, wasteResult.TotalWaste);
 
             return new PaperEstimateResponse
             {
                 paper_code = paper.code,
                 sheet_width_mm = sheetW,
                 sheet_height_mm = sheetH,
-                sheet_length_mm = sheetL,
                 print_width_mm = printW,
                 print_height_mm = printH,
-                print_length_mm = printL,
                 n_up = nUp,
                 quantity = req.quantity,
                 sheets_base = sheetsBase,
-                waste_printing = wastePrinting,
-                waste_die_cutting = wasteDieCutting,
-                waste_mounting = wasteMounting,
-                waste_coating = wasteCoating,
-                waste_lamination = wasteLamination,
-                waste_gluing = wasteGluing,
-                total_waste = totalWaste,
-                sheets_with_waste = sheetsWithWaste,
-                waste_percent = Math.Round(wastePercent, 2)
+                waste_printing = wasteResult.WastePrinting,
+                waste_die_cutting = wasteResult.WasteDieCutting,
+                waste_mounting = wasteResult.WasteMounting,
+                waste_coating = wasteResult.WasteCoating,
+                waste_lamination = wasteResult.WasteLamination,
+                waste_gluing = wasteResult.WasteGluing,
+                total_waste = wasteResult.TotalWaste,
+                sheets_with_waste = sheetsBase + wasteResult.TotalWaste,
+                waste_percent = Math.Round(wasteResult.WastePercent, 2),
+                warning_message = warningMessage
             };
-        }
-
-        private int CalculatePrintingWaste(ProductTypeCode productType, int numberOfPlates)
-        {
-            int baseWaste = productType switch
-            {
-                ProductTypeCode.GACH_1MAU => 50,
-                ProductTypeCode.GACH_XUAT_KHAU_DON_GIAN => 120,
-                ProductTypeCode.GACH_XUAT_KHAU_TERACON => 200,
-                ProductTypeCode.GACH_NOI_DIA_4SP => 150,
-                ProductTypeCode.GACH_NOI_DIA_6SP => 180,
-
-                ProductTypeCode.HOP_MAU_1LUOT_DON_GIAN => 200,
-                ProductTypeCode.HOP_MAU_1LUOT_THUONG => 230,
-                ProductTypeCode.HOP_MAU_1LUOT_KHO => 250,
-                ProductTypeCode.HOP_MAU_AQUA_DOI => 450,
-                ProductTypeCode.HOP_MAU_2LUOT => 330,
-
-                _ => 200
-            };
-
-            if (productType.ToString().StartsWith("HOP_MAU") && numberOfPlates > 0)
-            {
-                baseWaste += numberOfPlates * 10;
-            }
-
-
-            // Thêm 10 tờ cho mỗi cao bản (chỉ áp dụng cho hộp màu)
-            if (productType.ToString().StartsWith("HOP_MAU") && numberOfPlates > 0)
-            {
-                baseWaste += numberOfPlates * 10;
-            }
-
-            return baseWaste;
-        }
-
-        private int CalculateProcessWaste(int sheets, ProcessType processType)
-        {
-            // Áp dụng cho cả BẾ và BỒI
-            if (sheets < 5000)
-                return 20;
-            else if (sheets < 20000)
-                return 30;
-            else if (sheets <= 40000)
-                return 40;
-            else
-                return 40;
-        }
-
-        private int CalculateCoatingWaste(int sheets, CoatingType coatingType)
-        {
-            if (coatingType == CoatingType.KEO_NUOC)
-                return 0;
-
-            if (coatingType == CoatingType.KEO_DAU)
-                return sheets < 10000 ? 20 : 30;
-
-            return 0;
-        }
-
-
-        private int CalculateLaminationWaste(int sheets)
-        {
-            return sheets < 10000 ? 20 : 30;
-        }
-
-        private int CalculateGluingWaste(int quantity)
-        {
-            // Dán: 20-30 hộp (tính theo sản phẩm, không phải tờ)
-            return 25; // Trung bình
         }
 
         public async Task<CostEstimateResponse> CalculateCostEstimateAsync(CostEstimateRequest req)
         {
-            if (req.paper == null)
-                throw new ArgumentException("Paper information is required");
+            // =====================
+            // 1. VALIDATION
+            // =====================
+            ValidateCostRequest(req);
 
-            if (req.paper.sheets_with_waste <= 0)
-                throw new ArgumentException("Sheets with waste must be greater than 0");
+            // =====================
+            // 2. LẤY THÔNG TIN GIẤY
+            // =====================
+            var paper = await GetPaperMaterial(req.paper.paper_code);
+            decimal paperUnitPrice = paper.cost_price!.Value;
 
-            // Lấy thông tin giấy
-            var paper = await _materialRepo.GetByCodeAsync(req.paper.paper_code)
-                ?? throw new KeyNotFoundException($"Paper not found: {req.paper.paper_code}");
-
-            if (paper.cost_price == null)
-                throw new InvalidOperationException($"Paper cost_price missing for {paper.code}");
-
-            // Tính diện tích (m2)
+            // =====================
+            // 3. TÍNH DIỆN TÍCH
+            // =====================
             decimal sheetAreaM2 = (req.paper.sheet_width_mm / 1000m) * (req.paper.sheet_height_mm / 1000m);
             decimal totalAreaM2 = sheetAreaM2 * req.paper.sheets_with_waste;
 
-            // Tính chi phí giấy
-            decimal paperCostPerSheet = paper.cost_price.Value;
-            decimal totalPaperCost = req.paper.sheets_with_waste * paperCostPerSheet;
+            // =====================
+            // 4. TÍNH CHI PHÍ GIẤY
+            // =====================
+            decimal paperCost = req.paper.sheets_with_waste * paperUnitPrice;
 
-            // Tính chi phí mực in
-            var productType = ParseEnum<ProductTypeCode>(req.product_type, "product_type");
-            decimal inkRate = GetInkRate(productType);
-            decimal inkWeightKg = totalAreaM2 * inkRate;
-            decimal inkCost = inkWeightKg * INK_PRICE_PER_KG;
-
-            // Tính chi phí keo phủ
-            decimal coatingGlueCost = 0m;
+            // =====================
+            // 5. RESOLVE PRODUCT TYPE & TÍNH CHI PHÍ VẬT LIỆU KHÁC
+            // =====================
+            var productType = ResolveProductType(req.product_type, req.form_product);
             var coatingType = ParseEnum<CoatingType>(req.coating_type ?? "NONE", "coating_type");
+            var processes = ParseProcesses(req.production_processes);
 
-            var processes = req.production_processes.Split(',', StringSplitOptions.RemoveEmptyEntries)
-                .Select(p => ParseEnum<ProcessType>(p.Trim(), "process"))
-                .ToList();
+            var materialCosts = CalculateMaterialCosts(
+                totalAreaM2,
+                productType,
+                coatingType,
+                processes,
+                req.has_lamination
+            );
 
+            // =====================
+            // 6. TỔNG VẬT LIỆU + KHẤU HAO
+            // =====================
+            decimal materialCost = paperCost + materialCosts.InkCost + materialCosts.CoatingGlueCost
+                                 + materialCosts.MountingGlueCost + materialCosts.LaminationCost;
 
-            if (processes.Contains(ProcessType.PHU) && coatingType != CoatingType.NONE)
-            {
-                (decimal rate, decimal price) = coatingType switch
-                {
-                    CoatingType.KEO_NUOC => (0.003m, 70000m),
-                    CoatingType.KEO_DAU => (0.004m, 80000m),
-                    _ => (0m, 0m)
-                };
-
-                coatingGlueCost = totalAreaM2 * rate * price;
-            }
-
-            // Tính chi phí keo bồi
-            decimal mountingGlueCost = 0m;
-            if (processes.Contains(ProcessType.BOI))
-            {
-                decimal mountingGlueWeightKg = totalAreaM2 * MOUNTING_GLUE_RATE;
-                mountingGlueCost = mountingGlueWeightKg * MOUNTING_GLUE_PRICE_PER_KG;
-            }
-
-            // Tính chi phí màng
-            decimal laminationCost = 0m;
-            if (processes.Contains(ProcessType.CAN_MANG) || req.has_lamination)
-            {
-                decimal laminationWeightKg = totalAreaM2 * LAMINATION_RATE;
-                laminationCost = laminationWeightKg * LAMINATION_PRICE_PER_KG;
-            }
-
-            // Tổng chi phí vật liệu
-            decimal materialCost = totalPaperCost + inkCost + coatingGlueCost +
-                                 mountingGlueCost + laminationCost;
-
-            // Khấu hao máy móc + NVL khác (10% trên vật liệu)
-            decimal overheadCost = materialCost * 0.10m;
+            decimal overheadPercent = SystemParameters.OVERHEAD_PERCENT;
+            decimal overheadCost = materialCost * (overheadPercent / 100m);
             decimal baseCost = materialCost + overheadCost;
 
-            // Ngày hoàn thành dự kiến (5 ngày làm việc)
+            // =====================
+            // 7. RUSH ORDER
+            // =====================
+            var machines = await _machineRepo.GetActiveMachinesAsync();
+            int productionDays = ProductionTimeCalculator.CalculateProductionDays(
+                req.paper.sheets_with_waste,
+                req.paper.quantity,
+                processes,
+                machines
+            );
+
             var now = DateTime.UtcNow;
-            var estimatedFinish = now.AddDays(5);
+            var estimatedFinish = now.AddDays(productionDays);
+            var rushResult = CalculateRushCost(req.desired_delivery_date, estimatedFinish, baseCost);
 
-            bool isRush = false;
-            decimal rushPercent = 0m;
+            // =====================
+            // 8. SUBTOTAL
+            // =====================
+            decimal subtotal = baseCost + rushResult.RushAmount;
 
-            if (req.desired_delivery_date < estimatedFinish)
+            // =====================
+            // 9. CHIẾT KHẤU
+            // =====================
+            var discountResult = CalculateDiscount(subtotal, req.discount_percent);
+
+            decimal finalTotal = subtotal - discountResult.DiscountAmount;
+
+            await SaveCostEstimate(req, paperCost, paperUnitPrice, materialCosts, materialCost,
+                overheadPercent, overheadCost, baseCost, rushResult, subtotal, discountResult,
+                finalTotal, estimatedFinish, now, totalAreaM2, coatingType);
+
+            return BuildCostResponse(
+                paperCost, req.paper.sheets_with_waste, paperUnitPrice,
+                materialCosts, materialCost, overheadPercent, overheadCost,
+                baseCost, rushResult, subtotal, discountResult, finalTotal,
+                estimatedFinish, totalAreaM2, coatingType
+            );
+        }
+
+        // ==================== PRIVATE HELPER METHODS ====================
+
+        private void ValidateRequest(PaperEstimateRequest req)
+        {
+            if (string.IsNullOrWhiteSpace(req.paper_code))
+                throw new ArgumentException("paper_code is required");
+            if (req.quantity <= 0)
+                throw new ArgumentException("quantity must be > 0");
+            if (req.length_mm <= 0 || req.width_mm <= 0 || req.height_mm <= 0)
+                throw new ArgumentException("length_mm, width_mm, height_mm must be > 0");
+            if (req.bleed_mm < 0)
+                throw new ArgumentException("bleed_mm must be >= 0");
+
+            // Validate form_product nếu product_type là dạng chung
+            if (req.product_type.Equals("HOP_MAU", StringComparison.OrdinalIgnoreCase) ||
+                req.product_type.Equals("VO_HOP_GACH", StringComparison.OrdinalIgnoreCase))
             {
-                int daysEarly = (int)(estimatedFinish - req.desired_delivery_date).TotalDays;
-
-                if (daysEarly == 1)
+                if (string.IsNullOrWhiteSpace(req.form_product))
                 {
-                    isRush = true;
-                    rushPercent = 5m;
-                }
-                else if (daysEarly >= 2 && daysEarly <= 3)
-                {
-                    isRush = true;
-                    rushPercent = 20m;
-                }
-                else if (daysEarly >= 4)
-                {
-                    isRush = true;
-                    rushPercent = 40m;
+                    throw new ArgumentException(
+                        $"form_product is required when product_type is '{req.product_type}'");
                 }
             }
+        }
 
-            decimal rushAmount = baseCost * rushPercent / 100;
-            decimal systemTotalCost = baseCost + rushAmount;
+        private void ValidateCostRequest(CostEstimateRequest req)
+        {
+            if (req.paper == null)
+                throw new ArgumentException("Paper information is required");
+            if (req.paper.sheets_with_waste <= 0)
+                throw new ArgumentException("Sheets with waste must be greater than 0");
+            if (req.discount_percent < 0 || req.discount_percent > 100)
+                throw new ArgumentException("Discount percent must be between 0 and 100");
 
-            // Lưu vào database
+            // Validate form_product nếu product_type là dạng chung
+            if (req.product_type.Equals("HOP_MAU", StringComparison.OrdinalIgnoreCase) ||
+                req.product_type.Equals("VO_HOP_GACH", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(req.form_product))
+                {
+                    throw new ArgumentException(
+                        $"form_product is required when product_type is '{req.product_type}'");
+                }
+            }
+        }
+
+        private async Task<material> GetPaperMaterial(string paperCode)
+        {
+            var paper = await _materialRepo.GetByCodeAsync(paperCode)
+                ?? throw new KeyNotFoundException($"Paper not found: {paperCode}");
+
+            if (paper.sheet_width_mm is null || paper.sheet_height_mm is null)
+                throw new InvalidOperationException("Missing sheet size in materials.");
+
+            if (paper.cost_price is null)
+                throw new InvalidOperationException($"Paper cost_price missing for {paper.code}");
+
+            return paper;
+        }
+
+        private (int printW, int printH) CalculatePrintSize(PaperEstimateRequest req, ProductTypeCode productType)
+        {
+            int tabWidth = req.glue_tab_mm > 0 ? req.glue_tab_mm : 20;
+            bool isBoxProduct = productType.ToString().StartsWith("HOP_MAU");
+            bool isBrickProduct = productType.ToString().StartsWith("GACH_");
+
+            int printW, printH;
+
+            if (isBrickProduct)
+            {
+                // HỘP GẠCH (dạng tray)
+                printW = req.length_mm + 2 * req.height_mm + 2 * req.bleed_mm;
+                printH = req.width_mm + 2 * req.height_mm + 2 * req.bleed_mm;
+            }
+            else if (isBoxProduct)
+            {
+                // HỘP CARTON
+                printW = 2 * (req.length_mm + req.width_mm) + tabWidth + 2 * req.bleed_mm;
+
+                if (req.is_one_side_box)
+                    printH = req.width_mm + req.height_mm + 2 * req.bleed_mm;
+                else
+                    printH = (2 * req.width_mm + req.height_mm) + 2 * req.bleed_mm;
+            }
+            else
+            {
+                // Mặc định
+                printW = 2 * (req.length_mm + req.width_mm) + tabWidth + 2 * req.bleed_mm;
+                printH = (2 * req.width_mm + req.height_mm) + 2 * req.bleed_mm;
+            }
+
+            return (printW, printH);
+        }
+
+        private int CalculateNUp(int sheetW, int sheetH, int printW, int printH)
+        {
+            int n1 = (sheetW / printW) * (sheetH / printH);
+            int n2 = (sheetW / printH) * (sheetH / printW);
+            int nUp = Math.Max(n1, n2);
+
+            if (nUp <= 0)
+                throw new InvalidOperationException(
+                    $"Print size ({printW}×{printH}mm) does not fit paper sheet ({sheetW}×{sheetH}mm).");
+
+            return nUp;
+        }
+        
+
+        private WasteResult CalculateWasteWithSmartScaling(PaperEstimateRequest req, int sheetsBase, ProductTypeCode productType)
+        {
+            var coatingType = ParseEnum<CoatingType>(req.coating_type ?? "NONE", "coating_type");
+            var processes = ParseProcesses(req.production_processes);
+
+            // Tính hao hụt IN với smart scaling
+            int wastePrinting = CalculateSmartPrintingWaste(productType, req.number_of_plates, sheetsBase);
+
+            // Tính hao hụt các công đoạn khác
+            int wasteDieCutting = processes.Contains(ProcessType.BE)
+                ? CalculateSmartProcessWaste(sheetsBase, "BE")
+                : 0;
+
+            int wasteMounting = processes.Contains(ProcessType.BOI)
+                ? CalculateSmartProcessWaste(sheetsBase, "BOI")
+                : 0;
+
+            int wasteCoating = processes.Contains(ProcessType.PHU)
+                ? CalculateSmartCoatingWaste(sheetsBase, coatingType)
+                : 0;
+
+            int wasteLamination = processes.Contains(ProcessType.CAN_MANG)
+                ? CalculateSmartLaminationWaste(sheetsBase)
+                : 0;
+
+            int wasteGluing = processes.Contains(ProcessType.DAN)
+                ? WasteCalculationRules.GluingWaste.Calculate(req.quantity)
+                : 0;
+
+            int totalWaste = wastePrinting + wasteDieCutting + wasteMounting
+                           + wasteCoating + wasteLamination + wasteGluing;
+
+            decimal wastePercent = sheetsBase > 0
+                ? (totalWaste / (decimal)sheetsBase) * 100m
+                : 0m;
+
+            return new WasteResult
+            {
+                WastePrinting = wastePrinting,
+                WasteDieCutting = wasteDieCutting,
+                WasteMounting = wasteMounting,
+                WasteCoating = wasteCoating,
+                WasteLamination = wasteLamination,
+                WasteGluing = wasteGluing,
+                TotalWaste = totalWaste,
+                WastePercent = wastePercent
+            };
+        }
+
+        private int CalculateSmartPrintingWaste(ProductTypeCode productType, int numberOfPlates, int sheetsBase)
+        {
+            int standardWaste = WasteCalculationRules.PrintingWaste.GetBaseWaste(productType);
+
+            // Thêm cho cao bản
+            if (productType.ToString().StartsWith("HOP_MAU") && numberOfPlates > 0)
+            {
+                standardWaste += numberOfPlates * WasteCalculationRules.PrintingWaste.PER_PLATE;
+            }
+            return standardWaste;
+        }
+
+        private int CalculateSmartProcessWaste(int sheetsBase, string processType)
+        {
+            int standardWaste = processType == "BE"
+                ? WasteCalculationRules.DieCuttingWaste.Calculate(sheetsBase)
+                : WasteCalculationRules.MountingWaste.Calculate(sheetsBase);
+            return standardWaste;
+        }
+
+        private int CalculateSmartCoatingWaste(int sheetsBase, CoatingType coatingType)
+        {
+            int standardWaste = WasteCalculationRules.CoatingWaste.Calculate(sheetsBase, coatingType);
+
+            if (standardWaste == 0) return 0;
+            return standardWaste;
+        }
+
+        private int CalculateSmartLaminationWaste(int sheetsBase)
+        {
+            int standardWaste = WasteCalculationRules.LaminationWaste.Calculate(sheetsBase);
+            return standardWaste;
+        }
+
+        private string? GenerateWarningMessage(int sheetsBase, int totalWaste)
+        {
+            int sheetsWithWaste = sheetsBase + totalWaste;
+            decimal extraCostPercent = ((sheetsWithWaste - sheetsBase) / (decimal)sheetsBase) * 100m;
+
+            return $"⚠️ Đơn hàng nhỏ: Đơn hàng của bạn cần {sheetsBase} tờ, " +
+                   $"nhưng hao hụt là {totalWaste} tờ ({extraCostPercent:F0}%), " +
+                   $"tổng cộng {sheetsWithWaste} tờ.";
+        }
+
+        private MaterialCostResult CalculateMaterialCosts(decimal totalAreaM2, ProductTypeCode productType, CoatingType coatingType, List<ProcessType> processes, bool hasLamination)
+        {
+            var result = new MaterialCostResult();
+
+            // MỰC IN
+            result.InkRate = MaterialRates.InkRates.GetRate(productType);
+            result.InkWeightKg = totalAreaM2 * result.InkRate;
+            result.InkCost = result.InkWeightKg * MaterialPrices.INK_PRICE_PER_KG;
+
+            // KEO PHỦ
+            if (processes.Contains(ProcessType.PHU))
+            {
+                result.CoatingGlueRate = MaterialRates.CoatingGlueRates.GetRate(coatingType);
+                result.CoatingGlueWeightKg = totalAreaM2 * result.CoatingGlueRate;
+                result.CoatingGlueCost = result.CoatingGlueWeightKg *
+                    MaterialPrices.GetCoatingGluePrice(coatingType);
+            }
+
+            // KEO BỒI
+            if (processes.Contains(ProcessType.BOI))
+            {
+                result.MountingGlueRate = MaterialRates.MountingGlueRates.RATE;
+                result.MountingGlueWeightKg = totalAreaM2 * result.MountingGlueRate;
+                result.MountingGlueCost = result.MountingGlueWeightKg *
+                    MaterialPrices.MOUNTING_GLUE_PER_KG;
+            }
+
+            // MÀNG CÁN
+            if (processes.Contains(ProcessType.CAN_MANG) || hasLamination)
+            {
+                result.LaminationRate = MaterialRates.LaminationRates.RATE_12MIC;
+                result.LaminationWeightKg = totalAreaM2 * result.LaminationRate;
+                result.LaminationCost = result.LaminationWeightKg *
+                    MaterialPrices.LAMINATION_PER_KG;
+            }
+
+            return result;
+        }
+
+        private RushResult CalculateRushCost(DateTime desiredDate, DateTime estimatedFinish, decimal baseCost)
+        {
+            var result = new RushResult();
+
+            if (desiredDate >= estimatedFinish)
+                return result;
+
+            result.DaysEarly = (int)(estimatedFinish - desiredDate).TotalDays;
+
+            if (result.DaysEarly >= SystemParameters.RUSH_THRESHOLD_DAYS)
+            {
+                result.IsRush = true;
+                result.RushPercent = SystemParameters.GetRushPercent(result.DaysEarly);
+                result.RushAmount = baseCost * (result.RushPercent / 100m);
+            }
+
+            return result;
+        }
+
+        private DiscountResult CalculateDiscount(decimal subtotal, decimal discountPercent)
+        {
+            return new DiscountResult
+            {
+                DiscountPercent = Math.Max(0, Math.Min(100, discountPercent)),
+                DiscountAmount = subtotal * (discountPercent / 100m)
+            };
+        }
+
+        // ==================== PROCESS HELPERS ====================
+
+        private List<ProcessType> ParseProcesses(string productionProcesses)
+        {
+            return productionProcesses
+                .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                .Select(p => ParseEnum<ProcessType>(p.Trim(), "process"))
+                .ToList();
+        }
+
+        private async Task SaveCostEstimate(
+            CostEstimateRequest req,
+            decimal paperCost,
+            decimal paperUnitPrice,
+            MaterialCostResult materialCosts,
+            decimal materialCost,
+            decimal overheadPercent,
+            decimal overheadCost,
+            decimal baseCost,
+            RushResult rushResult,
+            decimal subtotal,
+            DiscountResult discountResult,
+            decimal finalTotal,
+            DateTime estimatedFinish,
+            DateTime now,
+            decimal totalAreaM2,
+            CoatingType coatingType)
+        {
             var entity = new cost_estimate
             {
                 order_request_id = req.order_request_id,
-                paper_cost = Math.Round(totalPaperCost, 2),
-                ink_cost = Math.Round(inkCost, 2),
-                coating_glue_cost = Math.Round(coatingGlueCost, 2),
-                mounting_glue_cost = Math.Round(mountingGlueCost, 2),
-                lamination_cost = Math.Round(laminationCost, 2),
+
+                // Chi phí giấy
+                paper_cost = Math.Round(paperCost, 2),
+                paper_sheets_used = req.paper.sheets_with_waste,
+                paper_unit_price = Math.Round(paperUnitPrice, 2),
+
+                // Chi phí mực
+                ink_cost = Math.Round(materialCosts.InkCost, 2),
+                ink_weight_kg = Math.Round(materialCosts.InkWeightKg, 4),
+                ink_rate_per_m2 = Math.Round(materialCosts.InkRate, 6),
+
+                // Chi phí keo phủ
+                coating_glue_cost = Math.Round(materialCosts.CoatingGlueCost, 2),
+                coating_glue_weight_kg = Math.Round(materialCosts.CoatingGlueWeightKg, 4),
+                coating_glue_rate_per_m2 = Math.Round(materialCosts.CoatingGlueRate, 6),
+                coating_type = coatingType.ToString(),
+
+                // Chi phí keo bồi
+                mounting_glue_cost = Math.Round(materialCosts.MountingGlueCost, 2),
+                mounting_glue_weight_kg = Math.Round(materialCosts.MountingGlueWeightKg, 4),
+                mounting_glue_rate_per_m2 = Math.Round(materialCosts.MountingGlueRate, 6),
+
+                // Chi phí màng
+                lamination_cost = Math.Round(materialCosts.LaminationCost, 2),
+                lamination_weight_kg = Math.Round(materialCosts.LaminationWeightKg, 4),
+                lamination_rate_per_m2 = Math.Round(materialCosts.LaminationRate, 6),
+
+                // Tổng vật liệu và khấu hao
                 material_cost = Math.Round(materialCost, 2),
-                overhead_percent = 10m,
+                overhead_percent = overheadPercent,
                 overhead_cost = Math.Round(overheadCost, 2),
+
+                // Chi phí cơ bản
                 base_cost = Math.Round(baseCost, 2),
-                is_rush = isRush,
-                rush_percent = rushPercent,
-                rush_amount = Math.Round(rushAmount, 2),
-                system_total_cost = Math.Round(systemTotalCost, 2),
-                manual_adjust_cost = 0m,
-                final_total_cost = Math.Round(systemTotalCost, 2),
-                cost_note = null,
+
+                // Rush order
+                is_rush = rushResult.IsRush,
+                rush_percent = rushResult.RushPercent,
+                rush_amount = Math.Round(rushResult.RushAmount, 2),
+                days_early = rushResult.DaysEarly,
+
+                // Subtotal
+                subtotal = Math.Round(subtotal, 2),
+
+                // Chiết khấu
+                discount_percent = discountResult.DiscountPercent,
+                discount_amount = Math.Round(discountResult.DiscountAmount, 2),
+
+                // Tổng cuối
+                final_total_cost = Math.Round(finalTotal, 2),
+
+                // Thông tin khác
                 estimated_finish_date = DateTime.SpecifyKind(estimatedFinish, DateTimeKind.Unspecified),
                 desired_delivery_date = DateTime.SpecifyKind(req.desired_delivery_date, DateTimeKind.Unspecified),
                 created_at = DateTime.SpecifyKind(now, DateTimeKind.Unspecified),
+
+                // Chi tiết giấy
                 sheets_required = req.paper.sheets_base,
                 sheets_waste = req.paper.total_waste,
                 sheets_total = req.paper.sheets_with_waste,
+
+                // Diện tích
                 total_area_m2 = Math.Round(totalAreaM2, 4)
             };
 
             await _estimateRepo.AddAsync(entity);
             await _estimateRepo.SaveChangesAsync();
-
-            // Trả response
-            return new CostEstimateResponse
-            {
-                paper_cost = Math.Round(totalPaperCost, 2),
-                ink_cost = Math.Round(inkCost, 2),
-                coating_glue_cost = Math.Round(coatingGlueCost, 2),
-                mounting_glue_cost = Math.Round(mountingGlueCost, 2),
-                lamination_cost = Math.Round(laminationCost, 2),
-                material_cost = Math.Round(materialCost, 2),
-                overhead_cost = Math.Round(overheadCost, 2),
-                base_cost = Math.Round(baseCost, 2),
-                is_rush = isRush,
-                rush_percent = rushPercent,
-                rush_amount = Math.Round(rushAmount, 2),
-                system_total_cost = Math.Round(systemTotalCost, 2),
-                estimated_finish_date = DateTime.SpecifyKind(estimatedFinish, DateTimeKind.Utc)
-            };
         }
 
-        private decimal GetInkRate(ProductTypeCode productType)
+        // ==================== BUILD RESPONSE ====================
+
+        private CostEstimateResponse BuildCostResponse(
+            decimal paperCost,
+            int paperSheetsUsed,
+            decimal paperUnitPrice,
+            MaterialCostResult materialCosts,
+            decimal materialCost,
+            decimal overheadPercent,
+            decimal overheadCost,
+            decimal baseCost,
+            RushResult rushResult,
+            decimal subtotal,
+            DiscountResult discountResult,
+            decimal finalTotal,
+            DateTime estimatedFinish,
+            decimal totalAreaM2,
+            CoatingType coatingType)
         {
-            return productType switch
+            var response = new CostEstimateResponse
             {
-                ProductTypeCode.GACH_1MAU => INK_RATE_GACH_NOI_DIA,
-                ProductTypeCode.GACH_XUAT_KHAU_DON_GIAN => INK_RATE_GACH_NOI_DIA,
-                ProductTypeCode.GACH_XUAT_KHAU_TERACON => INK_RATE_GACH_NHIEU_MAU,
-                ProductTypeCode.GACH_NOI_DIA_4SP => INK_RATE_GACH_NHIEU_MAU,
-                ProductTypeCode.GACH_NOI_DIA_6SP => INK_RATE_GACH_NHIEU_MAU,
-                _ => INK_RATE_HOP_MAU
+                // Chi phí giấy
+                paper_cost = Math.Round(paperCost, 2),
+                paper_sheets_used = paperSheetsUsed,
+                paper_unit_price = Math.Round(paperUnitPrice, 2),
+
+                // Chi phí mực
+                ink_cost = Math.Round(materialCosts.InkCost, 2),
+                ink_weight_kg = Math.Round(materialCosts.InkWeightKg, 4),
+                ink_rate_per_m2 = Math.Round(materialCosts.InkRate, 6),
+                ink_unit_price = MaterialPrices.INK_PRICE_PER_KG,
+
+                // Chi phí keo phủ
+                coating_glue_cost = Math.Round(materialCosts.CoatingGlueCost, 2),
+                coating_glue_weight_kg = Math.Round(materialCosts.CoatingGlueWeightKg, 4),
+                coating_glue_rate_per_m2 = Math.Round(materialCosts.CoatingGlueRate, 6),
+                coating_glue_unit_price = MaterialPrices.GetCoatingGluePrice(coatingType),
+                coating_type = coatingType.ToString(),
+
+                // Chi phí keo bồi
+                mounting_glue_cost = Math.Round(materialCosts.MountingGlueCost, 2),
+                mounting_glue_weight_kg = Math.Round(materialCosts.MountingGlueWeightKg, 4),
+                mounting_glue_rate_per_m2 = Math.Round(materialCosts.MountingGlueRate, 6),
+                mounting_glue_unit_price = MaterialPrices.MOUNTING_GLUE_PER_KG,
+
+                // Chi phí màng
+                lamination_cost = Math.Round(materialCosts.LaminationCost, 2),
+                lamination_weight_kg = Math.Round(materialCosts.LaminationWeightKg, 4),
+                lamination_rate_per_m2 = Math.Round(materialCosts.LaminationRate, 6),
+                lamination_unit_price = MaterialPrices.LAMINATION_PER_KG,
+
+                // Tổng vật liệu
+                material_cost = Math.Round(materialCost, 2),
+
+                // Khấu hao
+                overhead_percent = overheadPercent,
+                overhead_cost = Math.Round(overheadCost, 2),
+
+                // Chi phí cơ bản
+                base_cost = Math.Round(baseCost, 2),
+
+                // Rush order
+                is_rush = rushResult.IsRush,
+                rush_percent = rushResult.RushPercent,
+                rush_amount = Math.Round(rushResult.RushAmount, 2),
+                days_early = rushResult.DaysEarly,
+
+                // Subtotal
+                subtotal = Math.Round(subtotal, 2),
+
+                // Chiết khấu
+                discount_percent = discountResult.DiscountPercent,
+                discount_amount = Math.Round(discountResult.DiscountAmount, 2),
+
+                // Tổng cuối
+                final_total_cost = Math.Round(finalTotal, 2),
+
+                // Thông tin khác
+                estimated_finish_date = DateTime.SpecifyKind(estimatedFinish, DateTimeKind.Utc),
+                total_area_m2 = Math.Round(totalAreaM2, 4),
+
+                // Chi tiết công đoạn
+                material_cost_details = BuildProcessDetails(
+                    paperCost, paperSheetsUsed, paperUnitPrice,
+                    materialCosts, coatingType
+                )
             };
+
+            return response;
         }
 
-        public async Task AdjustManualCostAsync(int estimateId, decimal adjustCost, string? note)
+        private List<MaterialCostDetail> BuildProcessDetails(
+            decimal paperCost,
+            int paperSheetsUsed,
+            decimal paperUnitPrice,
+            MaterialCostResult materialCosts,
+            CoatingType coatingType)
+        {
+            var details = new List<MaterialCostDetail>();
+
+            // 1) Giấy (tờ)
+            details.Add(new MaterialCostDetail
+            {
+                material_name = "Giấy",
+                quantity = paperSheetsUsed,
+                unit = "tờ",
+                unit_price = Math.Round(paperUnitPrice, 0),
+                total_cost = Math.Round(paperCost, 0),
+                note = $"Sử dụng {paperSheetsUsed} tờ"
+            });
+
+            // 2) Mực in (kg)
+            if (materialCosts.InkCost > 0)
+            {
+                details.Add(new MaterialCostDetail
+                {
+                    material_name = "Mực in",
+                    quantity = Math.Round(materialCosts.InkWeightKg, 4),
+                    unit = "kg",
+                    unit_price = Math.Round(MaterialPrices.INK_PRICE_PER_KG, 0),
+                    total_cost = Math.Round(materialCosts.InkCost, 0),
+                    note = $"Định mức: {materialCosts.InkRate:F6} kg/m²"
+                });
+            }
+
+            // 3) Keo phủ (kg)
+            if (materialCosts.CoatingGlueCost > 0)
+            {
+                details.Add(new MaterialCostDetail
+                {
+                    material_name = $"Keo phủ ({coatingType})",
+                    quantity = Math.Round(materialCosts.CoatingGlueWeightKg, 4),
+                    unit = "kg",
+                    unit_price = Math.Round(MaterialPrices.GetCoatingGluePrice(coatingType), 0),
+                    total_cost = Math.Round(materialCosts.CoatingGlueCost, 0),
+                    note = $"Định mức: {materialCosts.CoatingGlueRate:F6} kg/m²"
+                });
+            }
+
+            // 4) Keo bồi (kg)
+            if (materialCosts.MountingGlueCost > 0)
+            {
+                details.Add(new MaterialCostDetail
+                {
+                    material_name = "Keo bồi",
+                    quantity = Math.Round(materialCosts.MountingGlueWeightKg, 4),
+                    unit = "kg",
+                    unit_price = Math.Round(MaterialPrices.MOUNTING_GLUE_PER_KG, 0),
+                    total_cost = Math.Round(materialCosts.MountingGlueCost, 0),
+                    note = $"Định mức: {materialCosts.MountingGlueRate:F6} kg/m²"
+                });
+            }
+
+            // 5) Màng cán (kg)
+            if (materialCosts.LaminationCost > 0)
+            {
+                details.Add(new MaterialCostDetail
+                {
+                    material_name = "Màng cán",
+                    quantity = Math.Round(materialCosts.LaminationWeightKg, 4),
+                    unit = "kg",
+                    unit_price = Math.Round(MaterialPrices.LAMINATION_PER_KG, 0),
+                    total_cost = Math.Round(materialCosts.LaminationCost, 0),
+                    note = $"Định mức: {materialCosts.LaminationRate:F6} kg/m²"
+                });
+            }
+
+            return details;
+        }
+
+        public async Task AdjustManualCostAsync(int estimateId, decimal? discountPercent, string? note)
         {
             var estimate = await _estimateRepo.GetByIdAsync(estimateId)
                 ?? throw new Exception("Estimate not found");
 
-            estimate.manual_adjust_cost = adjustCost;
-            estimate.final_total_cost = adjustCost + (estimate.rush_amount);
+            var percent = discountPercent ?? 0m;
+
+            if (percent < 0m || percent > 100m)
+                throw new ArgumentException("discount_percent must be between 0 and 100");
+
+            decimal subtotal = estimate.subtotal;
+
+            if (subtotal <= 0m)
+            {
+                if (estimate.system_total_cost > 0m) subtotal = estimate.system_total_cost;
+                else subtotal = estimate.base_cost + estimate.rush_amount;
+            }
+
+            var discountAmount = Math.Round(subtotal * percent / 100m, 2);
+            var final = subtotal - discountAmount;
+            if (final < 0m) final = 0m;
+
+            estimate.discount_percent = percent;
+            estimate.discount_amount = discountAmount;
+            estimate.subtotal = subtotal;
+            estimate.final_total_cost = Math.Round(final, 2);
             estimate.cost_note = note;
 
             await _estimateRepo.SaveChangesAsync();
         }
 
+
+        public async Task<cost_estimate?> GetEstimateByIdAsync(int estimateId)
+        {
+            return await _estimateRepo.GetByIdAsync(estimateId);
+        }
+
+        public async Task<cost_estimate?> GetEstimateByOrderRequestIdAsync(int orderRequestId)
+        {
+            return await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId);
+        }
     }
 }

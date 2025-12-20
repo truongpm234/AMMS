@@ -1,0 +1,16 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace AMMS.Shared.DTOs.Email
+{
+    public class RejectDealRequest
+    {
+        public int orderRequestId { get; set; }
+        public string token { get; set; } = null!;
+        public string reason { get; set; } = null!;
+    }
+
+}

@@ -4,8 +4,10 @@ using AMMS.Application.Services;
 using AMMS.Infrastructure.Configurations;
 using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.FileStorage;
+using AMMS.Infrastructure.Interceptors;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Infrastructure.Repositories;
+using AMMS.Shared.DTOs.Email;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using System.Text.Json;
@@ -13,7 +15,7 @@ using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddDbContext<AppDbContext>(options =>
+builder.Services.AddDbContext<AppDbContext>((sp, options) =>
 {
     options.UseNpgsql(
         builder.Configuration.GetConnectionString("DefaultConnection"),
@@ -27,8 +29,10 @@ builder.Services.AddDbContext<AppDbContext>(options =>
                 errorCodesToAdd: null
             );
         });
+    options.AddInterceptors(
+        sp.GetRequiredService<CostEstimateRoundingInterceptor>()
+    );
 });
-
 
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
@@ -55,6 +59,10 @@ builder.Services.AddCors(options =>
 // Configuration
 builder.Services.Configure<CloudinaryOptions>(
     builder.Configuration.GetSection("Cloudinary"));
+builder.Services.Configure<SendGridSettings>(
+    builder.Configuration.GetSection("SendGrid"));
+builder.Services.AddSingleton<CostEstimateRoundingInterceptor>();
+
 
 // Services
 builder.Services.AddScoped<IUploadFileService, UploadFileService>();
@@ -73,6 +81,10 @@ builder.Services.AddScoped<IProductTypeRepository, ProductTypeRepository>();
 builder.Services.AddScoped<IProductTypeService, ProductTypeService>();
 builder.Services.AddScoped<IMachineRepository, MachineRepository>();
 builder.Services.AddScoped<IMaterialService, MaterialService>();
+builder.Services.AddScoped<IDealService, DealService>();
+builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddScoped<IOrderService, OrderService>();
+builder.Services.AddScoped<IOrderRepository, OrderRepository>();
 
 
 // Logging

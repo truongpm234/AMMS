@@ -9,7 +9,7 @@ namespace AMMS.Infrastructure.Entities;
 public partial class order_request
 {
     public int order_request_id { get; set; }
-
+     
     public string? customer_name { get; set; }
 
     public string? customer_phone { get; set; }

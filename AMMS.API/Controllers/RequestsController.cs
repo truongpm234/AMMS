@@ -1,24 +1,21 @@
 ﻿using AMMS.Application.Interfaces;
-using AMMS.Application.Services;
-using AMMS.Infrastructure.Entities;
-using AMMS.Infrastructure.Interfaces;
-using AMMS.Infrastructure.Repositories;
-using AMMS.Shared.DTOs.Common;
+using AMMS.Shared.DTOs.Email;
 using AMMS.Shared.DTOs.Requests;
 using Microsoft.AspNetCore.Mvc;
-using System.Text.Json;
 
 namespace AMMS.API.Controllers
 {
     [ApiController]
-    [Route("api/requests")]
+    [Route("api/[controller]")]
     public class RequestsController : ControllerBase
     {
         private readonly IRequestService _service;
+        private readonly IDealService _dealService;
 
-        public RequestsController(IRequestService service)
+        public RequestsController(IRequestService service, IDealService dealService)
         {
             _service = service;
+            _dealService = dealService;
         }
 
         [HttpPost]
@@ -42,7 +39,7 @@ namespace AMMS.API.Controllers
         public async Task<IActionResult> Delete(int id)
         {
             await _service.DeleteAsync(id);
-            return NoContent();           
+            return NoContent();
         }
 
         [HttpGet("{id:int}")]
@@ -54,18 +51,60 @@ namespace AMMS.API.Controllers
 
             return Ok(order);
         }
+
         [HttpGet("paged")]
         public async Task<IActionResult> GetPaged([FromQuery] int page, [FromQuery] int pageSize)
         {
             var result = await _service.GetPagedAsync(page, pageSize);
             return Ok(result);
         }
-        [HttpPost("{id:int}/convert-to-order")]
+
+        [HttpPost("convert-to-order-by-{id:int}")]
         public async Task<IActionResult> ConvertToOrder(int id)
         {
             var result = await _service.ConvertToOrderAsync(id);
             if (!result.Success) return BadRequest(result);
             return Ok(result);
+        }
+
+        [HttpPost("send-deal")]
+        public async Task<IActionResult> SendDealEmail([FromBody] SendDealEmailRequest req)
+        {
+            try
+            {
+                await _dealService.SendDealAndEmailAsync(req.RequestId);
+                return Ok(new { message = "Sent deal email", orderRequestId = req.RequestId });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("❌ SendDealEmail failed:");
+                Console.WriteLine(ex.Message);
+
+                return StatusCode(StatusCodes.Status502BadGateway, new
+                {
+                    message = "Send email failed",
+                    detail = ex.Message,
+                    orderRequestId = req.RequestId
+                });
+            }
+        }
+
+        [HttpGet("deal/accept")]
+        public async Task<IActionResult> Accept([FromQuery] int orderRequestId, [FromQuery] string token)
+        {
+            await _dealService.AcceptDealAsync(orderRequestId);
+            await _service.ConvertToOrderAsync(orderRequestId);
+            return Ok("Bạn đã đồng ý báo giá. Nhân viên sẽ liên hệ sớm.");
+        }
+
+        [HttpPost("deal/reject")]
+        public async Task<IActionResult> RejectDeal([FromBody] RejectDealRequest body)
+        {
+            if (string.IsNullOrWhiteSpace(body.reason))
+                return BadRequest("reason is required");
+
+            await _dealService.RejectDealAsync(body.orderRequestId, body.reason);
+            return Ok(new { message = "Rejected" });
         }
     }
 }

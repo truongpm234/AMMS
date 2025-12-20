@@ -38,15 +38,5 @@ namespace AMMS.Infrastructure.Repositories
             _db.cost_estimates.Update(entity);
             await Task.CompletedTask;
         }
-
-        public async Task UpdateSystemTotalCodeAsync(decimal costTotal, int id)
-        {
-            var costEstimate = await GetByIdAsync(id);
-            if (costEstimate != null)
-            {
-                costEstimate.system_total_cost = costTotal;
-                _db.cost_estimates.Update(costEstimate);
-            }
-        }
     }
 }

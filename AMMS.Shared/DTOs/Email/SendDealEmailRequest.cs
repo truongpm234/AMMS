@@ -4,11 +4,10 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace AMMS.Shared.DTOs.Enums
+namespace AMMS.Shared.DTOs.Email
 {
-    public enum CoatingType
+    public class SendDealEmailRequest
     {
-        KEO_NUOC,
-        KEO_DAU
+        public int RequestId { get; set; }
     }
 }
