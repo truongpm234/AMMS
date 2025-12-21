@@ -37,7 +37,6 @@ namespace AMMS.Infrastructure.Interceptors
                 x.subtotal = R(x.subtotal);
                 x.discount_amount = R(x.discount_amount);
 
-                x.system_total_cost = R(x.system_total_cost);
                 x.final_total_cost = R(x.final_total_cost);
             }
         }

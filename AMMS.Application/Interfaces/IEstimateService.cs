@@ -13,7 +13,7 @@ namespace AMMS.Application.Interfaces
     {
         Task<PaperEstimateResponse> EstimatePaperAsync(PaperEstimateRequest req);
         Task<CostEstimateResponse> CalculateCostEstimateAsync(CostEstimateRequest req);
-        Task AdjustManualCostAsync(int estimateId, decimal? discountPercent, string? note);      
+        Task AdjustCostBaseOnDiscountAsync(int estimateId, decimal? discountPercent, string? note);      
         Task<cost_estimate?> GetEstimateByIdAsync(int estimateId);
         Task<cost_estimate?> GetEstimateByOrderRequestIdAsync(int orderRequestId);
     }

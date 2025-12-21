@@ -7,7 +7,6 @@ using AMMS.Shared.DTOs.Discount;
 using AMMS.Shared.DTOs.Enums;
 using AMMS.Shared.DTOs.Estimates;
 using AMMS.Shared.DTOs.Estimates.AMMS.Shared.DTOs.Estimates;
-using AMMS.Shared.DTOs.Materials;
 
 namespace AMMS.Application.Services
 {
@@ -144,10 +143,19 @@ namespace AMMS.Application.Services
             decimal paperUnitPrice = paper.cost_price!.Value;
 
             // =====================
-            // 3. TÍNH DIỆN TÍCH
+            // 3. TÍNH DIỆN TÍCH - ✅ FIXED: DÙNG DIỆN TÍCH BẢN IN
             // =====================
-            decimal sheetAreaM2 = (req.paper.sheet_width_mm / 1000m) * (req.paper.sheet_height_mm / 1000m);
-            decimal totalAreaM2 = sheetAreaM2 * req.paper.sheets_with_waste;
+
+            // 3.1. Diện tích 1 BẢN IN (m²) - Phần thực tế được in
+            decimal printAreaM2 = (req.paper.print_width_mm / 1000m) * (req.paper.print_height_mm / 1000m);
+
+            // 3.2. Tổng diện tích BẢN IN = diện tích 1 bản × số lượng sản phẩm
+            // Dùng cho: Mực in, Keo phủ, Màng cán
+            decimal totalPrintAreaM2 = printAreaM2 * req.paper.quantity;
+
+            // 3.3. (Tùy chọn) Diện tích TỜ GIẤY - Nếu cần cho keo bồi
+            // decimal sheetAreaM2 = (req.paper.sheet_width_mm / 1000m) * (req.paper.sheet_height_mm / 1000m);
+            // decimal totalSheetAreaM2 = sheetAreaM2 * req.paper.sheets_with_waste;
 
             // =====================
             // 4. TÍNH CHI PHÍ GIẤY
@@ -161,8 +169,9 @@ namespace AMMS.Application.Services
             var coatingType = ParseEnum<CoatingType>(req.coating_type ?? "NONE", "coating_type");
             var processes = ParseProcesses(req.production_processes);
 
+            // ✅ DÙNG totalPrintAreaM2 thay vì totalAreaM2
             var materialCosts = CalculateMaterialCosts(
-                totalAreaM2,
+                totalPrintAreaM2,  // ← ✅ FIXED: Diện tích bản in
                 productType,
                 coatingType,
                 processes,
@@ -203,19 +212,18 @@ namespace AMMS.Application.Services
             // 9. CHIẾT KHẤU
             // =====================
             var discountResult = CalculateDiscount(subtotal, req.discount_percent);
-
             decimal finalTotal = subtotal - discountResult.DiscountAmount;
 
+            // ✅ LƯU: Dùng totalPrintAreaM2
             await SaveCostEstimate(req, paperCost, paperUnitPrice, materialCosts, materialCost,
                 overheadPercent, overheadCost, baseCost, rushResult, subtotal, discountResult,
-                finalTotal, estimatedFinish, now, totalAreaM2, coatingType);
+                finalTotal, estimatedFinish, now, totalPrintAreaM2, coatingType);
 
             return BuildCostResponse(
                 paperCost, req.paper.sheets_with_waste, paperUnitPrice,
                 materialCosts, materialCost, overheadPercent, overheadCost,
                 baseCost, rushResult, subtotal, discountResult, finalTotal,
-                estimatedFinish, totalAreaM2, coatingType
-            );
+                estimatedFinish, totalPrintAreaM2, coatingType);
         }
 
         // ==================== PRIVATE HELPER METHODS ====================
@@ -756,7 +764,7 @@ namespace AMMS.Application.Services
             return details;
         }
 
-        public async Task AdjustManualCostAsync(int estimateId, decimal? discountPercent, string? note)
+        public async Task AdjustCostBaseOnDiscountAsync(int estimateId, decimal? discountPercent, string? note)
         {
             var estimate = await _estimateRepo.GetByIdAsync(estimateId)
                 ?? throw new Exception("Estimate not found");
@@ -767,12 +775,6 @@ namespace AMMS.Application.Services
                 throw new ArgumentException("discount_percent must be between 0 and 100");
 
             decimal subtotal = estimate.subtotal;
-
-            if (subtotal <= 0m)
-            {
-                if (estimate.system_total_cost > 0m) subtotal = estimate.system_total_cost;
-                else subtotal = estimate.base_cost + estimate.rush_amount;
-            }
 
             var discountAmount = Math.Round(subtotal * percent / 100m, 2);
             var final = subtotal - discountAmount;
