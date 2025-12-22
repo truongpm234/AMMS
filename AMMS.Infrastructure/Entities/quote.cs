@@ -1,8 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AMMS.Infrastructure.Entities;
-
+[Table("quotes", Schema = "AMMS_DB")]
 public partial class quote
 {
     public int quote_id { get; set; }
@@ -15,7 +16,7 @@ public partial class quote
 
     public string? status { get; set; }
 
-    public DateTime? created_at { get; set; }
+    public DateTime created_at { get; set; } = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
     public virtual user? consultant { get; set; }
 

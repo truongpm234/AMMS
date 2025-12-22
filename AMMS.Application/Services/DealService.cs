@@ -49,8 +49,8 @@ namespace AMMS.Application.Services
                 // customer_id = req.customer_id,  
                 // consultant_id = req.consultant_id,
                 total_amount = est.final_total_cost,
-                status = "Sent",               
-                created_at = DateTime.UtcNow
+                status = "Sent",
+                created_at = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified)
             };
 
             await _quoteRepo.AddAsync(quote);
