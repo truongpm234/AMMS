@@ -1,4 +1,5 @@
 ﻿using AMMS.Application.Interfaces;
+using AMMS.Application.Services;
 using AMMS.Shared.DTOs.Estimates;
 using AMMS.Shared.DTOs.Estimates.AMMS.Shared.DTOs.Estimates;
 using Microsoft.AspNetCore.Http;
@@ -38,5 +39,13 @@ namespace AMMS.API.Controllers
             await _service.AdjustCostBaseOnDiscountAsync(id, (decimal)req.discount_percent, req.cost_note);
             return NoContent();
         }
+
+        [HttpPost("process-cost-breakdown")]
+        public async Task<IActionResult> ProcessCostBreakdown([FromBody] CostEstimateRequest req)
+        {
+            var res = await _service.CalculateProcessCostBreakdownAsync(req);
+            return Ok(res);
+        }
+
     }
 }

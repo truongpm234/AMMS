@@ -16,5 +16,7 @@ namespace AMMS.Application.Interfaces
         Task AdjustCostBaseOnDiscountAsync(int estimateId, decimal? discountPercent, string? note);      
         Task<cost_estimate?> GetEstimateByIdAsync(int estimateId);
         Task<cost_estimate?> GetEstimateByOrderRequestIdAsync(int orderRequestId);
+        Task<ProcessCostBreakdownResponse> CalculateProcessCostBreakdownAsync(CostEstimateRequest req);
+
     }
 }

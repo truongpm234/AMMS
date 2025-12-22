@@ -804,5 +804,117 @@ namespace AMMS.Application.Services
         {
             return await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId);
         }
+        private static decimal GetQuantityForProcess(
+    ProcessType p,
+    int sheetsWithWaste,
+    int productQuantity,
+    decimal totalPrintAreaM2)
+        {
+            return p switch
+            {
+                ProcessType.IN => totalPrintAreaM2,
+                ProcessType.PHU => totalPrintAreaM2,
+                ProcessType.CAN_MANG => totalPrintAreaM2,
+
+                ProcessType.BE => sheetsWithWaste,
+                ProcessType.BOI => sheetsWithWaste,
+                ProcessType.RALO => sheetsWithWaste,
+
+                ProcessType.DAN => productQuantity,
+                ProcessType.DOT => productQuantity,
+
+                ProcessType.DUT => 0,
+                ProcessType.CAT => 0,
+                _ => 0
+            };
+        }
+
+        private static bool IsProcessApplied(ProcessType p, List<ProcessType> selected, CoatingType coatingType, bool hasLamination)
+        {
+            
+            if (p == ProcessType.IN)
+                return selected.Contains(ProcessType.IN);
+
+            if (p == ProcessType.PHU)
+                return selected.Contains(ProcessType.PHU);
+
+            if (p == ProcessType.CAN_MANG)
+                return selected.Contains(ProcessType.CAN_MANG) || hasLamination;
+
+            if (p == ProcessType.DUT || p == ProcessType.CAT)
+                return selected.Contains(p); 
+
+            return selected.Contains(p);
+        }
+
+        private List<ProcessCostDetail> CalculateAllProcessCostDetails(
+    List<ProcessType> selectedProcesses,
+    CoatingType coatingType,
+    bool hasLamination,
+    int sheetsWithWaste,
+    int productQuantity,
+    decimal totalPrintAreaM2)
+        {
+            var result = new List<ProcessCostDetail>();
+
+            foreach (var p in Enum.GetValues<ProcessType>())
+            {
+                var applied = IsProcessApplied(p, selectedProcesses, coatingType, hasLamination);
+
+                var (unitPrice, unit, note) = ProcessCostRules.GetRate(p);
+
+                var qty = applied
+                    ? GetQuantityForProcess(p, sheetsWithWaste, productQuantity, totalPrintAreaM2)
+                    : 0m;
+
+                var total = qty * unitPrice;
+
+                result.Add(new ProcessCostDetail
+                {
+                    process = p.ToString(),
+                    unit_price = unitPrice,
+                    quantity = Math.Round(qty, 4),
+                    unit = unit,
+                    total_cost = Math.Round(total, 2),
+                    note = applied ? note : "Not selected"
+                });
+            }
+
+            return result;
+        }
+
+        public async Task<ProcessCostBreakdownResponse> CalculateProcessCostBreakdownAsync(CostEstimateRequest req)
+        {
+            // dùng validation cũ cho chắc
+            ValidateCostRequest(req);
+
+            var coatingType = ParseEnum<CoatingType>(req.coating_type ?? "NONE", "coating_type");
+            var processes = ParseProcesses(req.production_processes);
+
+            // các số liệu bạn đã có từ client (req.paper)
+            int sheetsWithWaste = req.paper.sheets_with_waste;
+            int productQuantity = req.paper.quantity;
+
+            decimal printAreaM2 = (req.paper.print_width_mm / 1000m) * (req.paper.print_height_mm / 1000m);
+            decimal totalPrintAreaM2 = printAreaM2 * productQuantity;
+
+            var details = CalculateAllProcessCostDetails(
+                selectedProcesses: processes,
+                coatingType: coatingType,
+                hasLamination: req.has_lamination,
+                sheetsWithWaste: sheetsWithWaste,
+                productQuantity: productQuantity,
+                totalPrintAreaM2: totalPrintAreaM2
+            );
+
+            return new ProcessCostBreakdownResponse
+            {
+                order_request_id = req.order_request_id,
+                total_cost = Math.Round(details.Sum(x => x.total_cost), 2),
+                details = details
+            };
+        }
+
+
     }
 }
