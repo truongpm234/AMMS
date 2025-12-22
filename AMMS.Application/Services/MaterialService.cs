@@ -1,7 +1,9 @@
 ﻿using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
+using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Enums;
+using AMMS.Shared.DTOs.Materials;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -40,6 +42,8 @@ namespace AMMS.Application.Services
             var result = Enum.GetNames(typeof(PaperCode)).ToList();
             return Task.FromResult(result);
         }
-
+        public Task<PagedResultLite<MaterialShortageDto>> GetShortageForAllOrdersPagedAsync(
+            int page, int pageSize, CancellationToken ct = default) => 
+            _materialRepository.GetShortageForAllOrdersPagedAsync(page, pageSize, ct);
     }
 }

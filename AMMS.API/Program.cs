@@ -90,6 +90,7 @@ builder.Services.AddScoped<ISupplierService, SupplierService>();
 builder.Services.AddScoped<IPurchaseRepository, PurchaseRepository>();
 builder.Services.AddScoped<IPurchaseService, PurchaseService>();
 
+
 // Logging
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
