@@ -249,13 +249,11 @@ namespace AMMS.Infrastructure.Repositories
                     ratio
                 };
 
-            // 2) OrderBy trên primitive (ratio/stock), KHÔNG order trên DTO
             var ordered = baseQuery
                 .OrderByDescending(x => x.ratio)
                 .ThenByDescending(x => x.stockQty)
                 .ThenBy(x => x.r.order_request_id);
 
-            // 3) Paging + projection DTO
             var list = await ordered
                 .Skip(skip)
                 .Take(pageSize + 1)

@@ -43,6 +43,7 @@ builder.Services.AddControllers()
     });
 
 builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddMemoryCache();
 builder.Services.AddSwaggerGen();
 
 builder.Services.AddCors(options =>
@@ -85,7 +86,6 @@ builder.Services.AddScoped<IDealService, DealService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<IOrderService, OrderService>();
 builder.Services.AddScoped<IOrderRepository, OrderRepository>();
-
 
 // Logging
 builder.Logging.ClearProviders();

@@ -4,7 +4,7 @@ using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AMMS.Infrastructure.Entities;
 
-//[Table("order_request", Schema = "AMMS_DB")]
+[Table("order_request", Schema = "AMMS_DB")]
 
 public partial class order_request
 {

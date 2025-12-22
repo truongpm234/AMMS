@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AMMS.Infrastructure.Entities;
-//[Table("materials", Schema = "AMMS_DB")]
+[Table("materials", Schema = "AMMS_DB")]
 public partial class material
 {
     public int material_id { get; set; }
