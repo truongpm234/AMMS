@@ -5,14 +5,17 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace AMMS.Shared.DTOs.Suppliers { 
-    public record SupplierDetailDto(
-        int SupplierId,
-        string Name,
-        string? ContactPerson,
-        string? Phone,
-        string? Email,
-        string? MainMaterialType,
-        PagedResultLite<SupplierMaterialDto> Materials
-    );
+namespace AMMS.Shared.DTOs.Suppliers {
+    public class SupplierDetailDto
+    {
+        public int SupplierId { get; init; }
+        public string Name { get; init; } = null!;
+        public string? ContactPerson { get; init; }
+        public string? Phone { get; init; }
+        public string? Email { get; init; }
+        public string? MainMaterialType { get; init; }
+
+        public PagedResultLite<SupplierMaterialDto> Materials { get; init; }
+            = new PagedResultLite<SupplierMaterialDto>();
+    }
 }

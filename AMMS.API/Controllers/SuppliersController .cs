@@ -1,7 +1,7 @@
 ﻿using AMMS.Application.Interfaces;
-using AMMS.Shared.DTOs.Suppliers;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace AMMS.API.Controllers
 {
@@ -16,14 +16,23 @@ namespace AMMS.API.Controllers
             _service = service;
         }
 
-
+        /// <summary>
+        /// Lấy danh sách supplier (phân trang) kèm theo materials
+        /// có main_material_type trùng với supplier.main_material_type
+        /// </summary>
         [HttpGet("paged")]
-        public async Task<IActionResult> GetPaged([FromQuery] int page, [FromQuery] int pageSize, CancellationToken ct)
+        public async Task<IActionResult> GetPaged(
+            [FromQuery] int page,
+            [FromQuery] int pageSize,
+            CancellationToken ct)
         {
             var result = await _service.GetPagedAsync(page, pageSize, ct);
             return Ok(result);
         }
 
+        /// <summary>
+        /// Lấy chi tiết 1 supplier + lịch sử mua materials (phân trang).
+        /// </summary>
         [HttpGet("{id:int}/detail")]
         public async Task<IActionResult> GetSupplierDetail(
             int id,
@@ -32,7 +41,8 @@ namespace AMMS.API.Controllers
             CancellationToken ct = default)
         {
             var result = await _service.GetSupplierDetailWithMaterialsAsync(id, page, pageSize, ct);
-            if (result == null) return NotFound(new { message = "Supplier not found", supplierId = id });
+            if (result == null)
+                return NotFound(new { message = "Supplier not found", supplierId = id });
 
             return Ok(result);
         }

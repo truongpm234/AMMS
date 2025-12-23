@@ -116,6 +116,7 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.name).HasMaxLength(150);
             entity.Property(e => e.stock_qty).HasPrecision(10, 2).HasDefaultValueSql("0");
             entity.Property(e => e.unit).HasMaxLength(20);
+            entity.Property(e => e.main_material_type).HasMaxLength(50);
         });
 
         modelBuilder.Entity<machine>(entity =>
