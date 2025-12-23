@@ -1,5 +1,6 @@
 ﻿using AMMS.Infrastructure.Entities;
 using AMMS.Shared.DTOs.Common;
+using AMMS.Shared.DTOs.Orders;
 using AMMS.Shared.DTOs.Requests;
 using Microsoft.EntityFrameworkCore;
 namespace AMMS.Infrastructure.Interfaces
@@ -28,6 +29,11 @@ namespace AMMS.Infrastructure.Interfaces
     DateOnly date, int page, int pageSize, CancellationToken ct = default);
         Task<PagedResultLite<RequestSortedDto>> SearchPagedAsync(
     string keyword, int page, int pageSize, CancellationToken ct = default);
+
+        Task<string?> GetEmailByPhoneAsync(string phone, CancellationToken ct = default);
+
+        Task<PagedResultLite<OrderListDto>> GetOrdersByPhonePagedAsync(
+            string phone, int page, int pageSize, CancellationToken ct = default);
 
     }
 }
