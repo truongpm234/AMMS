@@ -1,6 +1,8 @@
 ﻿using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
+using AMMS.Shared.DTOs.Common;
+using AMMS.Shared.DTOs.Orders;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -27,9 +29,25 @@ namespace AMMS.Application.Services
             }
             return order;
         }
-        public async Task<List<order>> GetAllAsync()
+        public async Task<PagedResultLite<OrderListDto>> GetPagedAsync(int page, int pageSize)
         {
-            return await _orderRepo.GetAllAsync();
+            if (page <= 0) page = 1;
+            if (pageSize <= 0) pageSize = 10;
+
+            var skip = (page - 1) * pageSize;
+
+            var list = await _orderRepo.GetPagedAsync(skip, pageSize + 1);
+
+            var hasNext = list.Count > pageSize;
+            var data = hasNext ? list.Take(pageSize).ToList() : list;
+
+            return new PagedResultLite<OrderListDto>
+            {
+                Page = page,
+                PageSize = pageSize,
+                HasNext = hasNext,
+                Data = data
+            };
         }
         public async Task<order> GetByIdAsync(int id)
         {

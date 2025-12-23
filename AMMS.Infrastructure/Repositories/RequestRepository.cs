@@ -2,6 +2,7 @@
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Common;
+using AMMS.Shared.DTOs.Orders;
 using AMMS.Shared.DTOs.Requests;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -400,6 +401,70 @@ namespace AMMS.Infrastructure.Repositories
             };
         }
 
+        /// <summary>
+        /// Lấy email gần nhất (mới nhất) đã dùng với số điện thoại này trong bảng order_request
+        /// </summary>
+        public async Task<string?> GetEmailByPhoneAsync(string phone, CancellationToken ct = default)
+        {
+            if (string.IsNullOrWhiteSpace(phone))
+                return null;
+
+            phone = phone.Trim();
+
+            return await _db.order_requests
+                .AsNoTracking()
+                .Where(r => r.customer_phone == phone && r.customer_email != null)
+                .OrderByDescending(r => r.order_request_date)
+                .Select(r => r.customer_email!)
+                .FirstOrDefaultAsync(ct);
+        }
+
+        /// <summary>
+        /// Lấy lịch sử đơn hàng theo số điện thoại, join order_request -> orders, có phân trang
+        /// </summary>
+        public async Task<PagedResultLite<OrderListDto>> GetOrdersByPhonePagedAsync(
+            string phone, int page, int pageSize, CancellationToken ct = default)
+        {
+            if (page <= 0) page = 1;
+            if (pageSize <= 0) pageSize = 10;
+
+            var skip = (page - 1) * pageSize;
+            phone = phone.Trim();
+
+            var baseQuery =
+                from r in _db.order_requests.AsNoTracking()
+                join o in _db.orders.AsNoTracking()
+                    on r.order_id equals o.order_id
+                where r.customer_phone == phone
+                orderby o.order_date descending, o.order_id descending
+                select new OrderListDto
+                {
+                    OrderId = o.order_id,
+                    Code = o.code,
+                    OrderDate = o.order_date,
+                    DeliveryDate = o.delivery_date,
+                    Status = o.status,
+                    PaymentStatus = o.payment_status,
+                    QuoteId = o.quote_id,
+                    TotalAmount = o.total_amount
+                };
+
+            var list = await baseQuery
+                .Skip(skip)
+                .Take(pageSize + 1)
+                .ToListAsync(ct);
+
+            var hasNext = list.Count > pageSize;
+            if (hasNext) list = list.Take(pageSize).ToList();
+
+            return new PagedResultLite<OrderListDto>
+            {
+                Page = page,
+                PageSize = pageSize,
+                HasNext = hasNext,
+                Data = list
+            };
+        }
 
     }
 }

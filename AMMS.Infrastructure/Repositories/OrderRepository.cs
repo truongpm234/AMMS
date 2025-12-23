@@ -1,6 +1,7 @@
 ﻿using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
+using AMMS.Shared.DTOs.Orders;
 using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
@@ -29,10 +30,29 @@ namespace AMMS.Infrastructure.Repositories
         {
             return await _db.orders.FindAsync(id);
         }
-        public async Task<List<order>> GetAllAsync()
+        public Task<int> CountAsync()
         {
-            return await _db.orders
+            return _db.orders.AsNoTracking().CountAsync();
+        }
+
+        public Task<List<OrderListDto>> GetPagedAsync(int skip, int take)
+        {
+            return _db.orders
                 .AsNoTracking()
+                .OrderByDescending(o => o.order_date)
+                .Skip(skip)
+                .Take(take)
+                .Select(o => new OrderListDto
+                {
+                    OrderId = o.order_id,
+                    Code = o.code,
+                    OrderDate = o.order_date,
+                    DeliveryDate = o.delivery_date,
+                    Status = o.status,
+                    PaymentStatus = o.payment_status,
+                    QuoteId = o.quote_id,
+                    TotalAmount = o.total_amount
+                })
                 .ToListAsync();
         }
         public async Task<order?> GetByCodeAsync(string code)

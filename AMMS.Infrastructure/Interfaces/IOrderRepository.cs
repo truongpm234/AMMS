@@ -1,4 +1,5 @@
 ﻿using AMMS.Infrastructure.Entities;
+using AMMS.Shared.DTOs.Orders;
 
 namespace AMMS.Infrastructure.Interfaces
 {
@@ -9,7 +10,8 @@ namespace AMMS.Infrastructure.Interfaces
         void Update(order entity);
         Task<order?> GetByIdAsync(int id);
         Task<order?> GetByCodeAsync(string code);
-        Task<List<order>> GetAllAsync();
+        Task<List<OrderListDto>> GetPagedAsync(int skip, int take);
+        Task<int> CountAsync();
         Task DeleteAsync(int id);
         Task<int> SaveChangesAsync();
         Task<string> GenerateNextOrderCodeAsync();

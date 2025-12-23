@@ -36,11 +36,15 @@ namespace AMMS.API.Controllers
             }
             return Ok(order);
         }
-        [HttpGet("get-all-order")]
-        public async Task<IActionResult> GetAllOrdersAsync()
+
+        [HttpGet("paged")]
+        public async Task<IActionResult> GetPaged(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 10)
         {
-            var orders = await _service.GetAllAsync();
-            return Ok(orders);
+            var result = await _service.GetPagedAsync(page, pageSize);
+            return Ok(result);
         }
+
     }
 }
