@@ -176,7 +176,7 @@ namespace AMMS.Application.Services
             // 5. RESOLVE PRODUCT TYPE & TÍNH CHI PHÍ VẬT LIỆU KHÁC
             // =====================
             var productTypeCode = ResolveProductTypeCode(req.product_type, req.form_product);
-            var coatingType = ParseEnum<CoatingType>(req.coating_type ?? "NONE", "coating_type");
+            var coatingType = ParseEnum<CoatingType>(req.coating_type ?? "KEO_NUOC", "coating_type");
             var processes = ParseProcesses(req.production_processes);
 
             // ✅ DÙNG totalPrintAreaM2 thay vì totalAreaM2
@@ -219,7 +219,6 @@ namespace AMMS.Application.Services
             var discountResult = CalculateDiscount(subtotal, req.discount_percent);
             decimal finalTotal = subtotal - discountResult.DiscountAmount;
 
-            // ✅ LƯU: Dùng totalPrintAreaM2
             await SaveCostEstimate(req, paperCost, paperUnitPrice, materialCosts, materialCost,
                 overheadPercent, overheadCost, baseCost, rushResult, subtotal, discountResult,
                 finalTotal, estimatedFinish, now, totalPrintAreaM2, coatingType);
@@ -341,7 +340,7 @@ namespace AMMS.Application.Services
 
         private WasteResult CalculateWasteWithSmartScaling(PaperEstimateRequest req, int sheetsBase, string productTypeCode)
         {
-            var coatingType = ParseEnum<CoatingType>(req.coating_type ?? "NONE", "coating_type");
+            var coatingType = ParseEnum<CoatingType>(req.coating_type ?? "KEO_NUOC", "coating_type");
             var processes = ParseProcesses(req.production_processes);
 
             // Tính hao hụt IN với smart scaling
@@ -888,7 +887,7 @@ namespace AMMS.Application.Services
             // dùng validation cũ cho chắc
             ValidateCostRequest(req);
 
-            var coatingType = ParseEnum<CoatingType>(req.coating_type ?? "NONE", "coating_type");
+            var coatingType = ParseEnum<CoatingType>(req.coating_type ?? "KEO_NUOC", "coating_type");
             var processes = ParseProcesses(req.production_processes);
 
             // các số liệu bạn đã có từ client (req.paper)

@@ -25,5 +25,22 @@ namespace AMMS.API.Controllers
             }
             return Ok(order);
         }
+
+        [HttpGet("get-order-by-{orderId}")]
+        public async Task<IActionResult> GetOrderByIdAsync(int orderId)
+        {
+            var order = await _service.GetByIdAsync(orderId);
+            if (order == null)
+            {
+                return NotFound();
+            }
+            return Ok(order);
+        }
+        [HttpGet("get-all-order")]
+        public async Task<IActionResult> GetAllOrdersAsync()
+        {
+            var orders = await _service.GetAllAsync();
+            return Ok(orders);
+        }
     }
 }

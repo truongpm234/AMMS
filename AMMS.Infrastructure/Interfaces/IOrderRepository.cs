@@ -9,6 +9,7 @@ namespace AMMS.Infrastructure.Interfaces
         void Update(order entity);
         Task<order?> GetByIdAsync(int id);
         Task<order?> GetByCodeAsync(string code);
+        Task<List<order>> GetAllAsync();
         Task DeleteAsync(int id);
         Task<int> SaveChangesAsync();
         Task<string> GenerateNextOrderCodeAsync();

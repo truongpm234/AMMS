@@ -27,5 +27,18 @@ namespace AMMS.Application.Services
             }
             return order;
         }
+        public async Task<List<order>> GetAllAsync()
+        {
+            return await _orderRepo.GetAllAsync();
+        }
+        public async Task<order> GetByIdAsync(int id)
+        {
+            var order = await _orderRepo.GetByIdAsync(id);
+            if (order == null)
+            {
+                throw new Exception("Order not found");
+            }
+            return order;
+        }
     }
 }

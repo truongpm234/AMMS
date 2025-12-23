@@ -29,6 +29,12 @@ namespace AMMS.Infrastructure.Repositories
         {
             return await _db.orders.FindAsync(id);
         }
+        public async Task<List<order>> GetAllAsync()
+        {
+            return await _db.orders
+                .AsNoTracking()
+                .ToListAsync();
+        }
         public async Task<order?> GetByCodeAsync(string code)
         {
             return await _db.orders
