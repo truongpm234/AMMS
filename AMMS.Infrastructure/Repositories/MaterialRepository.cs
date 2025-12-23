@@ -47,82 +47,161 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         public async Task<PagedResultLite<MaterialShortageDto>> GetShortageForAllOrdersPagedAsync(
-    int page, int pageSize, CancellationToken ct = default)
+     int page,
+     int pageSize,
+     CancellationToken ct = default)
         {
             if (page <= 0) page = 1;
             if (pageSize <= 0) pageSize = 10;
-
             var skip = (page - 1) * pageSize;
 
-            // 1) BOM -> OrderItem -> Material, group theo material
-            var requiredByMaterialQuery =
+            // ===== 1. Định nghĩa khoảng 30 ngày gần nhất (Dùng DateTime.Now.Date => Kind không phải UTC) =====
+            var today = DateTime.Now.Date;
+            var historyStartDate = today.AddDays(-30);
+            var historyEndDate = today;
+
+            // ===== 2. Lấy dữ liệu BOM + OrderItem + Material (chỉ JOIN, không nhân chia ở SQL) =====
+            //  - Lưu ý: oi.quantity giả sử là int / int? -> cast sang decimal
+            var bomRows = await (
                 from b in _db.boms.AsNoTracking()
-                join oi in _db.order_items.AsNoTracking() on b.order_item_id equals oi.item_id
-                join m in _db.materials.AsNoTracking() on b.material_id equals m.material_id
-                group new { b, oi, m } by new
+                join oi in _db.order_items.AsNoTracking()
+                    on b.order_item_id equals oi.item_id
+                join m in _db.materials.AsNoTracking()
+                    on b.material_id equals m.material_id
+                select new
                 {
                     m.material_id,
                     m.code,
                     m.name,
                     m.unit,
-                    StockQty = (decimal?)(m.stock_qty) ?? 0m
+                    StockQty = m.stock_qty ?? 0m,
+                    OrderQty = (decimal)(oi.quantity),          // nếu quantity là int
+                    QtyPerProduct = b.qty_per_product ?? 0m,
+                    WastagePercent = b.wastage_percent ?? 0m
                 }
-                into g
-                select new
+            ).ToListAsync(ct);
+
+            // Nếu không có BOM nào thì trả về rỗng luôn
+            if (!bomRows.Any())
+            {
+                return new PagedResultLite<MaterialShortageDto>
                 {
-                    g.Key.material_id,
-                    g.Key.code,
-                    g.Key.name,
-                    g.Key.unit,
-                    StockQty = g.Key.StockQty,
-
-                    // RequiredQty = SUM( order_item.qty * bom.qty_per_product * (1 + wastage%/100) )
-                    RequiredQty = g.Sum(x =>
-                        ((decimal)x.oi.quantity)
-                        * ((decimal?)(x.b.qty_per_product) ?? 0m)
-                        * (1m + (((decimal?)(x.b.wastage_percent) ?? 0m) / 100m))
-                    )
+                    Page = page,
+                    PageSize = pageSize,
+                    HasNext = false,
+                    Data = new List<MaterialShortageDto>()
                 };
+            }
 
-            // 2) Tính shortage thành field SQL-translatable
-            var shortageQuery = requiredByMaterialQuery
-                .Select(x => new
+            // ===== 3. Lấy usage 30 ngày gần nhất từ stock_moves (OUT) =====
+            var usageLast30List = await _db.stock_moves
+                .AsNoTracking()
+                .Where(s =>
+                    s.type == "OUT" &&
+                    s.move_date >= historyStartDate &&
+                    s.move_date <= historyEndDate &&
+                    s.material_id != null)
+                .GroupBy(s => s.material_id!.Value)
+                .Select(g => new
+                {
+                    MaterialId = g.Key,
+                    UsageLast30Days = g.Sum(s => s.qty ?? 0m)
+                })
+                .ToListAsync(ct);
+
+            var usageDict = usageLast30List
+                .ToDictionary(x => x.MaterialId, x => x.UsageLast30Days);
+
+            // ===== 4. Tính toán RequiredQty, ShortageQty, NeedToBuyQty hoàn toàn ở C# =====
+            var allMaterials = bomRows
+                .GroupBy(x => new
                 {
                     x.material_id,
                     x.code,
                     x.name,
                     x.unit,
-                    x.StockQty,
-                    x.RequiredQty,
-                    ShortageQty = x.RequiredQty > x.StockQty ? (x.RequiredQty - x.StockQty) : 0m
-                });
+                    x.StockQty
+                })
+                .Select(g =>
+                {
+                    decimal requiredQty = 0m;
 
-            // 3) Lọc + sort trên field (KHÔNG dùng DTO)
-            var filtered = shortageQuery
+                    // Tính tổng RequiredQty cho từng material
+                    foreach (var r in g)
+                    {
+                        var orderQty = r.OrderQty;        // đã là decimal
+                        var qtyPerProduct = r.QtyPerProduct;   // decimal
+                        var wastePercent = r.WastagePercent;  // decimal
+
+                        // baseQty = số sp * định mức
+                        var baseQty = orderQty * qtyPerProduct;
+
+                        // factor = 1 + % hao hụt / 100
+                        var factor = 1m + (wastePercent / 100m);
+
+                        var lineRequired = baseQty * factor;
+                        if (lineRequired < 0m) lineRequired = 0m;
+
+                        requiredQty += lineRequired;
+                    }
+
+                    var materialId = g.Key.material_id;
+                    var stockQty = g.Key.StockQty;
+
+                    // Usage 30 ngày gần nhất
+                    usageDict.TryGetValue(materialId, out var usageLast30);
+                    var safetyQty = usageLast30 * 0.30m;   // 30% usage 30 ngày
+
+                    // Tổng nhu cầu = Required + safety (30% usage)
+                    var totalNeeded = requiredQty + safetyQty;
+
+                    var shortageQty = totalNeeded > stockQty
+                        ? (totalNeeded - stockQty)
+                        : 0m;
+
+                    // Theo yêu cầu hiện tại: NeedToBuyQty >= ShortageQty (đã có thêm 30% safety)
+                    var needToBuyQty = shortageQty;
+
+                    return new
+                    {
+                        MaterialId = materialId,
+                        g.Key.code,
+                        g.Key.name,
+                        g.Key.unit,
+                        StockQty = stockQty,
+                        RequiredQty = requiredQty,
+                        ShortageQty = shortageQty,
+                        NeedToBuyQty = needToBuyQty
+                    };
+                })
                 .Where(x => x.ShortageQty > 0m)
                 .OrderByDescending(x => x.ShortageQty)
-                .ThenBy(x => x.name);
+                .ThenBy(x => x.name)
+                .ToList();
 
-            // 4) paging
-            var list = await filtered
+            // ===== 5. Paging trên bộ nhớ =====
+            var paged = allMaterials
                 .Skip(skip)
                 .Take(pageSize + 1)
-                .ToListAsync(ct);
+                .ToList();
 
-            var hasNext = list.Count > pageSize;
-            if (hasNext) list = list.Take(pageSize).ToList();
+            var hasNext = paged.Count > pageSize;
+            if (hasNext)
+                paged = paged.Take(pageSize).ToList();
 
-            // 5) map DTO sau khi lấy dữ liệu về
-            var dtoList = list.Select(x => new MaterialShortageDto(
-                x.material_id,
-                x.code,
-                x.name,
-                x.unit,
-                x.StockQty,
-                x.RequiredQty,
-                x.ShortageQty,
-                x.ShortageQty // NeedToBuyQty = ShortageQty
-            )).ToList();
+            // ===== 6. Map sang DTO =====
+            var dtoList = paged
+                .Select(x => new MaterialShortageDto(
+                    x.MaterialId,
+                    x.code,
+                    x.name,
+                    x.unit,
+                    x.StockQty,
+                    x.RequiredQty,
+                    x.ShortageQty,
+                    x.NeedToBuyQty
+                ))
+                .ToList();
 
             return new PagedResultLite<MaterialShortageDto>
             {
