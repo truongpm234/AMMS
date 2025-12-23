@@ -57,5 +57,9 @@ public partial class order_request
 
     public int? order_id { get; set; }
 
+    public int? quote_id { get; set; }
+
+    public virtual quote? quote { get; set; }
+
     public virtual order? order { get; set; }
 }

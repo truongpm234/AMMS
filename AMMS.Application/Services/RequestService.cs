@@ -61,7 +61,6 @@ namespace AMMS.Application.Services
                 };
             }
 
-            // Update fields
             entity.customer_name = req.customer_name ?? entity.customer_name;
             entity.customer_phone = req.customer_phone ?? entity.customer_phone;
             entity.customer_email = req.customer_email ?? entity.customer_email;
@@ -91,10 +90,10 @@ namespace AMMS.Application.Services
 
         public async Task DeleteAsync(int id)
         {
-
             await _requestRepo.DeleteAsync(id);
             await _requestRepo.SaveChangesAsync();
         }
+
         public Task<order_request?> GetByIdAsync(int id) => _requestRepo.GetByIdAsync(id);
 
         public async Task<PagedResultLite<order_request>> GetPagedAsync(int page, int pageSize)
@@ -104,7 +103,6 @@ namespace AMMS.Application.Services
 
             var skip = (page - 1) * pageSize;
 
-            // lấy dư 1 record để biết có trang sau
             var list = await _requestRepo.GetPagedAsync(skip, pageSize + 1);
 
             var hasNext = list.Count > pageSize;
@@ -119,6 +117,7 @@ namespace AMMS.Application.Services
             };
         }
 
+        // 🔥 Convert: gán quote_id vào order
         public async Task<ConvertRequestToOrderResponse> ConvertToOrderAsync(int requestId)
         {
             var req = await _requestRepo.GetByIdAsync(requestId);
@@ -132,13 +131,24 @@ namespace AMMS.Application.Services
                 };
             }
 
-            // chỉ accept mới convert
+            // chỉ request đã Accepted mới convert
             if (!string.Equals(req.process_status?.Trim(), "accepted", StringComparison.OrdinalIgnoreCase))
             {
                 return new ConvertRequestToOrderResponse
                 {
                     Success = false,
                     Message = "Only process_status = 'accepted' can be converted to order",
+                    RequestId = requestId
+                };
+            }
+
+            // phải có quote_id
+            if (req.quote_id == null)
+            {
+                return new ConvertRequestToOrderResponse
+                {
+                    Success = false,
+                    Message = "No quote found for this request",
                     RequestId = requestId
                 };
             }
@@ -155,7 +165,6 @@ namespace AMMS.Application.Services
                 };
             }
 
-            // tạo order
             var code = await _orderRepo.GenerateNextOrderCodeAsync();
             var newOrder = new order
             {
@@ -164,30 +173,25 @@ namespace AMMS.Application.Services
                 delivery_date = req.delivery_date,
                 status = "New",
                 payment_status = "Unpaid",
-                // customer_id/consultant_id/quote_id nếu chưa có thì để null
+                quote_id = req.quote_id        // 🔥 GÁN QUOTE VÀO ORDER
             };
 
             await _orderRepo.AddOrderAsync(newOrder);
-            await _orderRepo.SaveChangesAsync(); // để lấy order_id
+            await _orderRepo.SaveChangesAsync(); // để có order_id
 
-            // tạo order_item (1 sp / 1 đơn)
             var newItem = new order_item
             {
                 order_id = newOrder.order_id,
                 product_name = req.product_name,
-                quantity = (int)req.quantity,
-                design_url = req.design_file_path,
-                // các field khác bạn có thể map thêm nếu UI có
-                // product_type_id = ...
+                quantity = req.quantity ?? 0,
+                design_url = req.design_file_path
             };
 
             await _orderRepo.AddOrderItemAsync(newItem);
 
-            // đánh dấu request đã convert
             req.order_id = newOrder.order_id;
             await _requestRepo.UpdateAsync(req);
 
-            // save chung
             await _orderRepo.SaveChangesAsync();
             await _requestRepo.SaveChangesAsync();
 
@@ -203,33 +207,31 @@ namespace AMMS.Application.Services
         }
 
         public Task<PagedResultLite<RequestSortedDto>> GetSortedByQuantityPagedAsync(
-    bool ascending, int page, int pageSize, CancellationToken ct = default)
-    => _requestRepo.GetSortedByQuantityPagedAsync(ascending, page, pageSize, ct);
+            bool ascending, int page, int pageSize, CancellationToken ct = default)
+            => _requestRepo.GetSortedByQuantityPagedAsync(ascending, page, pageSize, ct);
 
         public Task<PagedResultLite<RequestSortedDto>> GetSortedByDatePagedAsync(
-    bool ascending, int page, int pageSize, CancellationToken ct = default)
-    => _requestRepo.GetSortedByDatePagedAsync(ascending, page, pageSize, ct);
+            bool ascending, int page, int pageSize, CancellationToken ct = default)
+            => _requestRepo.GetSortedByDatePagedAsync(ascending, page, pageSize, ct);
 
         public Task<PagedResultLite<RequestSortedDto>> GetSortedByDeliveryDatePagedAsync(
-    bool nearestFirst, int page, int pageSize, CancellationToken ct = default)
-    => _requestRepo.GetSortedByDeliveryDatePagedAsync(nearestFirst, page, pageSize, ct);
+            bool nearestFirst, int page, int pageSize, CancellationToken ct = default)
+            => _requestRepo.GetSortedByDeliveryDatePagedAsync(nearestFirst, page, pageSize, ct);
 
-        public Task<PagedResultLite<RequestEmailStatsDto>>GetEmailsByAcceptedCountPagedAsync(
-    int page, int pageSize, CancellationToken ct = default)
-    => _requestRepo.GetEmailsByAcceptedCountPagedAsync(page, pageSize, ct);
+        public Task<PagedResultLite<RequestEmailStatsDto>> GetEmailsByAcceptedCountPagedAsync(
+            int page, int pageSize, CancellationToken ct = default)
+            => _requestRepo.GetEmailsByAcceptedCountPagedAsync(page, pageSize, ct);
 
         public Task<PagedResultLite<RequestStockCoverageDto>> GetSortedByStockCoveragePagedAsync(
-    int page, int pageSize, CancellationToken ct = default)
-    => _requestRepo.GetSortedByStockCoveragePagedAsync(page, pageSize, ct);
+            int page, int pageSize, CancellationToken ct = default)
+            => _requestRepo.GetSortedByStockCoveragePagedAsync(page, pageSize, ct);
 
         public Task<PagedResultLite<RequestSortedDto>> GetByOrderRequestDatePagedAsync(
-    DateOnly date, int page, int pageSize, CancellationToken ct = default)
-    => _requestRepo.GetByOrderRequestDatePagedAsync(date, page, pageSize, ct);
+            DateOnly date, int page, int pageSize, CancellationToken ct = default)
+            => _requestRepo.GetByOrderRequestDatePagedAsync(date, page, pageSize, ct);
 
         public Task<PagedResultLite<RequestSortedDto>> SearchPagedAsync(
-     string keyword, int page, int pageSize, CancellationToken ct = default)
-     => _requestRepo.SearchPagedAsync(keyword, page, pageSize, ct);
-
-
+            string keyword, int page, int pageSize, CancellationToken ct = default)
+            => _requestRepo.SearchPagedAsync(keyword, page, pageSize, ct);
     }
 }

@@ -56,6 +56,11 @@ namespace AMMS.Application.Services
             await _quoteRepo.AddAsync(quote);
             await _quoteRepo.SaveChangesAsync();
 
+            req.quote_id = quote.quote_id;
+            req.process_status = "Waiting";
+
+            await _requestRepo.SaveChangesAsync();
+
             var baseUrl = _config["Deal:BaseUrl"]!;
             var token = Guid.NewGuid().ToString("N");
 
@@ -77,74 +82,18 @@ namespace AMMS.Application.Services
         // ================= ACCEPT =================
 
         public async Task AcceptDealAsync(int orderRequestId)
-        {
-            var req = await _requestRepo.GetByIdAsync(orderRequestId)
-                ?? throw new Exception("Order request not found");
+{
+    var req = await _requestRepo.GetByIdAsync(orderRequestId)
+        ?? throw new Exception("Order request not found");
 
-            var est = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId)
-                ?? throw new Exception("Estimate not found");
+    if (req.quote_id == null)
+        throw new Exception("Quote not found for this request");
 
-            req.process_status = "Accepted";
+    // ✅ CHỈ đổi trạng thái
+    req.process_status = "Accepted";
 
-            order? order;
-
-            if (req.order_id.HasValue)
-            {
-                order = await _orderRepo.GetByIdAsync(req.order_id.Value)
-                    ?? throw new Exception("Order not found");
-            }
-            else
-            {
-                var code = await _orderRepo.GenerateNextOrderCodeAsync();
-
-                order = new order
-                {
-                    code = code,
-                    order_date = DateTime.Now,
-                    delivery_date = req.delivery_date,
-                    status = "New",
-                    payment_status = "Unpaid",
-                    total_amount = est.final_total_cost
-                };
-
-                await _orderRepo.AddOrderAsync(order);
-                await _orderRepo.SaveChangesAsync();
-
-                var item = new order_item
-                {
-                    order_id = order.order_id,
-                    product_name = req.product_name,
-                    quantity = (int)req.quantity,
-                    design_url = req.design_file_path
-                };
-
-                await _orderRepo.AddOrderItemAsync(item);
-
-                req.order_id = order.order_id;
-            }
-
-            // Email cho khách hàng
-            if (!string.IsNullOrWhiteSpace(req.customer_email))
-            {
-                var trackingUrl = $"{_config["Deal:BaseUrl"]}/track?code={order.code}";
-
-                await _emailService.SendAsync(
-                    req.customer_email,
-                    $"Đơn hàng {order.code} đã được phê duyệt",
-                    DealEmailTemplates.AcceptCustomerEmail(req, order, est, trackingUrl)
-                );
-            }
-
-            // Email cho consultant
-            await _emailService.SendAsync(
-                _config["Deal:ConsultantEmail"]!,
-                "Khách hàng đã đồng ý báo giá",
-                DealEmailTemplates.AcceptConsultantEmail(req, order)
-            );
-
-            await _orderRepo.SaveChangesAsync();
-            await _requestRepo.SaveChangesAsync();
-        }
+    await _requestRepo.SaveChangesAsync();
+}
 
         // ================= REJECT =================
 

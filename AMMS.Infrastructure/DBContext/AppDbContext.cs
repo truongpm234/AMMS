@@ -234,6 +234,7 @@ public partial class AppDbContext : DbContext
         modelBuilder.Entity<order_request>(entity =>
         {
             entity.HasKey(e => e.order_request_id).HasName("order_request_pkey");
+
             entity.Property(e => e.customer_email).HasMaxLength(100);
             entity.Property(e => e.customer_name).HasMaxLength(100);
             entity.Property(e => e.customer_phone).HasMaxLength(20);
@@ -242,15 +243,27 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.product_name).HasMaxLength(200);
             entity.Property(e => e.product_type).HasMaxLength(50);
             entity.Property(e => e.number_of_plates).HasDefaultValue(0);
-            entity.Property(e => e.coating_type).HasMaxLength(20).HasDefaultValue("NONE");
+            entity.Property(e => e.production_processes);
+            entity.Property(e => e.coating_type)
+                .HasMaxLength(20)
+                .HasDefaultValue("NONE");
             entity.Property(e => e.has_lamination).HasDefaultValue(false);
 
+            // FK tới orders (giữ nguyên như cũ)
             entity.HasOne(d => d.order)
                 .WithMany()
                 .HasForeignKey(d => d.order_id)
                 .OnDelete(DeleteBehavior.SetNull)
                 .HasConstraintName("fk_order_request_order");
+
+            // 🔥 FK mới tới quotes
+            entity.HasOne(d => d.quote)
+                .WithMany()
+                .HasForeignKey(d => d.quote_id)
+                .OnDelete(DeleteBehavior.SetNull)
+                .HasConstraintName("fk_order_request_quote");
         });
+
 
         modelBuilder.Entity<product_type>(entity =>
         {
