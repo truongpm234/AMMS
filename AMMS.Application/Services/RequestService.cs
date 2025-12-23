@@ -165,20 +165,28 @@ namespace AMMS.Application.Services
                 };
             }
 
+            // 🔍 Kiểm tra tồn kho vật tư
+            var hasEnoughStock = await _requestRepo.HasEnoughStockForRequestAsync(requestId);
+
+            // Nếu thiếu ⇒ "Not enough", đủ ⇒ "New"
+            var orderStatus = hasEnoughStock ? "New" : "Not enough";
+
+            // Tạo order
             var code = await _orderRepo.GenerateNextOrderCodeAsync();
             var newOrder = new order
             {
                 code = code,
                 order_date = DateTime.Now,
                 delivery_date = req.delivery_date,
-                status = "New",
+                status = orderStatus,     // 🔥 set theo tồn kho
                 payment_status = "Unpaid",
-                quote_id = req.quote_id        // 🔥 GÁN QUOTE VÀO ORDER
+                quote_id = req.quote_id
             };
 
             await _orderRepo.AddOrderAsync(newOrder);
             await _orderRepo.SaveChangesAsync(); // để có order_id
 
+            // Tạo order item
             var newItem = new order_item
             {
                 order_id = newOrder.order_id,
@@ -189,6 +197,7 @@ namespace AMMS.Application.Services
 
             await _orderRepo.AddOrderItemAsync(newItem);
 
+            // Link ngược về request
             req.order_id = newOrder.order_id;
             await _requestRepo.UpdateAsync(req);
 

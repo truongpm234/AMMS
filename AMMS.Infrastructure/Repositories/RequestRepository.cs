@@ -65,6 +65,37 @@ namespace AMMS.Infrastructure.Repositories
             => _db.order_requests.AsNoTracking()
                 .AnyAsync(r => r.order_request_id == requestId && r.order_id != null);
 
+        //  kiểm tra 1 request có đủ tồn kho vật tư không
+        public async Task<bool> HasEnoughStockForRequestAsync(int requestId, CancellationToken ct = default)
+        {
+            // Logic đơn giản: join theo product_name = materials.name,
+            // so sánh stock_qty với quantity của request
+            var q =
+                from r in _db.order_requests.AsNoTracking()
+                where r.order_request_id == requestId
+                join m in _db.materials.AsNoTracking()
+                    on r.product_name equals m.name into mj
+                from m in mj.DefaultIfEmpty()
+                select new
+                {
+                    RequiredQty = (decimal)(r.quantity ?? 0),
+                    StockQty = m != null ? (m.stock_qty ?? 0m) : 0m
+                };
+
+            var data = await q.FirstOrDefaultAsync(ct);
+
+            // Không có record hoặc không map được material ⇒ coi như thiếu
+            if (data == null)
+                return false;
+
+            // Không yêu cầu số lượng ⇒ xem như đủ
+            if (data.RequiredQty <= 0m)
+                return true;
+
+            return data.StockQty >= data.RequiredQty;
+        }
+
+
         public async Task<PagedResultLite<RequestSortedDto>> GetSortedByQuantityPagedAsync(
     bool ascending, int page, int pageSize, CancellationToken ct = default)
         {

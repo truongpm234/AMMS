@@ -15,6 +15,9 @@ namespace AMMS.Infrastructure.Interfaces
         Task<int> CountAsync();
         Task<List<order_request>> GetPagedAsync(int skip, int take);
         Task<bool> AnyOrderLinkedAsync(int requestId);
+
+        // kiểm tra 1 request có đủ tồn kho vật tư không
+        Task<bool> HasEnoughStockForRequestAsync(int requestId, CancellationToken ct = default);
         Task<PagedResultLite<RequestSortedDto>> GetSortedByQuantityPagedAsync(
     bool ascending, int page, int pageSize, CancellationToken ct = default);
         Task<PagedResultLite<RequestSortedDto>> GetSortedByDatePagedAsync(
