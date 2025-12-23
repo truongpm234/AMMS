@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AMMS.Infrastructure.Entities;
+[Table("suppliers", Schema = "AMMS_DB")]
 
 public partial class supplier
 {
