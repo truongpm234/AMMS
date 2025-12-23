@@ -89,8 +89,6 @@ builder.Services.AddScoped<ISupplierRepository, SupplierRepository>();
 builder.Services.AddScoped<ISupplierService, SupplierService>();
 builder.Services.AddScoped<IPurchaseRepository, PurchaseRepository>();
 builder.Services.AddScoped<IPurchaseService, PurchaseService>();
-builder.Services.AddScoped<IStockMoveRepository, StockMoveRepository>();
-builder.Services.AddScoped<IStockMoveService, StockMoveService>();
 builder.Services.AddScoped<IOrderLookupService, OrderLookupService>();
 
 

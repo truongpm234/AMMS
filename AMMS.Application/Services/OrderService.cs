@@ -58,5 +58,7 @@ namespace AMMS.Application.Services
             }
             return order;
         }
+        public Task<OrderDetailDto?> GetDetailAsync(int id, CancellationToken ct = default)
+            => _orderRepo.GetDetailByIdAsync(id, ct);
     }
 }

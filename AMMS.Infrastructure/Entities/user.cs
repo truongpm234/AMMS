@@ -1,8 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AMMS.Infrastructure.Entities;
 
+[Table("users", Schema = "AMMS_DB")]
 public partial class user
 {
     public int user_id { get; set; }

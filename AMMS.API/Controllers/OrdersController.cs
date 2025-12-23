@@ -1,4 +1,5 @@
 ﻿using AMMS.Application.Interfaces;
+using AMMS.Application.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
@@ -44,6 +45,16 @@ namespace AMMS.API.Controllers
         {
             var result = await _service.GetPagedAsync(page, pageSize);
             return Ok(result);
+        }
+
+        [HttpGet("{id:int}/detail")]
+        public async Task<IActionResult> GetDetail(int id, CancellationToken ct)
+        {
+            var dto = await _service.GetDetailAsync(id);
+            if (dto == null)
+                return NotFound(new { message = "Order not found" });
+
+            return Ok(dto);
         }
 
     }
