@@ -28,6 +28,8 @@ public partial class material
 
     public int? sheet_length_mm { get; set; }
 
+    public string? main_material_type { get; set; }
+
     public virtual ICollection<bom> boms { get; set; } = new List<bom>();
 
     public virtual ICollection<purchase_item> purchase_items { get; set; } = new List<purchase_item>();
