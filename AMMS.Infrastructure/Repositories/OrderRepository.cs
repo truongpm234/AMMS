@@ -1,4 +1,5 @@
-﻿using AMMS.Infrastructure.DBContext;
+﻿// AMMS.Infrastructure/Repositories/OrderRepository.cs
+using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Orders;
@@ -6,7 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace AMMS.Infrastructure.Repositories
@@ -14,26 +15,30 @@ namespace AMMS.Infrastructure.Repositories
     public class OrderRepository : IOrderRepository
     {
         private readonly AppDbContext _db;
+
         public OrderRepository(AppDbContext db)
         {
             _db = db;
         }
+
+        // ===== Helpers ===================================================
         private static string ToUtcString(DateTime? dt)
         {
             if (dt is null) return "";
             var v = DateTime.SpecifyKind(dt.Value, DateTimeKind.Utc);
-            return v.ToString("O"); 
+            return v.ToString("O");
         }
+
         private static bool IsNotEnoughStatus(string? status)
         {
             if (string.IsNullOrWhiteSpace(status)) return false;
 
-            // tùy hệ bạn đang set status là gì
             return status.Equals("Not Enough", StringComparison.OrdinalIgnoreCase)
                 || status.Equals("false", StringComparison.OrdinalIgnoreCase)
                 || status.Equals("0", StringComparison.OrdinalIgnoreCase);
         }
 
+        // ===== MAIN PAGED WITH FULFILL ===================================
         public async Task<List<OrderResponseDto>> GetPagedWithFulfillAsync(int skip, int take, CancellationToken ct = default)
         {
             // 1) Lấy page orders (kèm customer + item đầu)
@@ -69,23 +74,22 @@ namespace AMMS.Infrastructure.Repositories
 
             if (orders.Count == 0) return new List<OrderResponseDto>();
 
-            // 2) CHỈ lấy những order có status = false / Not Enough để tính thiếu vật tư
+            // 2) CHỈ order có status = "Not Enough"/false mới cần tính thiếu NVL
             var orderIdsNeedCalc = orders
                 .Where(o => IsNotEnoughStatus(o.Status))
                 .Select(o => o.order_id)
                 .ToList();
 
-            // Nếu không có order nào "false" => không cần tính missing_materials
             Dictionary<int, List<MissingMaterialDto>> missingByOrder = new();
 
             if (orderIdsNeedCalc.Count > 0)
             {
-                // 2.1) Lấy BOM lines của các order "false"
+                // 2.1) BOM lines cho các order cần tính
                 var bomLines = await (
                     from oi in _db.order_items.AsNoTracking()
                     join b in _db.boms.AsNoTracking() on oi.item_id equals b.order_item_id
                     join m in _db.materials.AsNoTracking() on b.material_id equals m.material_id
-                    where oi.order_id != null && orderIdsNeedCalc.Contains(oi.order_id.Value)
+                    where oi.order_id != null && orderIdsNeedCalc.Contains(oi.order_id!.Value)
                     select new
                     {
                         OrderId = oi.order_id!.Value,
@@ -93,95 +97,105 @@ namespace AMMS.Infrastructure.Repositories
                         MaterialName = m.name,
                         StockQty = m.stock_qty ?? 0m,
 
-                        // required theo order (định mức + hao hụt)
-                        RequiredLine =
-                            (decimal)oi.quantity
-                            * (b.qty_per_product ?? 0m)
-                            * (1m + ((b.wastage_percent ?? 0m) / 100m))
+                        Quantity = (decimal)oi.quantity,
+                        QtyPerProduct = b.qty_per_product ?? 0m,
+                        WastagePercent = b.wastage_percent ?? 0m
                     }
                 ).ToListAsync(ct);
 
-                var today = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
-                var historyStart = DateTime.SpecifyKind(today.AddDays(-30), DateTimeKind.Unspecified);
-                var historyEndExclusive = DateTime.SpecifyKind(today.AddDays(1), DateTimeKind.Unspecified);
+                if (bomLines.Count > 0)
+                {
+                    // 2.2) Usage 30 ngày gần nhất từ stock_moves
+                    var today = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
+                    var historyStart = DateTime.SpecifyKind(today.AddDays(-30), DateTimeKind.Unspecified);
+                    var historyEndExclusive = DateTime.SpecifyKind(today.AddDays(1), DateTimeKind.Unspecified);
 
+                    var materialIds = bomLines.Select(x => x.MaterialId).Distinct().ToList();
 
-                var materialIds = bomLines.Select(x => x.MaterialId).Distinct().ToList();
-
-                var usageLast30List = await _db.stock_moves
-                    .AsNoTracking()
-                    .Where(s =>
-                        s.type == "OUT" &&
-                        s.move_date >= historyStart &&
-                        s.move_date <= historyEndExclusive &&
-                        s.material_id != null &&
-                        materialIds.Contains(s.material_id.Value))
-                    .GroupBy(s => s.material_id!.Value)
-                    .Select(g => new
-                    {
-                        MaterialId = g.Key,
-                        UsageLast30Days = g.Sum(x => x.qty ?? 0m)
-                    })
-                    .ToListAsync(ct);
-
-                var usageDict = usageLast30List.ToDictionary(x => x.MaterialId, x => x.UsageLast30Days);
-
-                // 2.3) Group theo (order, material) và tính thiếu theo shortage-for-orders:
-                // safety = usage30 * 30%
-                // needed = required + safety
-                // missing = max(0, needed - stock)
-                missingByOrder = bomLines
-                    .GroupBy(x => new { x.OrderId, x.MaterialId, x.MaterialName, x.StockQty })
-                    .Select(g =>
-                    {
-                        var requiredQty = g.Sum(x => x.RequiredLine);
-
-                        usageDict.TryGetValue(g.Key.MaterialId, out var usage30);
-                        var safetyQty = usage30 * 0.30m;
-
-                        var needed = requiredQty + safetyQty;
-                        var missing = needed - g.Key.StockQty;
-                        if (missing < 0m) missing = 0m;
-
-                        return new
+                    var usageLast30List = await _db.stock_moves
+                        .AsNoTracking()
+                        .Where(s =>
+                            s.type == "OUT" &&
+                            s.move_date >= historyStart &&
+                            s.move_date < historyEndExclusive &&
+                            s.material_id != null &&
+                            materialIds.Contains(s.material_id.Value))
+                        .GroupBy(s => s.material_id!.Value)
+                        .Select(g => new
                         {
-                            g.Key.OrderId,
-                            g.Key.MaterialId,
-                            g.Key.MaterialName,
-                            Available = g.Key.StockQty,
-                            Needed = needed,
-                            Missing = missing
-                        };
-                    })
-                    .Where(x => x.Missing > 0m)
-                    .GroupBy(x => x.OrderId)
-                    .ToDictionary(
-                        g => g.Key,
-                        g => g.Select(x => new MissingMaterialDto
+                            MaterialId = g.Key,
+                            UsageLast30Days = g.Sum(x => x.qty ?? 0m)
+                        })
+                        .ToListAsync(ct);
+
+                    var usageDict = usageLast30List
+                        .ToDictionary(
+                            x => x.MaterialId,
+                            x => Math.Round(x.UsageLast30Days, 4)
+                        );
+
+                    // 2.3) Tính thiếu NVL với ROUND ở từng bước để tránh overflow
+                    missingByOrder = bomLines
+                        .GroupBy(x => new { x.OrderId, x.MaterialId, x.MaterialName, x.StockQty })
+                        .Select(g =>
                         {
-                            material_id = x.MaterialId.ToString(),
-                            material_name = x.MaterialName,
-                            needed = Math.Round(x.Needed, 4),
-                            missing = Math.Round(x.Missing, 4),
-                            available = Math.Round(x.Available, 4)
-                        }).ToList()
-                    );
+                            decimal requiredQty = 0m;
+
+                            foreach (var r in g)
+                            {
+                                var qty = r.Quantity;                                  // quantity của order
+                                var qtyPerProduct = Math.Round(r.QtyPerProduct, 4);    // định mức
+                                var wastePercent = Math.Round(r.WastagePercent, 2);    // %
+
+                                var baseQty = Math.Round(qty * qtyPerProduct, 4);      // lượng cơ bản
+                                var factor = Math.Round(1m + (wastePercent / 100m), 4);
+                                var lineRequired = Math.Round(baseQty * factor, 4);
+
+                                if (lineRequired < 0m) lineRequired = 0m;
+                                requiredQty += lineRequired;
+                            }
+
+                            usageDict.TryGetValue(g.Key.MaterialId, out var usage30);
+                            var safetyQty = Math.Round(usage30 * 0.30m, 4);           // 30% usage 30 ngày
+
+                            var needed = Math.Round(requiredQty + safetyQty, 4);
+                            var available = Math.Round(g.Key.StockQty, 4);
+
+                            var missing = needed - available;
+                            if (missing < 0m) missing = 0m;
+
+                            return new
+                            {
+                                g.Key.OrderId,
+                                g.Key.MaterialId,
+                                g.Key.MaterialName,
+                                Needed = needed,
+                                Available = available,
+                                Missing = missing
+                            };
+                        })
+                        .Where(x => x.Missing > 0m)
+                        .GroupBy(x => x.OrderId)
+                        .ToDictionary(
+                            g => g.Key,
+                            g => g.Select(x => new MissingMaterialDto
+                            {
+                                material_id = x.MaterialId.ToString(),
+                                material_name = x.MaterialName,
+                                needed = x.Needed,
+                                available = x.Available
+                            }).ToList()
+                        );
+                }
             }
 
-            // 3) Build response: nếu status=false thì attach missing_materials
-            string ToUtcString(DateTime? dt)
-            {
-                if (dt is null) return "";
-                var v = DateTime.SpecifyKind(dt.Value, DateTimeKind.Utc);
-                return v.ToString("O");
-            }
-
+            // 3) Build response
             return orders.Select(o =>
             {
                 bool canFulfill =
                     o.Status.Equals("New", StringComparison.OrdinalIgnoreCase) ? true :
                     IsNotEnoughStatus(o.Status) ? false :
-                    true; 
+                    true;
 
                 missingByOrder.TryGetValue(o.order_id, out var missingMaterials);
 
@@ -196,23 +210,30 @@ namespace AMMS.Infrastructure.Repositories
                     created_at = ToUtcString(o.order_date),
                     delivery_date = ToUtcString(o.delivery_date),
                     can_fulfill = canFulfill,
-                    missing_materials = canFulfill == false ? (missingMaterials ?? new List<MissingMaterialDto>()) : null
+                    // chỉ trả về missing_materials nếu không thể fulfill
+                    missing_materials = canFulfill == false
+                        ? (missingMaterials ?? new List<MissingMaterialDto>())
+                        : null
                 };
             }).ToList();
         }
 
+        // ===== CRUD & OTHER METHODS ======================================
         public async Task AddOrderAsync(order entity)
         {
             await _db.orders.AddAsync(entity);
         }
+
         public void Update(order entity)
         {
             _db.orders.Update(entity);
         }
+
         public async Task<order?> GetByIdAsync(int id)
         {
             return await _db.orders.FindAsync(id);
         }
+
         public Task<int> CountAsync()
         {
             return _db.orders.AsNoTracking().CountAsync();
@@ -238,12 +259,14 @@ namespace AMMS.Infrastructure.Repositories
                 })
                 .ToListAsync();
         }
+
         public async Task<order?> GetByCodeAsync(string code)
         {
             return await _db.orders
                 .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.code == code);
         }
+
         public async Task DeleteAsync(int id)
         {
             var order = await GetByIdAsync(id);
@@ -252,11 +275,15 @@ namespace AMMS.Infrastructure.Repositories
                 _db.orders.Remove(order);
             }
         }
+
         public async Task<int> SaveChangesAsync()
         {
             return await _db.SaveChangesAsync();
         }
-        public Task AddOrderItemAsync(order_item entity) => _db.order_items.AddAsync(entity).AsTask();
+
+        public Task AddOrderItemAsync(order_item entity)
+            => _db.order_items.AddAsync(entity).AsTask();
+
         public async Task<string> GenerateNextOrderCodeAsync()
         {
             var last = await _db.orders.AsNoTracking()
@@ -276,7 +303,7 @@ namespace AMMS.Infrastructure.Repositories
 
         public async Task<OrderDetailDto?> GetDetailByIdAsync(int orderId, CancellationToken ct = default)
         {
-            // Lấy order + items + productions (manager)
+            // (giữ nguyên phần GetDetailByIdAsync của bạn – mình không sửa)
             var order = await _db.orders
                 .AsNoTracking()
                 .Include(o => o.order_items)
@@ -286,12 +313,10 @@ namespace AMMS.Infrastructure.Repositories
 
             if (order == null) return null;
 
-            // Lấy order_request (nếu có) – để lấy email, phone, note, product_name, quantity
             var req = await _db.order_requests
                 .AsNoTracking()
                 .FirstOrDefaultAsync(r => r.order_id == orderId, ct);
 
-            // Lấy cost_estimate theo order_request (nếu có)
             cost_estimate? estimate = null;
             if (req != null)
             {
@@ -300,15 +325,10 @@ namespace AMMS.Infrastructure.Repositories
                     .FirstOrDefaultAsync(e => e.order_request_id == req.order_request_id, ct);
             }
 
-            // Chọn 1 item chính của đơn (nếu có)
             var item = order.order_items
                 .OrderBy(i => i.item_id)
                 .FirstOrDefault();
 
-            // ================= MAP FIELD THEO MÀN HÌNH =================
-
-            // Khách hàng
-            // Ưu tiên: company_name từ customers, nếu không thì dùng customer_name từ order_request
             string customerName = string.Empty;
             string? customerEmail = null;
             string? customerPhone = null;
@@ -329,7 +349,6 @@ namespace AMMS.Infrastructure.Repositories
                 }
             }
 
-            // Nếu vẫn trống thì fallback từ order_request
             if (req != null)
             {
                 if (string.IsNullOrWhiteSpace(customerName))
@@ -338,7 +357,6 @@ namespace AMMS.Infrastructure.Repositories
                 customerPhone ??= req.customer_phone;
             }
 
-            // Sản phẩm + số lượng
             var productName = item?.product_name
                               ?? req?.product_name
                               ?? string.Empty;
@@ -347,7 +365,6 @@ namespace AMMS.Infrastructure.Repositories
                            ?? req?.quantity
                            ?? 0;
 
-            // Lịch sản xuất (lấy min start_date & max end_date của tất cả productions của order)
             DateTime? prodStart = order.productions
                 .Select(p => p.start_date)
                 .Where(d => d != null)
@@ -360,14 +377,12 @@ namespace AMMS.Infrastructure.Repositories
                 .OrderByDescending(d => d)
                 .FirstOrDefault();
 
-            // Người duyệt: lấy manager_full_name của production mới nhất
             string approverName = order.productions
                 .OrderByDescending(p => p.start_date ?? p.end_date ?? order.order_date)
                 .Select(p => p.manager != null ? p.manager.full_name : null)
                 .FirstOrDefault()
                 ?? "Chưa cập nhật";
 
-            // Quy cách: ghép từ các field của order_item (nếu có)
             string? specification = null;
             if (item != null)
             {
@@ -385,18 +400,14 @@ namespace AMMS.Infrastructure.Repositories
                     specification = string.Join(" | ", parts);
             }
 
-            // Ghi chú – hiện tại mình lấy từ order_request.description
             string? note = req?.description;
 
-            // Tài chính
             decimal rushAmount = estimate?.rush_amount ?? 0m;
             decimal estimateTotal = estimate?.final_total_cost ?? order.total_amount ?? 0m;
 
-            // File mẫu & hợp đồng – hiện bạn chưa có cột riêng => tạm thời null
-            string? sampleFileUrl = item?.design_url;     // nếu FE muốn, có thể dùng làm file mẫu
-            string? contractFileUrl = null;               // chưa có, sau này thêm cột thì map
+            string? sampleFileUrl = item?.design_url;
+            string? contractFileUrl = null;
 
-            // ================= RETURN DTO =================
             return new OrderDetailDto
             {
                 OrderId = order.order_id,
@@ -429,4 +440,3 @@ namespace AMMS.Infrastructure.Repositories
         }
     }
 }
-

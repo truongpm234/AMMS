@@ -11,7 +11,6 @@ namespace AMMS.Shared.DTOs.Orders
         public string material_id { get; set; } = "";
         public string? material_name { get; set; }
         public decimal needed { get; set; }
-        public decimal missing { get; set; }
         public decimal available { get; set; }
     }
 }
