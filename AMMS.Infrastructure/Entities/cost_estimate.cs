@@ -1,7 +1,8 @@
 ﻿using System;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AMMS.Infrastructure.Entities;
-
+[Table("cost_estimate", Schema = "AMMS_DB")]
 public partial class cost_estimate
 {
     public int estimate_id { get; set; }

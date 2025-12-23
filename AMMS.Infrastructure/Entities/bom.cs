@@ -3,7 +3,12 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AMMS.Infrastructure.Entities;
+<<<<<<< HEAD
+//[Table("boms", Schema = "AMMS_DB")]
+
+=======
 [Table("boms", Schema = "AMMS_DB")]
+>>>>>>> main
 public partial class bom
 {
     public int bom_id { get; set; }
