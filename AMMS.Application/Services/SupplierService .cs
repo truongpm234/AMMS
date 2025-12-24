@@ -25,7 +25,6 @@ namespace AMMS.Application.Services
 
             var skip = (page - 1) * pageSize;
 
-            // lấy dư 1 để biết có trang sau
             var list = await _repo.GetPagedWithMaterialsAsync(skip, pageSize + 1, ct);
 
             var hasNext = list.Count > pageSize;

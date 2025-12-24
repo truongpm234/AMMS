@@ -8,14 +8,12 @@ using System.Threading.Tasks;
 namespace AMMS.Shared.DTOs.Suppliers {
     public class SupplierDetailDto
     {
-        public int SupplierId { get; init; }
-        public string Name { get; init; } = null!;
-        public string? ContactPerson { get; init; }
-        public string? Phone { get; init; }
-        public string? Email { get; init; }
-        public string? MainMaterialType { get; init; }
-
+        public int supplier_id { get; init; }
+        public string name { get; init; } = null!;
+        public string? contact_person { get; init; }
+        public string? phone { get; init; }
+        public string? email { get; init; }
+        public string? main_material_type { get; init; }
         public PagedResultLite<SupplierMaterialDto> Materials { get; init; }
-            = new PagedResultLite<SupplierMaterialDto>();
     }
 }

@@ -35,4 +35,6 @@ public partial class material
     public virtual ICollection<purchase_item> purchase_items { get; set; } = new List<purchase_item>();
 
     public virtual ICollection<stock_move> stock_moves { get; set; } = new List<stock_move>();
+
+    public virtual ICollection<supplier_material> supplier_materials { get; set; } = new List<supplier_material>();
 }

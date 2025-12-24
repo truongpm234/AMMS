@@ -55,6 +55,7 @@ public partial class AppDbContext : DbContext
 
     public virtual DbSet<machine> machines { get; set; }
 
+    public virtual DbSet<supplier_material> supplier_materials { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -492,48 +493,34 @@ public partial class AppDbContext : DbContext
         modelBuilder.Entity<cost_estimate>(entity =>
         {
             entity.HasKey(e => e.estimate_id).HasName("cost_estimate_pkey");
-
-            // Chi phí giấy
             entity.Property(e => e.paper_cost).HasPrecision(18, 2);
             entity.Property(e => e.paper_sheets_used).HasDefaultValue(0);
             entity.Property(e => e.paper_unit_price).HasPrecision(18, 2).HasDefaultValue(0);
-            // Chi phí mực
             entity.Property(e => e.ink_cost).HasPrecision(18, 2).HasDefaultValue(0);
             entity.Property(e => e.ink_weight_kg).HasPrecision(18, 4).HasDefaultValue(0);
             entity.Property(e => e.ink_rate_per_m2).HasPrecision(18, 6).HasDefaultValue(0);
-            // Chi phí keo phủ
             entity.Property(e => e.coating_glue_cost).HasPrecision(18, 2).HasDefaultValue(0);
             entity.Property(e => e.coating_glue_weight_kg).HasPrecision(18, 4).HasDefaultValue(0);
             entity.Property(e => e.coating_glue_rate_per_m2).HasPrecision(18, 6).HasDefaultValue(0);
             entity.Property(e => e.coating_type).HasMaxLength(20).HasDefaultValue("NONE");
-            // Chi phí keo bồi
             entity.Property(e => e.mounting_glue_cost).HasPrecision(18, 2).HasDefaultValue(0);
             entity.Property(e => e.mounting_glue_weight_kg).HasPrecision(18, 4).HasDefaultValue(0);
             entity.Property(e => e.mounting_glue_rate_per_m2).HasPrecision(18, 6).HasDefaultValue(0);
-            // Chi phí màng
             entity.Property(e => e.lamination_cost).HasPrecision(18, 2).HasDefaultValue(0);
             entity.Property(e => e.lamination_weight_kg).HasPrecision(18, 4).HasDefaultValue(0);
             entity.Property(e => e.lamination_rate_per_m2).HasPrecision(18, 6).HasDefaultValue(0);
-            // Tổng vật liệu
             entity.Property(e => e.material_cost).HasPrecision(18, 2).HasDefaultValue(0);
-            // Khấu hao (5%)
             entity.Property(e => e.overhead_percent).HasPrecision(5, 2).HasDefaultValue(5);
             entity.Property(e => e.overhead_cost).HasPrecision(18, 2).HasDefaultValue(0);
-            // Chi phí cơ bản
             entity.Property(e => e.base_cost).HasPrecision(18, 2);
-            // Rush order
             entity.Property(e => e.is_rush).HasDefaultValue(false);
             entity.Property(e => e.rush_percent).HasPrecision(5, 2).HasDefaultValue(0);
             entity.Property(e => e.rush_amount).HasPrecision(18, 2).HasDefaultValue(0);
             entity.Property(e => e.days_early).HasDefaultValue(0);
-            // Subtotal
             entity.Property(e => e.subtotal).HasPrecision(18, 2).HasDefaultValue(0);
-            // Chiết khấu
             entity.Property(e => e.discount_percent).HasPrecision(5, 2).HasDefaultValue(0);
             entity.Property(e => e.discount_amount).HasPrecision(18, 2).HasDefaultValue(0);
-            // Tổng cuối
             entity.Property(e => e.final_total_cost).HasPrecision(18, 2).HasDefaultValue(0);
-            // Timestamps
             entity.Property(e => e.created_at)
                 .HasDefaultValueSql("CURRENT_TIMESTAMP")
                 .HasColumnType("timestamp without time zone");
@@ -541,18 +528,39 @@ public partial class AppDbContext : DbContext
                 .HasColumnType("timestamp without time zone");
             entity.Property(e => e.desired_delivery_date)
                 .HasColumnType("timestamp without time zone");
-            // Chi tiết giấy
             entity.Property(e => e.sheets_required).HasDefaultValue(0);
             entity.Property(e => e.sheets_waste).HasDefaultValue(0);
             entity.Property(e => e.sheets_total).HasDefaultValue(0);
-            // Diện tích
             entity.Property(e => e.total_area_m2).HasPrecision(18, 4).HasDefaultValue(0);
-            // Navigation
             entity.HasOne(d => d.order_request)
                 .WithMany()
                 .HasForeignKey(d => d.order_request_id)
                 .OnDelete(DeleteBehavior.Cascade)
                 .HasConstraintName("fk_cost_estimate_order_request");
+        });
+
+        modelBuilder.Entity<supplier_material>(entity =>
+        {
+            entity.ToTable("supplier_materials", "AMMS_DB");
+            entity.HasKey(x => new { x.supplier_id, x.material_id })
+                  .HasName("supplier_materials_pkey");
+
+            entity.Property(x => x.is_active).HasDefaultValue(true);
+            entity.Property(x => x.created_at)
+                  .HasDefaultValueSql("CURRENT_TIMESTAMP")
+                  .HasColumnType("timestamp without time zone");
+
+            entity.HasOne(x => x.supplier)
+                  .WithMany(s => s.supplier_materials)
+                  .HasForeignKey(x => x.supplier_id)
+                  .OnDelete(DeleteBehavior.Cascade)
+                  .HasConstraintName("supplier_materials_supplier_id_fkey");
+
+            entity.HasOne(x => x.material)
+                  .WithMany(m => m.supplier_materials)
+                  .HasForeignKey(x => x.material_id)
+                  .OnDelete(DeleteBehavior.Cascade)
+                  .HasConstraintName("supplier_materials_material_id_fkey");
         });
 
         OnModelCreatingPartial(modelBuilder);

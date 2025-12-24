@@ -33,7 +33,7 @@ namespace AMMS.API.Controllers
         /// <summary>
         /// Lấy chi tiết 1 supplier + lịch sử mua materials (phân trang).
         /// </summary>
-        [HttpGet("{id:int}/detail")]
+        [HttpGet("detail/{id:int}")]
         public async Task<IActionResult> GetSupplierDetail(
             int id,
             [FromQuery] int page = 1,

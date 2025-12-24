@@ -9,37 +9,37 @@ namespace AMMS.Shared.DTOs.Orders
     public class OrderDetailDto
     {
         // Header
-        public int OrderId { get; set; }
-        public string Code { get; set; } = null!;
-        public string Status { get; set; } = null!;
-        public string PaymentStatus { get; set; } = null!;
-        public DateTime OrderDate { get; set; }              // Ngày tạo
-        public DateTime? DeliveryDate { get; set; }          // Ngày giao
+        public int Order_id { get; set; }
+        public string code { get; set; } = null!;
+        public string status { get; set; } = null!;
+        public string payment_status { get; set; } = null!;
+        public DateTime order_date { get; set; }              
+        public DateTime? delivery_date { get; set; }         
 
         // Khách hàng
-        public string CustomerName { get; set; } = string.Empty;   // "Tập đoàn FPT"
-        public string? CustomerEmail { get; set; }                 // Email khách hàng
-        public string? CustomerPhone { get; set; }                 // SĐT
+        public string customer_name { get; set; } = string.Empty;  
+        public string? customer_email { get; set; }                
+        public string? customer_phone { get; set; }                 
 
         // Sản phẩm
-        public string ProductName { get; set; } = string.Empty;
-        public int Quantity { get; set; }
+        public string product_name { get; set; } = string.Empty;
+        public string product_type { get; set; } = string.Empty;
+        public int quantity { get; set; }
 
         // Lịch sản xuất
-        public DateTime? ProductionStartDate { get; set; }   // Bắt đầu
-        public DateTime? ProductionEndDate { get; set; }     // Kết thúc
-        public string ApproverName { get; set; } = string.Empty; // Người duyệt: Quản lý sản xuất
+        public DateTime? production_start_date { get; set; }  
+        public DateTime? production_end_date { get; set; }     
+        public string approver_name { get; set; } = string.Empty; 
 
-        // Thông tin chi tiết
-        public string? Specification { get; set; }           // Quy cách
-        public string? Note { get; set; }                    // Ghi chú
+        public string? specification { get; set; }           
+        public string? note { get; set; }                    
 
         // Tài chính
-        public decimal RushAmount { get; set; }              // Phí gấp
-        public decimal EstimateTotal { get; set; }           // Tổng báo giá / thành tiền
+        public decimal rush_amount { get; set; }              
+        public decimal estimate_total { get; set; }          
 
         // File
-        public string? SampleFileUrl { get; set; }           // File mẫu (null => "Chưa có file mẫu")
-        public string? ContractFileUrl { get; set; }         // Hợp đồng (null => "Chưa có hợp đồng")
+        public string? file_url{ get; set; }          
+        public string? contract_file { get; set; }         
     }
 }

@@ -21,7 +21,7 @@ namespace AMMS.API.Controllers
         }
 
         [HttpGet("get-by-{code}")]
-        public async Task<IActionResult> GetByCOodeAsync(string code)
+        public async Task<IActionResult> GetByCodeAsync(string code)
         {
             var order = await _service.GetOrderByCodeAsync(code);
             if (order == null)
@@ -31,16 +31,16 @@ namespace AMMS.API.Controllers
             return Ok(order);
         }
 
-        [HttpGet("get-order-by-{orderId}")]
-        public async Task<IActionResult> GetOrderByIdAsync(int orderId)
-        {
-            var order = await _service.GetByIdAsync(orderId);
-            if (order == null)
-            {
-                return NotFound();
-            }
-            return Ok(order);
-        }
+        //[HttpGet("get-order-by-{orderId}")]
+        //public async Task<IActionResult> GetOrderByIdAsync(int orderId)
+        //{
+        //    var order = await _service.GetByIdAsync(orderId);
+        //    if (order == null)
+        //    {
+        //        return NotFound();
+        //    }
+        //    return Ok(order);
+        //}
 
         [HttpGet("paged")]
         public async Task<IActionResult> GetPaged([FromQuery] int page = 1, [FromQuery] int pageSize = 10)
@@ -49,7 +49,7 @@ namespace AMMS.API.Controllers
             return Ok(result);
         }
 
-        [HttpGet("{id:int}/detail")]
+        [HttpGet("detail/{id:int}")]
         public async Task<IActionResult> GetDetail(int id, CancellationToken ct)
         {
             var dto = await _service.GetDetailAsync(id);

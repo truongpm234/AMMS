@@ -11,7 +11,8 @@ namespace AMMS.Shared.DTOs.Suppliers
         string Code,
         string Name,
         string Unit,
-        decimal TotalQtyOrdered
+        bool IsActive,
+        string? Note
     );
 }
 

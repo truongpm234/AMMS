@@ -8,7 +8,6 @@ namespace AMMS.Shared.DTOs.Estimates
 {
     public class AdjustCostRequest
     {
-        public decimal? discount_percent { get; set; }
-        public string? cost_note { get; set; }
+        public decimal? final_cost { get; set; }
     }
 }

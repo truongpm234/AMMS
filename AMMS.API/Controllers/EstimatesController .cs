@@ -33,10 +33,10 @@ namespace AMMS.API.Controllers
             return Ok(result);
         }
 
-        [HttpPut("adjust-cost-by-discount/{id}")]
-        public async Task<IActionResult> AdjustCost(int id, [FromBody] AdjustCostRequest req)
+        [HttpPut("adjust-cost/{estimateId}")]
+        public async Task<IActionResult> AdjustCost(int estimateId, [FromBody] AdjustCostRequest req)
         {
-            await _service.AdjustCostBaseOnDiscountAsync(id, (decimal)req.discount_percent, req.cost_note);
+            await _service.UpdateFinalCostAsync(estimateId, req.final_cost);
             return NoContent();
         }
 

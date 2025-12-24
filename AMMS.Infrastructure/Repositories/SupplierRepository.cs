@@ -35,12 +35,12 @@ namespace AMMS.Infrastructure.Repositories
                 .Take(take)
                 .Select(s => new SupplierWithMaterialsDto
                 {
-                    SupplierId = s.supplier_id,
-                    Name = s.name,
-                    ContactPerson = s.contact_person,
-                    Phone = s.phone,
-                    Email = s.email,
-                    MainMaterialType = s.main_material_type
+                    supplier_id = s.supplier_id,
+                    name = s.name,
+                    contact_person = s.contact_person,
+                    phone = s.phone,
+                    email = s.email,
+                    main_material_type = s.main_material_type
                 })
                 .ToListAsync(ct);
 
@@ -49,7 +49,7 @@ namespace AMMS.Infrastructure.Repositories
 
             // 2) Lấy danh sách main_material_type của page hiện tại
             var types = suppliers
-                .Select(s => s.MainMaterialType)
+                .Select(s => s.main_material_type)
                 .Where(t => !string.IsNullOrWhiteSpace(t))
                 .Distinct()
                 .ToList();
@@ -88,26 +88,22 @@ namespace AMMS.Infrastructure.Repositories
 
             foreach (var s in suppliers)
             {
-                if (!string.IsNullOrWhiteSpace(s.MainMaterialType)
-                    && matLookup.TryGetValue(s.MainMaterialType!, out var list))
+                if (!string.IsNullOrWhiteSpace(s.main_material_type)
+                    && matLookup.TryGetValue(s.main_material_type!, out var list))
                 {
-                    s.Materials = list;
                 }
             }
 
             return suppliers;
         }
 
-        // 🔎 Chi tiết 1 supplier + lịch sử mua materials (theo purchase_items)
         public async Task<SupplierDetailDto?> GetSupplierDetailWithMaterialsAsync(
-            int supplierId, int page, int pageSize, CancellationToken ct = default)
+    int supplierId, int page, int pageSize, CancellationToken ct = default)
         {
-            if (page <= 0) page = 1;
-            if (pageSize <= 0) pageSize = 10;
+            page = page <= 0 ? 1 : page;
+            pageSize = pageSize <= 0 ? 10 : pageSize;
 
-            // 1) Supplier info
-            var supplierInfo = await _db.suppliers
-                .AsNoTracking()
+            var supplier = await _db.suppliers.AsNoTracking()
                 .Where(s => s.supplier_id == supplierId)
                 .Select(s => new
                 {
@@ -120,64 +116,56 @@ namespace AMMS.Infrastructure.Repositories
                 })
                 .FirstOrDefaultAsync(ct);
 
-            if (supplierInfo == null) return null;
+            if (supplier == null) return null;
 
-            var skip = (page - 1) * pageSize;
-
-            // 2) materials theo lịch sử mua: supplier -> purchases -> purchase_items -> materials
+            // ✅ Query base: select ra anonymous trước (EF dịch SQL được)
             var baseQuery =
-                from p in _db.purchases.AsNoTracking()
-                join pi in _db.purchase_items.AsNoTracking()
-                    on p.purchase_id equals pi.purchase_id
+                from sm in _db.supplier_materials.AsNoTracking()
+                where sm.supplier_id == supplierId
                 join m in _db.materials.AsNoTracking()
-                    on pi.material_id equals m.material_id
-                where p.supplier_id == supplierId
-                group pi by new { m.material_id, m.code, m.name, m.unit } into g
+                    on sm.material_id equals m.material_id
                 select new
                 {
-                    g.Key.material_id,
-                    g.Key.code,
-                    g.Key.name,
-                    g.Key.unit,
-                    TotalQty = g.Sum(x => x.qty_ordered) // decimal?
+                    m.material_id,
+                    m.code,
+                    m.name,
+                    m.unit,
+                    sm.is_active,
+                    sm.note
                 };
 
-            var orderedQuery = baseQuery
-                .OrderByDescending(x => x.TotalQty)
-                .ThenBy(x => x.name);
+            var totalCount = await baseQuery.CountAsync(ct);
 
-            var list = await orderedQuery
-                .Skip(skip)
-                .Take(pageSize + 1)
+            // ✅ OrderBy trước, rồi mới Select DTO
+            var items = await baseQuery
+                .OrderBy(x => x.name)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
                 .Select(x => new SupplierMaterialDto(
                     x.material_id,
                     x.code,
                     x.name,
                     x.unit,
-                    x.TotalQty ?? 0m
+                    x.is_active,
+                    x.note
                 ))
                 .ToListAsync(ct);
 
-            var hasNext = list.Count > pageSize;
-            if (hasNext) list = list.Take(pageSize).ToList();
-
-            var pagedMaterials = new PagedResultLite<SupplierMaterialDto>
-            {
-                Page = page,
-                PageSize = pageSize,
-                HasNext = hasNext,
-                Data = list
-            };
-
             return new SupplierDetailDto
             {
-                SupplierId = supplierInfo.supplier_id,
-                Name = supplierInfo.name,
-                ContactPerson = supplierInfo.contact_person,
-                Phone = supplierInfo.phone,
-                Email = supplierInfo.email,
-                MainMaterialType = supplierInfo.main_material_type,
-                Materials = pagedMaterials
+                supplier_id = supplier.supplier_id,
+                name = supplier.name,
+                contact_person = supplier.contact_person,
+                phone = supplier.phone,
+                email = supplier.email,
+                main_material_type = supplier.main_material_type,
+                Materials = new PagedResultLite<SupplierMaterialDto>
+                {
+                    Page = page,
+                    PageSize = pageSize,
+                    HasNext = (page * pageSize) < totalCount,
+                    Data = items
+                }
             };
         }
     }

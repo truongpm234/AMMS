@@ -20,4 +20,5 @@ public partial class supplier
     public string? main_material_type { get; set; }
 
     public virtual ICollection<purchase> purchases { get; set; } = new List<purchase>();
+    public virtual ICollection<supplier_material> supplier_materials { get; set; } = new List<supplier_material>();
 }

@@ -303,19 +303,19 @@ namespace AMMS.Infrastructure.Repositories
 
         public async Task<OrderDetailDto?> GetDetailByIdAsync(int orderId, CancellationToken ct = default)
         {
-            // (giữ nguyên phần GetDetailByIdAsync của bạn – mình không sửa)
             var order = await _db.orders
                 .AsNoTracking()
                 .Include(o => o.order_items)
                 .Include(o => o.productions)
-                    .ThenInclude(p => p.manager)
+                .ThenInclude(p => p.manager)
                 .FirstOrDefaultAsync(o => o.order_id == orderId, ct);
 
             if (order == null) return null;
 
             var req = await _db.order_requests
                 .AsNoTracking()
-                .FirstOrDefaultAsync(r => r.order_id == orderId, ct);
+                .Where(r => r.order_id == orderId)
+                .FirstOrDefaultAsync(ct);
 
             cost_estimate? estimate = null;
             if (req != null)
@@ -410,32 +410,33 @@ namespace AMMS.Infrastructure.Repositories
 
             return new OrderDetailDto
             {
-                OrderId = order.order_id,
-                Code = order.code,
-                Status = order.status ?? "New",
-                PaymentStatus = order.payment_status ?? "Unpaid",
-                OrderDate = (DateTime)order.order_date,
-                DeliveryDate = order.delivery_date,
+                Order_id = order.order_id,
+                code = order.code,
+                status = order.status ?? "New",
+                payment_status = order.payment_status ?? "Unpaid",
+                order_date = (DateTime)order.order_date,
+                delivery_date = order.delivery_date,
 
-                CustomerName = customerName,
-                CustomerEmail = customerEmail,
-                CustomerPhone = customerPhone,
+                customer_name = customerName,
+                customer_email = customerEmail,
+                customer_phone = customerPhone,
 
-                ProductName = productName,
-                Quantity = quantity,
+                product_name = productName,
+                product_type = req?.product_type ?? string.Empty,
+                quantity = quantity,
 
-                ProductionStartDate = prodStart,
-                ProductionEndDate = prodEnd,
-                ApproverName = approverName,
+                production_start_date = prodStart,
+                production_end_date = prodEnd,
+                approver_name = approverName,
 
-                Specification = specification,
-                Note = note,
+                specification = specification,
+                note = note,
 
-                RushAmount = rushAmount,
-                EstimateTotal = estimateTotal,
+                rush_amount = rushAmount,
+                estimate_total = estimateTotal,
 
-                SampleFileUrl = sampleFileUrl,
-                ContractFileUrl = contractFileUrl
+                file_url = sampleFileUrl,
+                contract_file = contractFileUrl
             };
         }
     }

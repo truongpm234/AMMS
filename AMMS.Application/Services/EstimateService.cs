@@ -765,27 +765,22 @@ namespace AMMS.Application.Services
             return details;
         }
 
-        public async Task AdjustCostBaseOnDiscountAsync(int estimateId, decimal? discountPercent, string? note)
+        public async Task UpdateFinalCostAsync(int estimateId, decimal? finalCostInput)
         {
             var estimate = await _estimateRepo.GetByIdAsync(estimateId)
                 ?? throw new Exception("Estimate not found");
 
-            var percent = discountPercent ?? 0m;
+            if (finalCostInput is null)
+                throw new ArgumentException("final_total_cost is required");
 
-            if (percent < 0m || percent > 100m)
-                throw new ArgumentException("discount_percent must be between 0 and 100");
+            var finalCost = finalCostInput.Value;
 
-            decimal subtotal = estimate.subtotal;
+            if (finalCost < 0m)
+                throw new ArgumentException("final_total_cost must be >= 0");
 
-            var discountAmount = Math.Round(subtotal * percent / 100m, 2);
-            var final = subtotal - discountAmount;
-            if (final < 0m) final = 0m;
+            var subtotal = estimate.subtotal;
 
-            estimate.discount_percent = percent;
-            estimate.discount_amount = discountAmount;
-            estimate.subtotal = subtotal;
-            estimate.final_total_cost = Math.Round(final, 2);
-            estimate.cost_note = note;
+            estimate.final_total_cost = Math.Round(finalCost, 2);
 
             await _estimateRepo.SaveChangesAsync();
         }

@@ -8,13 +8,11 @@ namespace AMMS.Shared.DTOs.Suppliers
 {
     public class SupplierWithMaterialsDto
     {
-        public int SupplierId { get; set; }
-        public string Name { get; set; } = null!;
-        public string? ContactPerson { get; set; }
-        public string? Phone { get; set; }
-        public string? Email { get; set; }
-        public string? MainMaterialType { get; set; }
-
-        public List<SupplierMaterialBasicDto> Materials { get; set; } = new();
+        public int supplier_id { get; set; }
+        public string name { get; set; } = null!;
+        public string? contact_person { get; set; }
+        public string? phone { get; set; }
+        public string? email { get; set; }
+        public string? main_material_type { get; set; }
     }
 }
