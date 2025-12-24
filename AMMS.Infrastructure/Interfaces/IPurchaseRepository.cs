@@ -25,5 +25,8 @@ namespace AMMS.Infrastructure.Interfaces
         Task<bool> SupplierExistsAsync(int supplierId, CancellationToken ct = default);
 
         Task<int?> GetManagerUserIdAsync(CancellationToken ct = default);
+
+        Task<object> ReceiveAllPendingPurchasesAsync(int managerUserId, CancellationToken ct = default);
+
     }
 }

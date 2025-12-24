@@ -41,6 +41,23 @@ namespace AMMS.Infrastructure.Repositories
         // ===== MAIN PAGED WITH FULFILL ===================================
         public async Task<List<OrderResponseDto>> GetPagedWithFulfillAsync(int skip, int take, CancellationToken ct = default)
         {
+            // ===== Helpers ===================================================
+            static string ToUtcString(DateTime? dt)
+            {
+                if (dt is null) return "";
+                var v = DateTime.SpecifyKind(dt.Value, DateTimeKind.Utc);
+                return v.ToString("O");
+            }
+
+            static bool IsNotEnoughStatus(string? status)
+            {
+                if (string.IsNullOrWhiteSpace(status)) return false;
+
+                return status.Equals("Not Enough", StringComparison.OrdinalIgnoreCase)
+                    || status.Equals("false", StringComparison.OrdinalIgnoreCase)
+                    || status.Equals("0", StringComparison.OrdinalIgnoreCase);
+            }
+
             // 1) Lấy page orders (kèm customer + item đầu)
             var orders = await _db.orders
                 .AsNoTracking()
@@ -74,13 +91,17 @@ namespace AMMS.Infrastructure.Repositories
 
             if (orders.Count == 0) return new List<OrderResponseDto>();
 
-            // 2) CHỈ order có status = "Not Enough"/false mới cần tính thiếu NVL
+            // 2) Chỉ order có status Not Enough mới tính thiếu NVL
             var orderIdsNeedCalc = orders
                 .Where(o => IsNotEnoughStatus(o.Status))
                 .Select(o => o.order_id)
                 .ToList();
 
+            // missingByOrder: OrderId -> list thiếu NVL
             Dictionary<int, List<MissingMaterialDto>> missingByOrder = new();
+
+            // ordersWithBom: OrderId nào có BOM lines
+            var ordersWithBom = new HashSet<int>();
 
             if (orderIdsNeedCalc.Count > 0)
             {
@@ -105,7 +126,9 @@ namespace AMMS.Infrastructure.Repositories
 
                 if (bomLines.Count > 0)
                 {
-                    // 2.2) Usage 30 ngày gần nhất từ stock_moves
+                    ordersWithBom = bomLines.Select(x => x.OrderId).ToHashSet();
+
+                    // 2.2) Usage 30 ngày gần nhất từ stock_moves (OUT)
                     var today = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
                     var historyStart = DateTime.SpecifyKind(today.AddDays(-30), DateTimeKind.Unspecified);
                     var historyEndExclusive = DateTime.SpecifyKind(today.AddDays(1), DateTimeKind.Unspecified);
@@ -134,7 +157,7 @@ namespace AMMS.Infrastructure.Repositories
                             x => Math.Round(x.UsageLast30Days, 4)
                         );
 
-                    // 2.3) Tính thiếu NVL với ROUND ở từng bước để tránh overflow
+                    // 2.3) Tính thiếu NVL theo BOM + safety (30% usage 30 ngày)
                     missingByOrder = bomLines
                         .GroupBy(x => new { x.OrderId, x.MaterialId, x.MaterialName, x.StockQty })
                         .Select(g =>
@@ -143,11 +166,11 @@ namespace AMMS.Infrastructure.Repositories
 
                             foreach (var r in g)
                             {
-                                var qty = r.Quantity;                                  // quantity của order
-                                var qtyPerProduct = Math.Round(r.QtyPerProduct, 4);    // định mức
-                                var wastePercent = Math.Round(r.WastagePercent, 2);    // %
+                                var qty = r.Quantity;                               // số lượng order
+                                var qtyPerProduct = Math.Round(r.QtyPerProduct, 4); // định mức
+                                var wastePercent = Math.Round(r.WastagePercent, 2); // % hao hụt
 
-                                var baseQty = Math.Round(qty * qtyPerProduct, 4);      // lượng cơ bản
+                                var baseQty = Math.Round(qty * qtyPerProduct, 4);
                                 var factor = Math.Round(1m + (wastePercent / 100m), 4);
                                 var lineRequired = Math.Round(baseQty * factor, 4);
 
@@ -156,7 +179,7 @@ namespace AMMS.Infrastructure.Repositories
                             }
 
                             usageDict.TryGetValue(g.Key.MaterialId, out var usage30);
-                            var safetyQty = Math.Round(usage30 * 0.30m, 4);           // 30% usage 30 ngày
+                            var safetyQty = Math.Round(usage30 * 0.30m, 4);
 
                             var needed = Math.Round(requiredQty + safetyQty, 4);
                             var available = Math.Round(g.Key.StockQty, 4);
@@ -189,15 +212,32 @@ namespace AMMS.Infrastructure.Repositories
                 }
             }
 
-            // 3) Build response
+            // 3) Build response (HƯỚNG A)
             return orders.Select(o =>
             {
-                bool canFulfill =
-                    o.Status.Equals("New", StringComparison.OrdinalIgnoreCase) ? true :
-                    IsNotEnoughStatus(o.Status) ? false :
-                    true;
-
                 missingByOrder.TryGetValue(o.order_id, out var missingMaterials);
+
+                bool canFulfill;
+
+                if (IsNotEnoughStatus(o.Status))
+                {
+                    // ✅ Nếu Not Enough mà không có BOM => false (tránh true ảo)
+                    if (!ordersWithBom.Contains(o.order_id))
+                    {
+                        canFulfill = false;
+                        missingMaterials ??= new List<MissingMaterialDto>();
+                    }
+                    else
+                    {
+                        // ✅ Có BOM: thiếu -> false, không thiếu -> true
+                        canFulfill = (missingMaterials == null || missingMaterials.Count == 0);
+                    }
+                }
+                else
+                {
+                    // ✅ Các status khác: giữ như logic cũ (mặc định true)
+                    canFulfill = true;
+                }
 
                 return new OrderResponseDto
                 {
@@ -209,14 +249,18 @@ namespace AMMS.Infrastructure.Repositories
                     quantity = o.FirstItem?.quantity ?? 0,
                     created_at = ToUtcString(o.order_date),
                     delivery_date = ToUtcString(o.delivery_date),
+
                     can_fulfill = canFulfill,
-                    // chỉ trả về missing_materials nếu không thể fulfill
+
+                    // ✅ chỉ trả về missing nếu còn thiếu
                     missing_materials = canFulfill == false
                         ? (missingMaterials ?? new List<MissingMaterialDto>())
                         : null
                 };
             }).ToList();
         }
+
+
 
         // ===== CRUD & OTHER METHODS ======================================
         public async Task AddOrderAsync(order entity)

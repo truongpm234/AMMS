@@ -47,6 +47,13 @@ namespace AMMS.API.Controllers
             var result = await _service.CreatePurchaseOrderAsync(dto, ct);
             return StatusCode(StatusCodes.Status201Created, result);
         }
+
+        [HttpPost("orders/receive-all")]
+        public async Task<IActionResult> ReceiveAllPendingPurchases(CancellationToken ct)
+        {
+            var result = await _service.ReceiveAllPendingPurchasesAsync(ct);
+            return Ok(result);
+        }
     }
 }
 

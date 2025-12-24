@@ -130,5 +130,106 @@ namespace AMMS.Infrastructure.Repositories
                 .FirstOrDefaultAsync(ct);
         }
 
+        public async Task<object> ReceiveAllPendingPurchasesAsync(int managerUserId, CancellationToken ct = default)
+        {
+            var strategy = _db.Database.CreateExecutionStrategy();
+
+            return await strategy.ExecuteAsync<object>(async () =>
+            {
+                await using var tx = await _db.Database.BeginTransactionAsync(ct);
+
+                // 1) lấy PO pending
+                var pending = await _db.purchases
+                    .AsTracking()
+                    .Where(p => p.status == "Pending")
+                    .ToListAsync(ct);
+
+                if (pending.Count == 0)
+                {
+                    await tx.CommitAsync(ct);
+                    return new { processed = 0, message = "No pending purchase orders." };
+                }
+
+                var purchaseIds = pending.Select(p => p.purchase_id).ToList();
+
+                // 2) lấy items theo các PO
+                var items = await _db.purchase_items
+                    .AsNoTracking()
+                    .Where(i => i.purchase_id != null && purchaseIds.Contains(i.purchase_id.Value))
+                    .ToListAsync(ct);
+
+                if (items.Count == 0)
+                {
+                    // vẫn update trạng thái nếu bạn muốn, hoặc trả về báo không có item
+                    foreach (var po in pending) po.status = "Received";
+                    await _db.SaveChangesAsync(ct);
+                    await tx.CommitAsync(ct);
+
+                    return new { processed = pending.Count, stockMovesCreated = 0, materialsUpdated = 0, statusSetTo = "Received" };
+                }
+
+                var now = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Unspecified);
+
+                // 3) tạo stock_moves + gom qty theo material
+                var stockMoves = new List<stock_move>(items.Count);
+                var materialAddMap = new Dictionary<int, decimal>();
+
+                foreach (var it in items)
+                {
+                    if (it.material_id == null) continue;
+                    var qty = (decimal)(it.qty_ordered ?? 0);
+                    if (qty <= 0) continue;
+
+                    var materialId = it.material_id.Value;
+
+                    stockMoves.Add(new stock_move
+                    {
+                        material_id = materialId,
+                        type = "IN",
+                        qty = qty,
+                        ref_doc = pending.First(p => p.purchase_id == it.purchase_id).code, // hoặc query map code nhanh hơn
+                        user_id = managerUserId,
+                        move_date = now,
+                        note = "Auto receive from PO",
+                        purchase_id = it.purchase_id
+                    });
+
+                    if (!materialAddMap.ContainsKey(materialId)) materialAddMap[materialId] = 0;
+                    materialAddMap[materialId] += qty;
+                }
+
+                if (stockMoves.Count > 0)
+                    await _db.stock_moves.AddRangeAsync(stockMoves, ct);
+
+                // 4) update materials.stock_qty
+                var materialIds = materialAddMap.Keys.ToList();
+                var materials = await _db.materials
+                    .AsTracking()
+                    .Where(m => materialIds.Contains(m.material_id))
+                    .ToListAsync(ct);
+
+                foreach (var m in materials)
+                {
+                    m.stock_qty = (m.stock_qty ?? 0) + materialAddMap[m.material_id];
+                }
+
+                // 5) update status PO
+                foreach (var po in pending)
+                    po.status = "Received";
+
+                await _db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
+
+                return new
+                {
+                    processed = pending.Count,
+                    stockMovesCreated = stockMoves.Count,
+                    materialsUpdated = materials.Count,
+                    statusSetTo = "Received"
+                };
+            });
+        }
+
+
     }
 }

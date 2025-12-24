@@ -149,5 +149,16 @@ namespace AMMS.Application.Services
                 totalQty
             );
         }
+
+        public async Task<object> ReceiveAllPendingPurchasesAsync(CancellationToken ct = default)
+        {
+            // set cứng manager
+            var managerId = await _repo.GetManagerUserIdAsync(ct);
+            if (managerId == null)
+                throw new ArgumentException("User 'manager' not found. Please create it first.");
+
+            return await _repo.ReceiveAllPendingPurchasesAsync(managerId.Value, ct);
+        }
+
     }
 }

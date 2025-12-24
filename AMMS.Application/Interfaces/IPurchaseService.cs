@@ -20,5 +20,8 @@ namespace AMMS.Application.Interfaces
         Task<PurchaseOrderListItemDto> CreatePurchaseOrderAsync(
             CreatePurchaseRequestDto dto,
             CancellationToken ct = default);
+
+        Task<object> ReceiveAllPendingPurchasesAsync(CancellationToken ct = default);
+
     }
 }
