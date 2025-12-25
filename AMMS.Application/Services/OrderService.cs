@@ -60,5 +60,8 @@ namespace AMMS.Application.Services
         }
         public Task<OrderDetailDto?> GetDetailAsync(int id, CancellationToken ct = default)
             => _orderRepo.GetDetailByIdAsync(id, ct);
+
+        public Task<List<OrderMissingMaterialRowDto>> GetOrdersWithMissingMaterialsAsync(CancellationToken ct = default) // ✅ NEW
+            => _orderRepo.GetOrdersWithMissingMaterialsAsync(ct);
     }
 }
