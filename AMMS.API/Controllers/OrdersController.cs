@@ -84,5 +84,12 @@ namespace AMMS.API.Controllers
                 return BadRequest(new { message = ex.Message });
             }
         }
+
+        [HttpGet("missing-materials")]
+        public async Task<IActionResult> GetOrdersMissingMaterials(CancellationToken ct)
+        {
+            var result = await _service.GetOrdersWithMissingMaterialsAsync(ct);
+            return Ok(result);
+        }
     }
 }

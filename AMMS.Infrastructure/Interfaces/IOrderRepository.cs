@@ -17,5 +17,7 @@ namespace AMMS.Infrastructure.Interfaces
         Task<int> SaveChangesAsync();
         Task<string> GenerateNextOrderCodeAsync();
         Task<OrderDetailDto?> GetDetailByIdAsync(int orderId, CancellationToken ct = default);
+        Task<List<OrderMissingMaterialRowDto>> GetOrdersWithMissingMaterialsAsync(
+            CancellationToken ct = default);
     }
 }

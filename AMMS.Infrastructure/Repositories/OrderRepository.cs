@@ -483,5 +483,175 @@ namespace AMMS.Infrastructure.Repositories
                 contract_file = contractFileUrl
             };
         }
+
+        public async Task<List<OrderMissingMaterialRowDto>> GetOrdersWithMissingMaterialsAsync(CancellationToken ct = default)
+        {
+            // ✅ CHANGED: không dùng IsNotEnoughStatus trong LINQ nữa
+            // EF translate được ToLower() + so sánh string
+            var orders = await _db.orders
+                .AsNoTracking()
+                .Where(o =>
+                    o.status != null &&
+                    (
+                        o.status.ToLower() == "not enough" ||
+                        o.status.ToLower() == "false" ||
+                        o.status.ToLower() == "0"
+                    )
+                )
+                .Select(o => new
+                {
+                    o.order_id,
+                    o.code,
+                    o.order_date
+                })
+                .ToListAsync(ct);
+
+            if (orders.Count == 0) return new List<OrderMissingMaterialRowDto>();
+
+            var orderIds = orders.Select(x => x.order_id).ToList();
+
+            // request_date ưu tiên order_request_date, fallback order.order_date
+            var reqDates = await _db.order_requests
+                .AsNoTracking()
+                .Where(r => r.order_id != null && orderIds.Contains(r.order_id.Value))
+                .Select(r => new
+                {
+                    OrderId = r.order_id!.Value,
+                    r.order_request_date
+                })
+                .ToListAsync(ct);
+
+            var reqDateDict = reqDates
+                .GroupBy(x => x.OrderId)
+                .ToDictionary(g => g.Key, g => g.Max(x => x.order_request_date));
+
+            var orderDict = orders.ToDictionary(
+                x => x.order_id,
+                x => new
+                {
+                    x.code,
+                    RequestDate = reqDateDict.TryGetValue(x.order_id, out var rd) ? rd : x.order_date
+                });
+
+            // 2) BOM lines cho các orders Not Enough
+            var bomLines = await (
+                from oi in _db.order_items.AsNoTracking()
+                join b in _db.boms.AsNoTracking() on oi.item_id equals b.order_item_id
+                join m in _db.materials.AsNoTracking() on b.material_id equals m.material_id
+                where oi.order_id != null && orderIds.Contains(oi.order_id.Value)
+                select new
+                {
+                    OrderId = oi.order_id!.Value,
+                    MaterialId = m.material_id,
+                    MaterialName = m.name,
+                    MaterialCode = m.code,
+                    StockQty = m.stock_qty ?? 0m,
+
+                    Quantity = (decimal)oi.quantity,
+                    QtyPerProduct = b.qty_per_product ?? 0m,
+                    WastagePercent = b.wastage_percent ?? 0m
+                }
+            ).ToListAsync(ct);
+
+            if (bomLines.Count == 0)
+                return new List<OrderMissingMaterialRowDto>();
+
+            // 3) Usage 30 ngày gần nhất từ stock_moves OUT
+            var today = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
+            var historyStart = DateTime.SpecifyKind(today.AddDays(-30), DateTimeKind.Unspecified);
+            var historyEndExclusive = DateTime.SpecifyKind(today.AddDays(1), DateTimeKind.Unspecified);
+
+            var materialIds = bomLines.Select(x => x.MaterialId).Distinct().ToList();
+
+            var usageLast30List = await _db.stock_moves
+                .AsNoTracking()
+                .Where(s =>
+                    s.type == "OUT" &&
+                    s.move_date >= historyStart &&
+                    s.move_date < historyEndExclusive &&
+                    s.material_id != null &&
+                    materialIds.Contains(s.material_id.Value))
+                .GroupBy(s => s.material_id!.Value)
+                .Select(g => new
+                {
+                    MaterialId = g.Key,
+                    UsageLast30Days = g.Sum(x => x.qty ?? 0m)
+                })
+                .ToListAsync(ct);
+
+            var usageDict = usageLast30List.ToDictionary(
+                x => x.MaterialId,
+                x => Math.Round(x.UsageLast30Days, 4)
+            );
+
+            // 4) Tính thiếu (missing) theo Order + Material
+            var missingRows = new List<OrderMissingMaterialRowDto>();
+
+            var grouped = bomLines
+                .GroupBy(x => new
+                {
+                    x.OrderId,
+                    x.MaterialId,
+                    x.MaterialName,
+                    x.MaterialCode,
+                    x.StockQty
+                });
+
+            foreach (var g in grouped)
+            {
+                decimal requiredQty = 0m;
+
+                foreach (var r in g)
+                {
+                    var qty = r.Quantity;
+                    var qtyPerProduct = Math.Round(r.QtyPerProduct, 4);
+                    var wastePercent = Math.Round(r.WastagePercent, 2);
+
+                    var baseQty = Math.Round(qty * qtyPerProduct, 4);
+                    var factor = Math.Round(1m + (wastePercent / 100m), 4);
+                    var lineRequired = Math.Round(baseQty * factor, 4);
+
+                    if (lineRequired < 0m) lineRequired = 0m;
+                    requiredQty += lineRequired;
+                }
+
+                usageDict.TryGetValue(g.Key.MaterialId, out var usage30);
+                var safetyQty = Math.Round(usage30 * 0.30m, 4);
+
+                var needed = Math.Round(requiredQty + safetyQty, 4);
+                var available = Math.Round(g.Key.StockQty, 4);
+
+                var missing = needed - available;
+                if (missing < 0m) missing = 0m;
+
+                if (missing <= 0m) continue;
+
+                var orderInfo = orderDict[g.Key.OrderId];
+
+                missingRows.Add(new OrderMissingMaterialRowDto
+                {
+                    order_id = g.Key.OrderId,
+                    order_code = orderInfo.code,
+                    request_date = orderInfo.RequestDate,
+
+                    material_code = g.Key.MaterialCode ?? "",
+                    missing_qty = missing,
+
+                    material = new MissingMaterialDto
+                    {
+                        material_id = g.Key.MaterialId.ToString(),
+                        material_name = g.Key.MaterialName,
+                        needed = needed,
+                        available = available
+                    }
+                });
+            }
+
+            return missingRows
+                .OrderByDescending(x => x.request_date)
+                .ThenByDescending(x => x.order_id)
+                .ToList();
+        }
+
     }
 }
