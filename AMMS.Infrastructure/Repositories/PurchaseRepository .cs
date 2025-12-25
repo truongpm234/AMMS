@@ -230,6 +230,42 @@ namespace AMMS.Infrastructure.Repositories
             });
         }
 
+        public async Task<List<PurchaseOrderListItemDto>> GetPendingPurchasesAsync(
+    CancellationToken ct = default)
+        {
+            var query =
+                from p in _db.purchases.AsNoTracking()
+                where p.status == "Pending"
+
+                join s in _db.suppliers.AsNoTracking()
+                    on p.supplier_id equals s.supplier_id into sup
+                from s in sup.DefaultIfEmpty()
+
+                join i in _db.purchase_items.AsNoTracking()
+                    on p.purchase_id equals i.purchase_id into items
+                from i in items.DefaultIfEmpty()
+
+                group new { p, s, i } by new
+                {
+                    p.purchase_id,
+                    p.code,
+                    p.created_at,
+                    SupplierName = (string?)(s != null ? s.name : null)
+                }
+                into g
+                orderby g.Key.purchase_id descending
+                select new PurchaseOrderListItemDto(
+                    g.Key.purchase_id,
+                    g.Key.code,
+                    g.Key.SupplierName ?? "N/A",
+                    g.Key.created_at,
+                    "manager",
+                    g.Sum(x => (decimal?)(x.i != null ? (x.i.qty_ordered ?? 0) : 0)) ?? 0m
+                );
+
+            return await query.ToListAsync(ct);
+        }
+
 
     }
 }
