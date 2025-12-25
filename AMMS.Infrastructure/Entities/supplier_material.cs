@@ -20,6 +20,9 @@ public partial class supplier_material
 
     public string? note { get; set; }
 
+    [Column(TypeName = "numeric(18,2)")]
+    public decimal? unit_price { get; set; }
+
     public virtual supplier supplier { get; set; } = null!;
 
     public virtual material material { get; set; } = null!;
