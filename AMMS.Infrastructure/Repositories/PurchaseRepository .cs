@@ -47,7 +47,6 @@ namespace AMMS.Infrastructure.Repositories
             return $"PO{next:D4}";
         }
 
-        // ✅ NEW: dùng chung cho "all" và "pending"
         private IQueryable<PurchaseOrderListItemDto> BuildPurchaseListQuery(string? statusFilter)
         {
             var q =
@@ -62,24 +61,25 @@ namespace AMMS.Infrastructure.Repositories
                     on p.purchase_id equals i.purchase_id into items
                 from i in items.DefaultIfEmpty()
 
-                    // ✅ CHANGED: join stock_moves IN để lấy người nhận
+                join m in _db.materials.AsNoTracking()
+                    on i.material_id equals m.material_id into mats
+                from m in mats.DefaultIfEmpty()
+
                 join sm in _db.stock_moves.AsNoTracking().Where(x => x.type == "IN")
                     on p.purchase_id equals sm.purchase_id into sms
                 from sm in sms.DefaultIfEmpty()
 
-                    // ✅ CHANGED: join users để lấy ReceivedByName
                 join u in _db.users.AsNoTracking()
                     on sm.user_id equals u.user_id into us
                 from u in us.DefaultIfEmpty()
 
-                    // ✅ CHANGED: group include eta_date + status
-                group new { p, s, i, sm, u } by new
+                group new { p, s, i, m, sm, u } by new
                 {
                     p.purchase_id,
                     p.code,
                     p.created_at,
-                    p.eta_date,         
-                    p.status,           
+                    p.eta_date,
+                    p.status,
                     SupplierName = (string?)(s != null ? s.name : null)
                 }
                 into g
@@ -91,15 +91,21 @@ namespace AMMS.Infrastructure.Repositories
                     g.Key.created_at,
                     "manager",
                     g.Sum(x => (decimal?)(x.i != null ? (x.i.qty_ordered ?? 0) : 0)) ?? 0m,
-                    g.Key.eta_date,     
-                    g.Key.status ?? "Pending", 
-                    g.Max(x => x.u != null ? x.u.full_name : null) 
+                    g.Key.eta_date,
+                    g.Key.status ?? "Pending",
+                    g.Max(x => x.u != null ? x.u.full_name : null),
+
+                    // ✅ unit (1 unit => trả unit đó, nhiều => "MIXED", không có item => null)
+                    g.Select(x => x.m != null ? x.m.unit : null).Where(v => v != null).Distinct().Count() == 0
+                        ? null
+                        : g.Select(x => x.m != null ? x.m.unit : null).Where(v => v != null).Distinct().Count() == 1
+                            ? g.Select(x => x.m != null ? x.m.unit : null).Where(v => v != null).Max()
+                            : "MIXED"
                 );
 
             return q;
         }
 
-        // ✅ NEW
         private static void NormalizePaging(ref int page, ref int pageSize)
         {
             if (page <= 0) page = 1;
@@ -135,22 +141,133 @@ namespace AMMS.Infrastructure.Repositories
             };
         }
 
-        // ✅ CHANGED: refactor dùng BuildPurchaseListQuery + ToPagedAsync
-        public Task<PagedResultLite<PurchaseOrderListItemDto>> GetPurchaseOrdersAsync(
-            int page, int pageSize, CancellationToken ct = default)
+        public async Task<PagedResultLite<PurchaseOrderWithItemsDto>> GetPurchaseOrdersAsync(
+    int page, int pageSize, CancellationToken ct = default)
         {
-            var query = BuildPurchaseListQuery(statusFilter: null); 
-            return ToPagedAsync(query, page, pageSize, ct);         
+            return await GetOrdersWithItemsCoreAsync(statusFilter: null, page, pageSize, ct);
         }
 
-        // ✅ CHANGED: giờ pending trả về PagedResultLite
-        public Task<PagedResultLite<PurchaseOrderListItemDto>> GetPendingPurchasesAsync(
-            int page, int pageSize, CancellationToken ct = default)
+        public async Task<PagedResultLite<PurchaseOrderWithItemsDto>> GetPendingPurchasesAsync(
+    int page, int pageSize, CancellationToken ct = default)
         {
-            var query = BuildPurchaseListQuery(statusFilter: "Pending"); 
-            return ToPagedAsync(query, page, pageSize, ct);              
+            return await GetOrdersWithItemsCoreAsync(statusFilter: "Pending", page, pageSize, ct);
         }
 
+        private async Task<PagedResultLite<PurchaseOrderWithItemsDto>> GetOrdersWithItemsCoreAsync(
+    string? statusFilter,
+    int page,
+    int pageSize,
+    CancellationToken ct)
+        {
+            NormalizePaging(ref page, ref pageSize);
+            var skip = (page - 1) * pageSize;
+
+            // 1) Page purchases (join supplier 1 lần, ít nhất có thể)
+            var purchaseRows = await _db.purchases
+                .AsNoTracking()
+                .Where(p => statusFilter == null || p.status == statusFilter)
+                .OrderByDescending(p => p.purchase_id)
+                .Skip(skip)
+                .Take(pageSize + 1)
+                .Select(p => new
+                {
+                    p.purchase_id,
+                    p.code,
+                    p.created_at,
+                    p.eta_date,
+                    Status = p.status ?? "Pending",
+                    SupplierName = p.supplier != null ? p.supplier.name : "N/A"
+                })
+                .ToListAsync(ct);
+
+            var hasNext = purchaseRows.Count > pageSize;
+            if (hasNext) purchaseRows.RemoveAt(purchaseRows.Count - 1);
+
+            var purchaseIds = purchaseRows.Select(x => x.purchase_id).ToList();
+
+            // 2) Items của các purchase trong page (KHÔNG join materials)
+            var itemRows = await _db.purchase_items
+                .AsNoTracking()
+                .Where(i => i.purchase_id != null && purchaseIds.Contains(i.purchase_id.Value))
+                .OrderBy(i => i.id)
+                .Select(i => new
+                {
+                    PurchaseId = i.purchase_id!.Value,
+                    i.id,
+                    MaterialId = i.material_id ?? 0,
+                    i.material_code,
+                    i.material_name,
+                    i.unit,
+                    Qty = (decimal)(i.qty_ordered ?? 0m),
+                    i.price
+                })
+                .ToListAsync(ct);
+
+            var itemsByPurchase = itemRows
+                .GroupBy(x => x.PurchaseId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.Select(x => new PurchaseItemLineDto(
+                            x.id,
+                            x.MaterialId,
+                            x.material_code,
+                            x.material_name,
+                            x.unit,
+                            x.Qty,
+                            x.price
+                        ))
+                        .ToList()
+                );
+
+            // 3) received_by_name (join stock_moves + users, chỉ cho page hiện tại)
+            var receivedBy = await (
+                from sm in _db.stock_moves.AsNoTracking()
+                where sm.type == "IN"
+                      && sm.purchase_id != null
+                      && purchaseIds.Contains(sm.purchase_id.Value)
+                join u in _db.users.AsNoTracking()
+                    on sm.user_id equals u.user_id into us
+                from u in us.DefaultIfEmpty()
+                group u by sm.purchase_id!.Value into g
+                select new
+                {
+                    PurchaseId = g.Key,
+                    Name = g.Max(x => x != null ? x.full_name : null)
+                }
+            ).ToDictionaryAsync(x => x.PurchaseId, x => x.Name, ct);
+
+            // 4) Build response
+            var data = purchaseRows.Select(p =>
+            {
+                itemsByPurchase.TryGetValue(p.purchase_id, out var lines);
+                lines ??= new List<PurchaseItemLineDto>();
+
+                var totalQty = lines.Sum(x => x.qty_ordered);
+
+                receivedBy.TryGetValue(p.purchase_id, out var rName);
+
+                return new PurchaseOrderWithItemsDto(
+                    p.purchase_id,
+                    p.code,
+                    p.SupplierName,
+                    p.created_at,
+                    "manager",
+                    totalQty,
+                    p.eta_date,
+                    p.Status,
+                    rName,
+                    lines
+                );
+            }).ToList();
+
+            return new PagedResultLite<PurchaseOrderWithItemsDto>
+            {
+                Page = page,
+                PageSize = pageSize,
+                HasNext = hasNext,
+                Data = data
+            };
+        }
         public Task<bool> SupplierExistsAsync(int supplierId, CancellationToken ct = default)
             => _db.suppliers.AsNoTracking().AnyAsync(s => s.supplier_id == supplierId, ct);
 

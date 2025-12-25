@@ -15,15 +15,15 @@ namespace AMMS.Application.Interfaces
             int? createdBy,
             CancellationToken ct = default);
 
-        Task<PagedResultLite<PurchaseOrderListItemDto>> GetPurchaseOrdersAsync(int page, int pageSize, CancellationToken ct = default);
-
+        Task<PagedResultLite<PurchaseOrderWithItemsDto>> GetPurchaseOrdersAsync(
+                    int page, int pageSize, CancellationToken ct = default);
         Task<PurchaseOrderListItemDto> CreatePurchaseOrderAsync(
             CreatePurchaseRequestDto dto,
             CancellationToken ct = default);
 
         Task<object> ReceiveAllPendingPurchasesAsync(CancellationToken ct = default);
 
-        Task<PagedResultLite<PurchaseOrderListItemDto>> GetPendingPurchasesAsync( 
+        Task<PagedResultLite<PurchaseOrderWithItemsDto>> GetPendingPurchasesAsync(
             int page, int pageSize, CancellationToken ct = default);
     }
 }

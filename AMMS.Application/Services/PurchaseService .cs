@@ -72,13 +72,13 @@ namespace AMMS.Application.Services
             );
         }
 
-        public Task<PagedResultLite<PurchaseOrderListItemDto>> GetPurchaseOrdersAsync(
-            int page, int pageSize, CancellationToken ct = default)
-            => _repo.GetPurchaseOrdersAsync(page, pageSize, ct);
+        public Task<PagedResultLite<PurchaseOrderWithItemsDto>> GetPurchaseOrdersAsync(
+    int page, int pageSize, CancellationToken ct = default)
+    => _repo.GetPurchaseOrdersAsync(page, pageSize, ct);
 
-        public Task<PagedResultLite<PurchaseOrderListItemDto>> GetPendingPurchasesAsync( // ✅ CHANGED
+        public Task<PagedResultLite<PurchaseOrderWithItemsDto>> GetPendingPurchasesAsync(
             int page, int pageSize, CancellationToken ct = default)
-            => _repo.GetPendingPurchasesAsync(page, pageSize, ct);          // ✅ CHANGED
+            => _repo.GetPendingPurchasesAsync(page, pageSize, ct);
 
         public async Task<PurchaseOrderListItemDto> CreatePurchaseOrderAsync(
             CreatePurchaseRequestDto dto,
@@ -145,7 +145,8 @@ namespace AMMS.Application.Services
                 totalQty,
                 p.eta_date,
                 p.status ?? "Pending",
-                null
+                received_by_name: null,
+    unit_summary: null
             );
         }
 

@@ -16,6 +16,12 @@ public partial class purchase_item
 
     public decimal? price { get; set; }
 
+    public string? unit { get; set; }
+
+    public string? material_code { get; set; }
+
+    public string? material_name { get; set; }
+
     public virtual material? material { get; set; }
 
     public virtual purchase? purchase { get; set; }
