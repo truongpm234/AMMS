@@ -131,13 +131,12 @@ namespace AMMS.Application.Services
                 };
             }
 
-            // chỉ request đã Accepted mới convert
-            if (!string.Equals(req.process_status?.Trim(), "accepted", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(req.process_status?.Trim(), "Accepted", StringComparison.OrdinalIgnoreCase))
             {
                 return new ConvertRequestToOrderResponse
                 {
                     Success = false,
-                    Message = "Only process_status = 'accepted' can be converted to order",
+                    Message = "Only process_status = 'Accepted' can be converted to order",
                     RequestId = requestId
                 };
             }

@@ -42,19 +42,18 @@ namespace AMMS.Application.Services
 
             var code = await _repo.GenerateNextPurchaseCodeAsync(ct);
 
-            // purchases = "phiếu yêu cầu mua"
             var p = new purchase
             {
                 code = code,
-                supplier_id = dto.SupplierId,          // có thể null nếu chưa chọn NCC
-                created_by = createdBy,                // nếu chưa auth thì null
-                status = "Pending",                    // quan trọng: coi đây là request
+                supplier_id = dto.SupplierId,          
+                created_by = createdBy,                
+                status = "Pending",                   
                 eta_date = ToUnspecified(dto.EtaDate),
                 created_at = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Unspecified),
             };
 
             await _repo.AddPurchaseAsync(p, ct);
-            await _repo.SaveChangesAsync(ct); // để có purchase_id
+            await _repo.SaveChangesAsync(ct); 
 
             var items = dto.Items.Select(x => new purchase_item
             {

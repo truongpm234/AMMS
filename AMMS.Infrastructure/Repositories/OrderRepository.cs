@@ -351,15 +351,14 @@ namespace AMMS.Infrastructure.Repositories
                 .AsNoTracking()
                 .Include(o => o.order_items)
                 .Include(o => o.productions)
-                .ThenInclude(p => p.manager)
+                    .ThenInclude(p => p.manager)
                 .FirstOrDefaultAsync(o => o.order_id == orderId, ct);
 
             if (order == null) return null;
 
             var req = await _db.order_requests
                 .AsNoTracking()
-                .Where(r => r.order_id == orderId)
-                .FirstOrDefaultAsync(ct);
+                .FirstOrDefaultAsync(r => r.order_id == orderId, ct);
 
             cost_estimate? estimate = null;
             if (req != null)
@@ -369,9 +368,7 @@ namespace AMMS.Infrastructure.Repositories
                     .FirstOrDefaultAsync(e => e.order_request_id == req.order_request_id, ct);
             }
 
-            var item = order.order_items
-                .OrderBy(i => i.item_id)
-                .FirstOrDefault();
+            var item = order.order_items.OrderBy(i => i.item_id).FirstOrDefault();
 
             string customerName = string.Empty;
             string? customerEmail = null;
@@ -379,15 +376,12 @@ namespace AMMS.Infrastructure.Repositories
 
             if (order.customer_id.HasValue)
             {
-                var customer = await _db.customers
-                    .AsNoTracking()
+                var customer = await _db.customers.AsNoTracking()
                     .FirstOrDefaultAsync(c => c.customer_id == order.customer_id.Value, ct);
 
                 if (customer != null)
                 {
-                    customerName = customer.company_name
-                                   ?? customer.contact_name
-                                   ?? customerName;
+                    customerName = customer.company_name ?? customer.contact_name ?? customerName;
                     customerEmail = customer.email;
                     customerPhone = customer.phone;
                 }
@@ -401,14 +395,18 @@ namespace AMMS.Infrastructure.Repositories
                 customerPhone ??= req.customer_phone;
             }
 
-            var productName = item?.product_name
-                              ?? req?.product_name
-                              ?? string.Empty;
+            var productName = item?.product_name ?? req?.product_name ?? string.Empty;
+            var quantity = item?.quantity ?? req?.quantity ?? 0;
 
-            var quantity = item?.quantity
-                           ?? req?.quantity
-                           ?? 0;
+            var finalCost = estimate?.final_total_cost ?? order.total_amount ?? 0m;
 
+            var deposit = estimate != null
+                ? estimate.deposit_amount
+                : Math.Round(finalCost * 0.30m, 0);
+
+            var urlDesign = item?.design_url ?? req?.design_file_path;
+
+            // giữ phần production dates + approver (như bạn)
             DateTime? prodStart = order.productions
                 .Select(p => p.start_date)
                 .Where(d => d != null)
@@ -431,32 +429,18 @@ namespace AMMS.Infrastructure.Repositories
             if (item != null)
             {
                 var parts = new List<string>();
-                if (!string.IsNullOrWhiteSpace(item.finished_size))
-                    parts.Add($"Thành phẩm: {item.finished_size}");
-                if (!string.IsNullOrWhiteSpace(item.print_size))
-                    parts.Add($"Khổ in: {item.print_size}");
-                if (!string.IsNullOrWhiteSpace(item.paper_type))
-                    parts.Add($"Giấy: {item.paper_type}");
-                if (!string.IsNullOrWhiteSpace(item.colors))
-                    parts.Add($"Màu: {item.colors}");
-
-                if (parts.Count > 0)
-                    specification = string.Join(" | ", parts);
+                if (!string.IsNullOrWhiteSpace(item.finished_size)) parts.Add($"Thành phẩm: {item.finished_size}");
+                if (!string.IsNullOrWhiteSpace(item.print_size)) parts.Add($"Khổ in: {item.print_size}");
+                if (!string.IsNullOrWhiteSpace(item.paper_type)) parts.Add($"Giấy: {item.paper_type}");
+                if (!string.IsNullOrWhiteSpace(item.colors)) parts.Add($"Màu: {item.colors}");
+                if (parts.Count > 0) specification = string.Join(" | ", parts);
             }
-
-            string? note = req?.description;
-
-            decimal rushAmount = estimate?.rush_amount ?? 0m;
-            decimal estimateTotal = estimate?.final_total_cost ?? order.total_amount ?? 0m;
-
-            string? sampleFileUrl = item?.design_url;
-            string? contractFileUrl = null;
 
             return new OrderDetailDto
             {
-                Order_id = order.order_id,
+                order_id = order.order_id,
                 code = order.code,
-                status = order.status ?? "New",
+                status = order.status ?? "Scheduled",
                 payment_status = order.payment_status ?? "Unpaid",
                 order_date = (DateTime)order.order_date,
                 delivery_date = order.delivery_date,
@@ -465,8 +449,9 @@ namespace AMMS.Infrastructure.Repositories
                 customer_email = customerEmail,
                 customer_phone = customerPhone,
 
+                detail_address = req?.detail_address,
+
                 product_name = productName,
-                product_type = req?.product_type ?? string.Empty,
                 quantity = quantity,
 
                 production_start_date = prodStart,
@@ -474,14 +459,16 @@ namespace AMMS.Infrastructure.Repositories
                 approver_name = approverName,
 
                 specification = specification,
-                note = note,
+                note = req?.description,
 
-                rush_amount = rushAmount,
-                estimate_total = estimateTotal,
+                final_total_cost = finalCost,
+                deposit_amount = deposit,
+                rush_amount = estimate?.rush_amount ?? 0m,
 
-                file_url = sampleFileUrl,
-                contract_file = contractFileUrl
+                file_url = urlDesign,
+                contract_file = null
             };
         }
+
     }
 }

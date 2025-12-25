@@ -97,6 +97,8 @@ public partial class cost_estimate
     // Ghi chú
     public string? cost_note { get; set; }
 
+    public decimal deposit_amount { get; private set; }
+
     // Navigation
     public virtual order_request order_request { get; set; } = null!;
 }

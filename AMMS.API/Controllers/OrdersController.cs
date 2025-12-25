@@ -31,16 +31,6 @@ namespace AMMS.API.Controllers
             return Ok(order);
         }
 
-        //[HttpGet("get-order-by-{orderId}")]
-        //public async Task<IActionResult> GetOrderByIdAsync(int orderId)
-        //{
-        //    var order = await _service.GetByIdAsync(orderId);
-        //    if (order == null)
-        //    {
-        //        return NotFound();
-        //    }
-        //    return Ok(order);
-        //}
 
         [HttpGet("paged")]
         public async Task<IActionResult> GetPaged([FromQuery] int page = 1, [FromQuery] int pageSize = 10)
@@ -80,7 +70,6 @@ namespace AMMS.API.Controllers
             }
             catch (InvalidOperationException ex)
             {
-                // Ví dụ: không thiếu NVL
                 return BadRequest(new { message = ex.Message });
             }
         }
