@@ -28,5 +28,8 @@ namespace AMMS.Infrastructure.Interfaces
 
         Task<object> ReceiveAllPendingPurchasesAsync(int managerUserId, CancellationToken ct = default);
 
+        Task<List<PurchaseOrderListItemDto>> GetPendingPurchasesAsync(
+        CancellationToken ct = default);
+
     }
 }

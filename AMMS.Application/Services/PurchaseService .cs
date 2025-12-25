@@ -160,5 +160,10 @@ namespace AMMS.Application.Services
             return await _repo.ReceiveAllPendingPurchasesAsync(managerId.Value, ct);
         }
 
+        public async Task<IReadOnlyList<PurchaseOrderListItemDto>> GetPendingPurchasesAsync(
+    CancellationToken ct = default)
+        {
+            return await _repo.GetPendingPurchasesAsync(ct);
+        }
     }
 }
