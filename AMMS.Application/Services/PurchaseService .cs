@@ -43,12 +43,7 @@ namespace AMMS.Application.Services
 
                 supplier_id = dto.SupplierId,
                 created_by = createdBy,
-                status = "Pending",
-
-                supplier_id = dto.SupplierId,          
-                created_by = createdBy,                
-                status = "Pending",                   
-
+                status = "Pending",               
                 eta_date = ToUnspecified(dto.EtaDate),
                 created_at = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Unspecified),
             };
