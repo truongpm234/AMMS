@@ -166,6 +166,8 @@ namespace AMMS.API.Controllers
 
             await _dealService.NotifyConsultantPaidAsync(orderRequestId, amount, now);
 
+            await _dealService.NotifyCustomerPaidAsync(orderRequestId, amount, now);
+
             return Ok(new { ok = true });
         }
 

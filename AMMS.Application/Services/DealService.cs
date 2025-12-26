@@ -81,6 +81,8 @@ namespace AMMS.Application.Services
             var est = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId)
                 ?? throw new Exception("Estimate not found");
 
+            await SendConsultantStatusEmailAsync(req, est, statusText: "KHÁCH ĐỒNG Ý BÁO GIÁ (CHỜ THANH TOÁN CỌC)");
+
             var deposit = est.deposit_amount;
             var amount = (int)Math.Round(deposit, 0);
 
@@ -129,7 +131,7 @@ namespace AMMS.Application.Services
             await SendConsultantStatusEmailAsync(
                 req,
                 est,
-                statusText: $"KHÁCH TỪ CHỐI (Lý do: {safeReason})"
+                statusText: $"KHACH TU CHOI (LY DO: {safeReason})"
             );
         }
 
@@ -152,7 +154,7 @@ namespace AMMS.Application.Services
             if (string.IsNullOrWhiteSpace(consultantEmail))
                 return;
 
-            var address = $"{req.detail_address}, {req.district}, {req.province}";
+            var address = $"{req.detail_address}";
             var delivery = req.delivery_date?.ToString("dd/MM/yyyy") ?? "N/A";
 
             var finalTotal = est?.final_total_cost ?? 0m;
@@ -220,6 +222,54 @@ namespace AMMS.Application.Services
                 statusText: "KHÁCH ĐỒNG Ý & ĐÃ THANH TOÁN CỌC",
                 paidAmount: paidAmount,
                 paidAt: paidAt
+            );
+        }
+        public async Task NotifyCustomerPaidAsync(int orderRequestId, decimal paidAmount, DateTime paidAt)
+        {
+            var req = await _requestRepo.GetByIdAsync(orderRequestId)
+                ?? throw new Exception("Order request not found");
+
+            if (string.IsNullOrWhiteSpace(req.customer_email))
+                return;
+
+            cost_estimate? est = null;
+            try
+            {
+                est = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId);
+            }
+            catch { }
+
+            var finalTotal = est?.final_total_cost ?? 0m;
+            var deposit = est?.deposit_amount ?? 0m;
+
+            var html = $@"
+<div style='font-family:Arial;max-width:720px;margin:24px auto'>
+  <h2>Thanh toán thành công</h2>
+  <p>Chúng tôi đã nhận được tiền cọc cho đơn hàng của bạn.</p>
+
+  <h3>Thông tin đơn hàng</h3>
+  <ul>
+    <li><b>Request ID:</b> {req.order_request_id}</li>
+    <li><b>Sản phẩm:</b> {req.product_name}</li>
+    <li><b>Số lượng:</b> {req.quantity}</li>
+    <li><b>Tổng giá trị:</b> {finalTotal:n0} VND</li>
+    <li><b>Tiền cọc:</b> {deposit:n0} VND</li>
+  </ul>
+
+  <h3>Thông tin thanh toán</h3>
+  <ul>
+    <li><b>Số tiền đã thanh toán:</b> {paidAmount:n0} VND</li>
+    <li><b>Thời gian:</b> {paidAt:dd/MM/yyyy HH:mm:ss}</li>
+    <li><b>Trạng thái:</b> PAID</li>
+  </ul>
+
+  <p style='color:#64748b;font-size:12px'>AMMS System</p>
+</div>";
+
+            await _emailService.SendAsync(
+                req.customer_email,
+                $"[AMMS] Thanh toán thành công - Đơn #{req.order_request_id}",
+                html
             );
         }
 
