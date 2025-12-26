@@ -1,12 +1,9 @@
 ﻿using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
+using AMMS.Shared.DTOs.Common;
+using AMMS.Shared.DTOs.Productions;
 using Microsoft.EntityFrameworkCore;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace AMMS.Infrastructure.Repositories
 {
@@ -18,23 +15,40 @@ namespace AMMS.Infrastructure.Repositories
         {
             _db = db;
         }
+
+        private static void NormalizePaging(ref int page, ref int pageSize)
+        {
+            if (page <= 0) page = 1;
+            if (pageSize <= 0) pageSize = 10;
+            if (pageSize > 200) pageSize = 200;
+        }
+
+        private sealed class TaskRow
+        {
+            public int ProdId { get; set; }
+            public string StageName { get; set; } = "";
+            public int? SeqNum { get; set; }
+            public DateTime? StartTime { get; set; }
+            public DateTime? EndTime { get; set; }
+        }
+
         /// <summary>
         /// Ngày giao gần nhất của các đơn đang sản xuất
         /// </summary>
         public async Task<DateTime?> GetNearestDeliveryDateAsync()
         {
-            return await _db.productions
-                .AsNoTracking()
-                .Include(p => p.order)
-                .Where(p =>
-                    (EF.Functions.ILike(p.status!, "scheduled") ||
-                     EF.Functions.ILike(p.status!, "in_production")) &&
-                    p.order!.delivery_date != null
-                )
-                .OrderBy(p => p.order!.delivery_date)
-                .Select(p => p.order!.delivery_date)
-                .FirstOrDefaultAsync(); 
+            // Đơn đang sản xuất: start_date != null && end_date == null
+            return await (
+                from pr in _db.productions.AsNoTracking()
+                join o in _db.orders.AsNoTracking() on pr.order_id equals o.order_id
+                where pr.start_date != null
+                      && pr.end_date == null
+                      && o.delivery_date != null
+                orderby o.delivery_date
+                select o.delivery_date
+            ).FirstOrDefaultAsync();
         }
+
         public Task AddAsync(production p)
         {
             _db.productions.Add(p);
@@ -45,5 +59,141 @@ namespace AMMS.Infrastructure.Repositories
 
         public Task<production?> GetByIdAsync(int prodId)
             => _db.productions.FirstOrDefaultAsync(x => x.prod_id == prodId);
+
+
+        public async Task<PagedResultLite<ProducingOrderCardDto>> GetProducingOrdersAsync(
+            int page,
+            int pageSize,
+            CancellationToken ct = default)
+        {
+            NormalizePaging(ref page, ref pageSize);
+            var skip = (page - 1) * pageSize;
+
+            // 1) Base rows: productions đang sản xuất
+            var baseRows = await (
+                from pr in _db.productions.AsNoTracking()
+                join o in _db.orders.AsNoTracking() on pr.order_id equals o.order_id
+
+                join q in _db.quotes.AsNoTracking() on o.quote_id equals q.quote_id into qj
+                from q in qj.DefaultIfEmpty()
+
+                join c in _db.customers.AsNoTracking() on q.customer_id equals c.customer_id into cj
+                from c in cj.DefaultIfEmpty()
+
+                where pr.start_date != null && pr.end_date == null
+                orderby pr.start_date descending, pr.prod_id descending
+                select new
+                {
+                    pr.prod_id,
+                    o.order_id,
+                    o.code,
+                    o.delivery_date,
+
+                    CustomerName =
+                        o.customer != null
+                            ? (o.customer.company_name ?? o.customer.contact_name ?? "")
+                            : (c != null
+                                ? (c.company_name ?? c.contact_name ?? "")
+                                : ""),
+
+                    FirstItem = _db.order_items
+                        .AsNoTracking()
+                        .Where(i => i.order_id == o.order_id)
+                        .OrderBy(i => i.item_id)
+                        .Select(i => new { i.product_name, i.quantity })
+                        .FirstOrDefault()
+                }
+            )
+            .Skip(skip)
+            .Take(pageSize + 1)
+            .ToListAsync(ct);
+
+            var hasNext = baseRows.Count > pageSize;
+            if (hasNext) baseRows.RemoveAt(baseRows.Count - 1);
+
+            if (baseRows.Count == 0)
+            {
+                return new PagedResultLite<ProducingOrderCardDto>
+                {
+                    Page = page,
+                    PageSize = pageSize,
+                    HasNext = false,
+                    Data = new List<ProducingOrderCardDto>()
+                };
+            }
+
+            var prodIds = baseRows.Select(x => x.prod_id).ToList();
+
+            // 2) ✅ TaskRows typed (không anonymous)
+            var taskRows = await _db.tasks
+                .AsNoTracking()
+                .Where(t => t.prod_id != null && prodIds.Contains(t.prod_id.Value))
+                .Select(t => new TaskRow
+                {
+                    ProdId = t.prod_id!.Value,
+                    StageName = t.name,
+                    SeqNum = t.seq_num,
+                    StartTime = t.start_time,
+                    EndTime = t.end_time
+                })
+                .ToListAsync(ct);
+
+            var tasksByProd = taskRows
+                .GroupBy(x => x.ProdId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.OrderBy(x => x.SeqNum ?? int.MaxValue)
+                          .ThenBy(x => x.StageName)
+                          .ToList()
+                );
+
+            // 3) Build card
+            var result = new List<ProducingOrderCardDto>();
+
+            foreach (var r in baseRows)
+            {
+                tasksByProd.TryGetValue(r.prod_id, out var tasks);
+                tasks ??= new List<TaskRow>(); // ✅ giờ OK
+
+                var total = tasks.Count;
+                var done = tasks.Count(x => x.EndTime != null);
+
+                decimal progress = 0m;
+                if (total > 0)
+                    progress = Math.Round(done * 100m / total, 0);
+
+                var stages = tasks
+                    .Select(x => x.StageName)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct()
+                    .ToList();
+
+                string? currentStage =
+                    tasks.FirstOrDefault(x => x.StartTime != null && x.EndTime == null)?.StageName
+                    ?? tasks.FirstOrDefault(x => x.EndTime == null)?.StageName;
+
+                result.Add(new ProducingOrderCardDto
+                {
+                    order_id = r.order_id,
+                    code = r.code,
+                    customer_name = r.CustomerName,
+                    product_name = r.FirstItem?.product_name,
+                    quantity = r.FirstItem?.quantity ?? 0,
+                    delivery_date = r.delivery_date,
+
+                    progress_percent = progress,
+                    current_stage = currentStage,
+                    stages = stages
+                });
+            }
+
+            return new PagedResultLite<ProducingOrderCardDto>
+            {
+                Page = page,
+                PageSize = pageSize,
+                HasNext = hasNext,
+                Data = result
+            };
+        }
     }
 }

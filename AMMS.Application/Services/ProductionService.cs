@@ -1,5 +1,6 @@
 ﻿using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.Interfaces;
+using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Enums;
 using AMMS.Shared.DTOs.Productions;
 using System;
@@ -38,5 +39,8 @@ namespace AMMS.Application.Services
             var result = Enum.GetNames(typeof(ProcessType)).ToList();
             return Task.FromResult(result);
         }
+
+        public Task<PagedResultLite<ProducingOrderCardDto>> GetProducingOrdersAsync( int page, int pageSize, CancellationToken ct = default)
+           => _repo.GetProducingOrdersAsync(page, pageSize, ct);
     }
 }

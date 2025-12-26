@@ -30,5 +30,15 @@ namespace AMMS.API.Controllers
             var data = await _service.GetAllProcessTypeAsync();
             return Ok(data);
         }
+
+        [HttpGet("producing")]
+        public async Task<IActionResult> GetProducingOrders(
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 10,
+            CancellationToken ct = default)
+        {
+            var result = await _service.GetProducingOrdersAsync(page, pageSize, ct);
+            return Ok(result);
+        }
     }
 }
