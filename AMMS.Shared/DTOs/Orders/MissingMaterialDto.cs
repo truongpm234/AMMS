@@ -8,7 +8,7 @@ namespace AMMS.Shared.DTOs.Orders
 {
     public class MissingMaterialDto
     {
-        public string material_id { get; set; } = "";
+        public int material_id { get; set; } 
         public string? material_name { get; set; }
         public decimal needed { get; set; }
         public decimal available { get; set; }

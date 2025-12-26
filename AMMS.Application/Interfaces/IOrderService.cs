@@ -13,8 +13,10 @@ namespace AMMS.Application.Interfaces
 
         Task<PagedResultLite<OrderResponseDto>> GetPagedAsync(int page, int pageSize);
 
-        Task<List<OrderMissingMaterialRowDto>> GetOrdersWithMissingMaterialsAsync( 
-           CancellationToken ct = default);
+        Task<PagedResultLite<MissingMaterialDto>> GetAllMissingMaterialsAsync(
+            int page,
+            int pageSize,
+            CancellationToken ct = default);
 
     }
 }

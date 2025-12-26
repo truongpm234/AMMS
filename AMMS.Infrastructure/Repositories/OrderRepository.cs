@@ -2,6 +2,7 @@
 using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
+using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Orders;
 using Microsoft.EntityFrameworkCore;
 using System;
@@ -203,7 +204,7 @@ namespace AMMS.Infrastructure.Repositories
                             g => g.Key,
                             g => g.Select(x => new MissingMaterialDto
                             {
-                                material_id = x.MaterialId.ToString(),
+                                material_id = x.MaterialId,
                                 material_name = x.MaterialName,
                                 needed = x.Needed,
                                 available = x.Available
@@ -471,173 +472,94 @@ namespace AMMS.Infrastructure.Repositories
         }
 
 
-        public async Task<List<OrderMissingMaterialRowDto>> GetOrdersWithMissingMaterialsAsync(CancellationToken ct = default)
+        private static void NormalizePaging(ref int page, ref int pageSize)
         {
-            // ✅ CHANGED: không dùng IsNotEnoughStatus trong LINQ nữa
-            // EF translate được ToLower() + so sánh string
-            var orders = await _db.orders
-                .AsNoTracking()
-                .Where(o =>
-                    o.status != null &&
-                    (
-                        o.status.ToLower() == "not enough" ||
-                        o.status.ToLower() == "false" ||
-                        o.status.ToLower() == "0"
-                    )
-                )
-                .Select(o => new
-                {
-                    o.order_id,
-                    o.code,
-                    o.order_date
-                })
-                .ToListAsync(ct);
+            if (page <= 0) page = 1;
+            if (pageSize <= 0) pageSize = 10;
+            if (pageSize > 200) pageSize = 200;
+        }
 
-            if (orders.Count == 0) return new List<OrderMissingMaterialRowDto>();
+        // ✅ CHANGED: Get ALL missing materials (NOT by orderId)
+        public async Task<PagedResultLite<MissingMaterialDto>> GetAllMissingMaterialsAsync(
+    int page,
+    int pageSize,
+    CancellationToken ct = default)
+        {
+            NormalizePaging(ref page, ref pageSize);
+            var skip = (page - 1) * pageSize;
 
-            var orderIds = orders.Select(x => x.order_id).ToList();
-
-            // request_date ưu tiên order_request_date, fallback order.order_date
-            var reqDates = await _db.order_requests
-                .AsNoTracking()
-                .Where(r => r.order_id != null && orderIds.Contains(r.order_id.Value))
-                .Select(r => new
-                {
-                    OrderId = r.order_id!.Value,
-                    r.order_request_date
-                })
-                .ToListAsync(ct);
-
-            var reqDateDict = reqDates
-                .GroupBy(x => x.OrderId)
-                .ToDictionary(g => g.Key, g => g.Max(x => x.order_request_date));
-
-            var orderDict = orders.ToDictionary(
-                x => x.order_id,
-                x => new
-                {
-                    x.code,
-                    RequestDate = reqDateDict.TryGetValue(x.order_id, out var rd) ? rd : x.order_date
-                });
-
-            // 2) BOM lines cho các orders Not Enough
-            var bomLines = await (
+            // 1) Line-level (đọc numeric về double để né Npgsql decimal overflow)
+            var lineQuery =
                 from oi in _db.order_items.AsNoTracking()
                 join b in _db.boms.AsNoTracking() on oi.item_id equals b.order_item_id
                 join m in _db.materials.AsNoTracking() on b.material_id equals m.material_id
-                where oi.order_id != null && orderIds.Contains(oi.order_id.Value)
                 select new
                 {
-                    OrderId = oi.order_id!.Value,
                     MaterialId = m.material_id,
                     MaterialName = m.name,
-                    MaterialCode = m.code,
-                    StockQty = m.stock_qty ?? 0m,
 
-                    Quantity = (decimal)oi.quantity,
-                    QtyPerProduct = b.qty_per_product ?? 0m,
-                    WastagePercent = b.wastage_percent ?? 0m
-                }
-            ).ToListAsync(ct);
+                    AvailableD = (double)(m.stock_qty ?? 0m),
 
-            if (bomLines.Count == 0)
-                return new List<OrderMissingMaterialRowDto>();
+                    NeededLineD =
+                        (double)oi.quantity
+                        * (double)(b.qty_per_product ?? 0m)
+                        * (1.0 + ((double)(b.wastage_percent ?? 0m) / 100.0))
+                };
 
-            // 3) Usage 30 ngày gần nhất từ stock_moves OUT
-            var today = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
-            var historyStart = DateTime.SpecifyKind(today.AddDays(-30), DateTimeKind.Unspecified);
-            var historyEndExclusive = DateTime.SpecifyKind(today.AddDays(1), DateTimeKind.Unspecified);
-
-            var materialIds = bomLines.Select(x => x.MaterialId).Distinct().ToList();
-
-            var usageLast30List = await _db.stock_moves
-                .AsNoTracking()
-                .Where(s =>
-                    s.type == "OUT" &&
-                    s.move_date >= historyStart &&
-                    s.move_date < historyEndExclusive &&
-                    s.material_id != null &&
-                    materialIds.Contains(s.material_id.Value))
-                .GroupBy(s => s.material_id!.Value)
-                .Select(g => new
+            // 2) Aggregate (EF dịch được)
+            var aggQuery =
+                from x in lineQuery
+                group x by new { x.MaterialId, x.MaterialName } into g
+                select new
                 {
-                    MaterialId = g.Key,
-                    UsageLast30Days = g.Sum(x => x.qty ?? 0m)
-                })
+                    g.Key.MaterialId,
+                    g.Key.MaterialName,
+                    NeededD = g.Sum(t => t.NeededLineD),
+                    AvailableD = g.Max(t => t.AvailableD)
+                };
+
+            // 3) Chỉ lấy NVL thiếu
+            var filtered =
+                from x in aggQuery
+                where x.NeededD > x.AvailableD
+                orderby (x.NeededD - x.AvailableD) descending
+                select x;
+
+            var rawRows = await filtered
+                .Skip(skip)
+                .Take(pageSize + 1)
                 .ToListAsync(ct);
 
-            var usageDict = usageLast30List.ToDictionary(
-                x => x.MaterialId,
-                x => Math.Round(x.UsageLast30Days, 4)
-            );
+            var hasNext = rawRows.Count > pageSize;
+            if (hasNext) rawRows.RemoveAt(rawRows.Count - 1);
 
-            // 4) Tính thiếu (missing) theo Order + Material
-            var missingRows = new List<OrderMissingMaterialRowDto>();
-
-            var grouped = bomLines
-                .GroupBy(x => new
-                {
-                    x.OrderId,
-                    x.MaterialId,
-                    x.MaterialName,
-                    x.MaterialCode,
-                    x.StockQty
-                });
-
-            foreach (var g in grouped)
+            // 4) Convert double → decimal có clamp (không bao giờ overflow)
+            static decimal SafeDecimal(double v)
             {
-                decimal requiredQty = 0m;
-
-                foreach (var r in g)
-                {
-                    var qty = r.Quantity;
-                    var qtyPerProduct = Math.Round(r.QtyPerProduct, 4);
-                    var wastePercent = Math.Round(r.WastagePercent, 2);
-
-                    var baseQty = Math.Round(qty * qtyPerProduct, 4);
-                    var factor = Math.Round(1m + (wastePercent / 100m), 4);
-                    var lineRequired = Math.Round(baseQty * factor, 4);
-
-                    if (lineRequired < 0m) lineRequired = 0m;
-                    requiredQty += lineRequired;
-                }
-
-                usageDict.TryGetValue(g.Key.MaterialId, out var usage30);
-                var safetyQty = Math.Round(usage30 * 0.30m, 4);
-
-                var needed = Math.Round(requiredQty + safetyQty, 4);
-                var available = Math.Round(g.Key.StockQty, 4);
-
-                var missing = needed - available;
-                if (missing < 0m) missing = 0m;
-
-                if (missing <= 0m) continue;
-
-                var orderInfo = orderDict[g.Key.OrderId];
-
-                missingRows.Add(new OrderMissingMaterialRowDto
-                {
-                    order_id = g.Key.OrderId,
-                    order_code = orderInfo.code,
-                    request_date = orderInfo.RequestDate,
-
-                    material_code = g.Key.MaterialCode ?? "",
-                    missing_qty = missing,
-
-                    material = new MissingMaterialDto
-                    {
-                        material_id = g.Key.MaterialId.ToString(),
-                        material_name = g.Key.MaterialName,
-                        needed = needed,
-                        available = available
-                    }
-                });
+                if (double.IsNaN(v) || double.IsInfinity(v)) return decimal.MaxValue;
+                if (v > (double)decimal.MaxValue) return decimal.MaxValue;
+                if (v < (double)decimal.MinValue) return decimal.MinValue;
+                return (decimal)v;
             }
 
-            return missingRows
-                .OrderByDescending(x => x.request_date)
-                .ThenByDescending(x => x.order_id)
-                .ToList();
+            var data = rawRows.Select(x => new MissingMaterialDto
+            {
+                material_id = x.MaterialId,          // ✅ ID thật
+                material_name = x.MaterialName,
+                needed = SafeDecimal(x.NeededD),
+                available = SafeDecimal(x.AvailableD)
+            }).ToList();
+
+            return new PagedResultLite<MissingMaterialDto>
+            {
+                Page = page,
+                PageSize = pageSize,
+                HasNext = hasNext,
+                Data = data
+            };
         }
+
+
+
     }
 }

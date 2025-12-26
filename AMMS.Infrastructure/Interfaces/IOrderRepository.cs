@@ -1,4 +1,5 @@
 ﻿using AMMS.Infrastructure.Entities;
+using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Orders;
 
 namespace AMMS.Infrastructure.Interfaces
@@ -17,7 +18,9 @@ namespace AMMS.Infrastructure.Interfaces
         Task<int> SaveChangesAsync();
         Task<string> GenerateNextOrderCodeAsync();
         Task<OrderDetailDto?> GetDetailByIdAsync(int orderId, CancellationToken ct = default);
-        Task<List<OrderMissingMaterialRowDto>> GetOrdersWithMissingMaterialsAsync(
+        Task<PagedResultLite<MissingMaterialDto>> GetAllMissingMaterialsAsync(
+            int page,
+            int pageSize,
             CancellationToken ct = default);
     }
 }

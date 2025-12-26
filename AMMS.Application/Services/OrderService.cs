@@ -61,7 +61,7 @@ namespace AMMS.Application.Services
         public Task<OrderDetailDto?> GetDetailAsync(int id, CancellationToken ct = default)
             => _orderRepo.GetDetailByIdAsync(id, ct);
 
-        public Task<List<OrderMissingMaterialRowDto>> GetOrdersWithMissingMaterialsAsync(CancellationToken ct = default) // ✅ NEW
-            => _orderRepo.GetOrdersWithMissingMaterialsAsync(ct);
+        public Task<PagedResultLite<MissingMaterialDto>> GetAllMissingMaterialsAsync(int page, int pageSize, CancellationToken ct = default)
+            => _orderRepo.GetAllMissingMaterialsAsync(page, pageSize, ct);
     }
 }

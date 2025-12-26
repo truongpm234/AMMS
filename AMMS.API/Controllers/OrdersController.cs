@@ -75,9 +75,12 @@ namespace AMMS.API.Controllers
         }
 
         [HttpGet("missing-materials")]
-        public async Task<IActionResult> GetOrdersMissingMaterials(CancellationToken ct)
+        public async Task<IActionResult> GetAllMissingMaterials(
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 10,
+            CancellationToken ct = default)
         {
-            var result = await _service.GetOrdersWithMissingMaterialsAsync(ct);
+            var result = await _service.GetAllMissingMaterialsAsync(page, pageSize, ct);
             return Ok(result);
         }
     }
