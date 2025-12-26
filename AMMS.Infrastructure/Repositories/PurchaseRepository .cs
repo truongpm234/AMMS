@@ -188,13 +188,151 @@ namespace AMMS.Infrastructure.Repositories
         // =========================
         // ✅ CHANGED: Get all purchases (paged)
         // =========================
-        public Task<PagedResultLite<PurchaseOrderListItemDto>> GetPurchaseOrdersAsync(
-            int page,
-            int pageSize,
-            CancellationToken ct = default)
+        public async Task<PagedResultLite<PurchaseOrderCardDto>> GetPurchaseOrdersAsync(
+    string? status,
+    int page,
+    int pageSize,
+    CancellationToken ct = default)
         {
-            var query = BuildPurchaseListQuery(statusFilter: null);
-            return ToPagedAsync(query, page, pageSize, ct);
+            NormalizePaging(ref page, ref pageSize);
+            var skip = (page - 1) * pageSize;
+
+            // ✅ 0) Normalize status input (optional)
+            // FE có thể gửi "pending" / "Pending" => normalize lại
+            string? statusFilter = string.IsNullOrWhiteSpace(status) ? null : status.Trim();
+
+            // ✅ 1) Base purchases (FILTER + PAGING trên purchases.status)
+            var baseQuery = _db.purchases.AsNoTracking();
+
+            if (statusFilter != null)
+            {
+                // ✅ status lấy từ DB => filter trực tiếp DB
+                if (!string.IsNullOrWhiteSpace(status))
+                {
+                    var normalizedStatus = status.Trim().ToLower();
+
+                    baseQuery = baseQuery.Where(p =>
+                        (p.status ?? "Pending").ToLower() == normalizedStatus
+                    );
+                }
+
+            }
+
+            var purchases = await baseQuery
+                .OrderByDescending(p => p.purchase_id)
+                .Skip(skip)
+                .Take(pageSize + 1)
+                .Select(p => new
+                {
+                    p.purchase_id,
+                    p.code,
+                    p.supplier_id,
+                    SupplierName = p.supplier != null ? p.supplier.name : "N/A",
+                    p.created_at,
+                    p.eta_date,
+
+                    // ✅ LẤY STATUS 100% từ purchases.status
+                    Status = p.status ?? "Pending",
+
+                    // ✅ created_by_name từ users
+                    CreatedByName = p.created_byNavigation != null
+                        ? (p.created_byNavigation.full_name ?? "N/A")
+                        : "N/A"
+                })
+                .ToListAsync(ct);
+
+            var hasNext = purchases.Count > pageSize;
+            if (hasNext) purchases.RemoveAt(purchases.Count - 1);
+
+            var purchaseIds = purchases.Select(x => x.purchase_id).ToList();
+
+            // ✅ 2) Items theo purchaseId
+            var items = await _db.purchase_items
+                .AsNoTracking()
+                .Where(i => i.purchase_id != null && purchaseIds.Contains(i.purchase_id.Value))
+                .Select(i => new
+                {
+                    i.id,
+                    PurchaseId = i.purchase_id!.Value,
+                    i.material_id,
+                    i.material_code,
+                    i.material_name,
+                    i.qty_ordered,
+                    i.unit
+                })
+                .ToListAsync(ct);
+
+            var itemsMap = items
+                .GroupBy(x => x.PurchaseId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.Select(x => new PurchaseOrderItemDto
+                    {
+                        Id = x.id,
+                        MaterialId = x.material_id ?? 0,
+                        MaterialCode = x.material_code ?? "",
+                        MaterialName = x.material_name ?? "",
+                        QtyOrdered = x.qty_ordered ?? 0m,
+                        Unit = x.unit ?? ""
+                    }).ToList()
+                );
+
+            // ✅ 3) Received info từ stock_moves (IN) + users
+            // NOTE: không dùng để tính status nữa, chỉ để show UI
+            var receivedInfoMap = await (
+                from sm in _db.stock_moves.AsNoTracking()
+                where sm.type == "IN"
+                      && sm.purchase_id != null
+                      && purchaseIds.Contains(sm.purchase_id.Value)
+                join u in _db.users.AsNoTracking()
+                    on sm.user_id equals u.user_id into us
+                from u in us.DefaultIfEmpty()
+                group new { sm, u } by sm.purchase_id!.Value into g
+                select new
+                {
+                    PurchaseId = g.Key,
+                    ReceivedAt = g.Max(x => x.sm.move_date),
+                    ReceivedByName = g.Max(x => x.u != null ? x.u.full_name : null)
+                }
+            ).ToDictionaryAsync(x => x.PurchaseId, ct);
+
+            // ✅ 4) Build response
+            var data = purchases.Select(p =>
+            {
+                itemsMap.TryGetValue(p.purchase_id, out var poItems);
+                poItems ??= new List<PurchaseOrderItemDto>();
+
+                receivedInfoMap.TryGetValue(p.purchase_id, out var r);
+
+                var totalQty = poItems.Sum(x => x.QtyOrdered);
+
+                // ✅ Nếu DB có status khác 3 status chuẩn => bạn có thể ép về 3 status
+                // Ở đây mình giữ nguyên DB để khớp 100%.
+                // Nếu muốn ép: xem đoạn "Gợi ý chuẩn hoá status" bên dưới.
+                return new PurchaseOrderCardDto
+                {
+                    PurchaseId = p.purchase_id,
+                    Code = p.code,
+                    SupplierId = p.supplier_id,
+                    SupplierName = p.SupplierName,
+                    EtaDate = p.eta_date,
+                    CreatedAt = p.created_at ?? DateTime.MinValue,
+                    CreatedByName = p.CreatedByName,
+                    Status = p.Status,
+                    ReceivedAt = r?.ReceivedAt,
+                    ReceivedByName = r?.ReceivedByName,
+                    TotalQty = totalQty,
+                    Items = poItems
+                };
+            }).ToList();
+
+            return new PagedResultLite<PurchaseOrderCardDto>
+            {
+                Page = page,
+                PageSize = pageSize,
+                HasNext = hasNext,
+                Data = data
+            };
         }
 
         // =========================

@@ -13,8 +13,12 @@ namespace AMMS.Infrastructure.Interfaces
 
         Task<string> GenerateNextPurchaseCodeAsync(CancellationToken ct = default);
 
-        Task<PagedResultLite<PurchaseOrderListItemDto>> GetPurchaseOrdersAsync(
-            int page, int pageSize, CancellationToken ct = default);
+        Task<PagedResultLite<PurchaseOrderCardDto>> GetPurchaseOrdersAsync(
+    string? status,
+    int page,
+    int pageSize,
+    CancellationToken ct = default);
+
 
         Task<string?> GetSupplierNameAsync(int? supplierId, CancellationToken ct = default);
         Task<bool> SupplierExistsAsync(int supplierId, CancellationToken ct = default);

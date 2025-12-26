@@ -28,11 +28,12 @@ namespace AMMS.API.Controllers
         // ✅ CHANGED: get all (paged)
         [HttpGet("orders")]
         public async Task<IActionResult> GetPurchaseOrders(
+            [FromQuery] string? status = null,
             [FromQuery] int page = 1,
             [FromQuery] int pageSize = 10,
             CancellationToken ct = default)
         {
-            var result = await _service.GetPurchaseOrdersAsync(page, pageSize, ct);
+            var result = await _service.GetPurchaseOrdersAsync(status, page, pageSize, ct);
             return Ok(result);
         }
 

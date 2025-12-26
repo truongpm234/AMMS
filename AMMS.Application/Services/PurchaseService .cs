@@ -70,9 +70,12 @@ namespace AMMS.Application.Services
         }
 
         // ✅ CHANGED: implement đúng interface
-        public Task<PagedResultLite<PurchaseOrderListItemDto>> GetPurchaseOrdersAsync(
-            int page, int pageSize, CancellationToken ct = default)
-            => _repo.GetPurchaseOrdersAsync(page, pageSize, ct);
+        public Task<PagedResultLite<PurchaseOrderCardDto>> GetPurchaseOrdersAsync(
+            string? status,
+            int page,
+            int pageSize,
+            CancellationToken ct = default)
+            => _repo.GetPurchaseOrdersAsync(status, page, pageSize, ct);
 
         // ✅ CHANGED: pending trả ListItemDto (đúng repo)
         public Task<PagedResultLite<PurchaseOrderListItemDto>> GetPendingPurchasesAsync(
