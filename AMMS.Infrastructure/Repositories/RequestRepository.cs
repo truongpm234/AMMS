@@ -54,7 +54,6 @@ namespace AMMS.Infrastructure.Repositories
         public Task<List<order_request>> GetPagedAsync(int skip, int takePlusOne)
         {
             return _db.order_requests
-                .AsNoTracking()
                 .OrderByDescending(x => x.order_request_date)
                 .Skip(skip)
                 .Take(takePlusOne)
@@ -62,7 +61,7 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         public Task<bool> AnyOrderLinkedAsync(int requestId)
-            => _db.order_requests.AsNoTracking()
+            => _db.order_requests
                 .AnyAsync(r => r.order_request_id == requestId && r.order_id != null);
 
         //  kiểm tra 1 request có đủ tồn kho vật tư không
