@@ -1,10 +1,5 @@
 ﻿using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Purchases;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace AMMS.Application.Interfaces
 {
@@ -15,15 +10,27 @@ namespace AMMS.Application.Interfaces
             int? createdBy,
             CancellationToken ct = default);
 
+<<<<<<< HEAD
+        Task<PagedResultLite<PurchaseOrderListItemDto>> GetPurchaseOrdersAsync(
+            int page, int pageSize, CancellationToken ct = default);
+
+=======
         Task<PagedResultLite<PurchaseOrderWithItemsDto>> GetPurchaseOrdersAsync(
                     int page, int pageSize, CancellationToken ct = default);
+>>>>>>> main
         Task<PurchaseOrderListItemDto> CreatePurchaseOrderAsync(
             CreatePurchaseRequestDto dto,
             CancellationToken ct = default);
 
-        Task<object> ReceiveAllPendingPurchasesAsync(CancellationToken ct = default);
+        // ✅ CHANGED: receive theo purchaseId
+        Task<object> ReceiveAllPendingPurchasesAsync(int purchaseId, CancellationToken ct = default);
 
+<<<<<<< HEAD
+        // ✅ CHANGED: pending paging
+        Task<PagedResultLite<PurchaseOrderListItemDto>> GetPendingPurchasesAsync(
+=======
         Task<PagedResultLite<PurchaseOrderWithItemsDto>> GetPendingPurchasesAsync(
+>>>>>>> main
             int page, int pageSize, CancellationToken ct = default);
     }
 }

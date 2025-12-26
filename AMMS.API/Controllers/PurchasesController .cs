@@ -1,6 +1,5 @@
 ﻿using AMMS.Application.Interfaces;
 using AMMS.Shared.DTOs.Purchases;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AMMS.API.Controllers
@@ -16,24 +15,22 @@ namespace AMMS.API.Controllers
             _service = service;
         }
 
-        // POST: api/purchases/request
         [HttpPost("request")]
         public async Task<IActionResult> CreatePurchaseRequest(
             [FromBody] CreatePurchaseRequestDto dto,
             CancellationToken ct)
         {
-            // nếu bạn có JWT thì lấy user id từ claim
             int? createdBy = null;
-
             var result = await _service.CreatePurchaseRequestAsync(dto, createdBy, ct);
             return StatusCode(StatusCodes.Status201Created, result);
         }
 
+        // ✅ CHANGED: get all (paged)
         [HttpGet("orders")]
         public async Task<IActionResult> GetPurchaseOrders(
-    [FromQuery] int page = 1,
-    [FromQuery] int pageSize = 10,
-    CancellationToken ct = default)
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 10,
+            CancellationToken ct = default)
         {
             var result = await _service.GetPurchaseOrdersAsync(page, pageSize, ct);
             return Ok(result);
@@ -48,23 +45,28 @@ namespace AMMS.API.Controllers
             return StatusCode(StatusCodes.Status201Created, result);
         }
 
+        // ✅ CHANGED: receive theo purchaseId (giữ route cũ để khỏi tạo hàm mới)
         [HttpPost("orders/receive-all")]
-        public async Task<IActionResult> ReceiveAllPendingPurchases(CancellationToken ct)
+        public async Task<IActionResult> ReceivePurchaseById(
+            [FromQuery] int purchaseId,
+            CancellationToken ct)
         {
-            var result = await _service.ReceiveAllPendingPurchasesAsync(ct);
+            if (purchaseId <= 0)
+                return BadRequest("purchaseId is required");
+
+            var result = await _service.ReceiveAllPendingPurchasesAsync(purchaseId, ct);
             return Ok(result);
         }
 
+        // ✅ CHANGED: pending (paged)
         [HttpGet("pending")]
-        public async Task<IActionResult> GetPendingPurchases( 
-             [FromQuery] int page = 1,                          
-             [FromQuery] int pageSize = 10,                     
-             CancellationToken ct = default)
+        public async Task<IActionResult> GetPendingPurchases(
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 10,
+            CancellationToken ct = default)
         {
             var result = await _service.GetPendingPurchasesAsync(page, pageSize, ct);
             return Ok(result);
         }
-
     }
 }
-
