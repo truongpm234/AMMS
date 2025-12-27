@@ -69,7 +69,6 @@ namespace AMMS.Infrastructure.Repositories
             NormalizePaging(ref page, ref pageSize);
             var skip = (page - 1) * pageSize;
 
-            // 1) Base rows: productions đang sản xuất
             var baseRows = await (
                 from pr in _db.productions.AsNoTracking()
                 join o in _db.orders.AsNoTracking() on pr.order_id equals o.order_id
@@ -124,7 +123,6 @@ namespace AMMS.Infrastructure.Repositories
 
             var prodIds = baseRows.Select(x => x.prod_id).ToList();
 
-            // 2) ✅ TaskRows typed (không anonymous)
             var taskRows = await _db.tasks
                 .AsNoTracking()
                 .Where(t => t.prod_id != null && prodIds.Contains(t.prod_id.Value))
@@ -147,13 +145,12 @@ namespace AMMS.Infrastructure.Repositories
                           .ToList()
                 );
 
-            // 3) Build card
             var result = new List<ProducingOrderCardDto>();
 
             foreach (var r in baseRows)
             {
                 tasksByProd.TryGetValue(r.prod_id, out var tasks);
-                tasks ??= new List<TaskRow>(); // ✅ giờ OK
+                tasks ??= new List<TaskRow>();
 
                 var total = tasks.Count;
                 var done = tasks.Count(x => x.EndTime != null);

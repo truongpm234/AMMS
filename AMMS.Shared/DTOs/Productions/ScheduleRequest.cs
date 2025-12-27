@@ -12,5 +12,4 @@ namespace AMMS.Shared.DTOs.Productions
         public int product_type_id { get; set; }
         public int? manager_id { get; set; }
     }
-
 }
