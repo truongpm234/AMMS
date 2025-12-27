@@ -15,13 +15,7 @@ public partial class order_item
 
     public int quantity { get; set; }
 
-    public string? finished_size { get; set; }
-
-    public string? print_size { get; set; }
-
     public string? paper_type { get; set; }
-
-    public string? colors { get; set; }
 
     public string? post_processing { get; set; }
 

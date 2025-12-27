@@ -253,7 +253,6 @@ namespace AMMS.Infrastructure.Repositories
 
                     can_fulfill = canFulfill,
 
-                    // ✅ chỉ trả về missing nếu còn thiếu
                     missing_materials = canFulfill == false
                         ? (missingMaterials ?? new List<MissingMaterialDto>())
                         : null
@@ -407,7 +406,6 @@ namespace AMMS.Infrastructure.Repositories
 
             var urlDesign = item?.design_url ?? req?.design_file_path;
 
-            // giữ phần production dates + approver (như bạn)
             DateTime? prodStart = order.productions
                 .Select(p => p.start_date)
                 .Where(d => d != null)
@@ -430,10 +428,7 @@ namespace AMMS.Infrastructure.Repositories
             if (item != null)
             {
                 var parts = new List<string>();
-                if (!string.IsNullOrWhiteSpace(item.finished_size)) parts.Add($"Thành phẩm: {item.finished_size}");
-                if (!string.IsNullOrWhiteSpace(item.print_size)) parts.Add($"Khổ in: {item.print_size}");
                 if (!string.IsNullOrWhiteSpace(item.paper_type)) parts.Add($"Giấy: {item.paper_type}");
-                if (!string.IsNullOrWhiteSpace(item.colors)) parts.Add($"Màu: {item.colors}");
                 if (parts.Count > 0) specification = string.Join(" | ", parts);
             }
 
