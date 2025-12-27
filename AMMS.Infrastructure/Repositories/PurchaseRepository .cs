@@ -212,7 +212,7 @@ namespace AMMS.Infrastructure.Repositories
                     var normalizedStatus = status.Trim().ToLower();
 
                     baseQuery = baseQuery.Where(p =>
-                        (p.status ?? "Pending").ToLower() == normalizedStatus
+                        (p.status ?? "Ordered").ToLower() == normalizedStatus
                     );
                 }
 
@@ -232,7 +232,7 @@ namespace AMMS.Infrastructure.Repositories
                     p.eta_date,
 
                     // ✅ LẤY STATUS 100% từ purchases.status
-                    Status = p.status ?? "Pending",
+                    Status = p.status ?? "Ordered",
 
                     // ✅ created_by_name từ users
                     CreatedByName = p.created_byNavigation != null
@@ -457,22 +457,22 @@ namespace AMMS.Infrastructure.Repositories
                 {
                     var fullyAlready = IsFullyReceived(items, receivedMap, new Dictionary<int, decimal>());
 
-                    if (fullyAlready && !string.Equals(purchase.status, "Received", StringComparison.OrdinalIgnoreCase))
+                    if (fullyAlready && !string.Equals(purchase.status, "Delivered", StringComparison.OrdinalIgnoreCase))
                     {
-                        purchase.status = "Received";
+                        purchase.status = "Delivered";
                         await _db.SaveChangesAsync(ct);
                         await tx.CommitAsync(ct);
 
                         return new
                         {
-                            message = "Already fully received (no remaining qty). Status updated to Received.",
+                            message = "Already fully Delivered (no remaining qty). Status updated to Delivered.",
                             purchaseId,
                             status = purchase.status
                         };
                     }
 
                     await tx.CommitAsync(ct);
-                    return new { message = "Nothing to receive", purchaseId, status = purchase.status };
+                    return new { message = "Nothing to Delivered", purchaseId, status = purchase.status };
                 }
 
                 // 5) add stock_moves
@@ -493,7 +493,7 @@ namespace AMMS.Infrastructure.Repositories
                 // 7) set purchase Received nếu đủ
                 var fullyReceived = IsFullyReceived(items, receivedMap, materialAddMap);
                 if (fullyReceived)
-                    purchase.status = "Received";
+                    purchase.status = "Delivered";
 
                 await _db.SaveChangesAsync(ct);
                 await tx.CommitAsync(ct);

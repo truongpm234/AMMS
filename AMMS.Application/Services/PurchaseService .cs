@@ -116,7 +116,7 @@ namespace AMMS.Application.Services
                 code = code,
                 supplier_id = dto.SupplierId,
                 created_by = managerId,
-                status = "Pending",
+                status = "Ordered",
                 eta_date = ToUnspecified(dto.EtaDate),
                 created_at = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Unspecified),
             };
@@ -147,7 +147,7 @@ namespace AMMS.Application.Services
                 createdByName,
                 totalQty,
                 p.eta_date,
-                p.status ?? "Pending",
+                p.status ?? "Ordered",
                 received_by_name: null,
                 unit_summary: null
             );
