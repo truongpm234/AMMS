@@ -31,7 +31,7 @@ namespace AMMS.API.Controllers
             return Ok(data);
         }
 
-        [HttpGet("producing")]
+        [HttpGet("get-all-production")]
         public async Task<IActionResult> GetProducingOrders(
             [FromQuery] int page = 1,
             [FromQuery] int pageSize = 10,
