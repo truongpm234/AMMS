@@ -64,11 +64,8 @@ namespace AMMS.Infrastructure.Repositories
             => _db.order_requests
                 .AnyAsync(r => r.order_request_id == requestId && r.order_id != null);
 
-        //  kiểm tra 1 request có đủ tồn kho vật tư không
         public async Task<bool> HasEnoughStockForRequestAsync(int requestId, CancellationToken ct = default)
         {
-            // Logic đơn giản: join theo product_name = materials.name,
-            // so sánh stock_qty với quantity của request
             var q =
                 from r in _db.order_requests.AsNoTracking()
                 where r.order_request_id == requestId
@@ -83,11 +80,9 @@ namespace AMMS.Infrastructure.Repositories
 
             var data = await q.FirstOrDefaultAsync(ct);
 
-            // Không có record hoặc không map được material ⇒ coi như thiếu
             if (data == null)
                 return false;
 
-            // Không yêu cầu số lượng ⇒ xem như đủ
             if (data.RequiredQty <= 0m)
                 return true;
 
@@ -431,9 +426,6 @@ namespace AMMS.Infrastructure.Repositories
             };
         }
 
-        /// <summary>
-        /// Lấy email gần nhất (mới nhất) đã dùng với số điện thoại này trong bảng order_request
-        /// </summary>
         public async Task<string?> GetEmailByPhoneAsync(string phone, CancellationToken ct = default)
         {
             if (string.IsNullOrWhiteSpace(phone))
@@ -449,9 +441,6 @@ namespace AMMS.Infrastructure.Repositories
                 .FirstOrDefaultAsync(ct);
         }
 
-        /// <summary>
-        /// Lấy lịch sử đơn hàng theo số điện thoại, join order_request -> orders, có phân trang
-        /// </summary>
         public async Task<PagedResultLite<OrderListDto>> GetOrdersByPhonePagedAsync(
             string phone, int page, int pageSize, CancellationToken ct = default)
         {

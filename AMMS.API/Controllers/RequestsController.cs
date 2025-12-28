@@ -209,7 +209,6 @@ namespace AMMS.API.Controllers
                 raw.ToString(),
                 paymentRepo,
                 ct);
-
             return Ok(new { ok = true, processed = ok, message, orderRequestId, orderCode });
         }
 
@@ -250,10 +249,15 @@ namespace AMMS.API.Controllers
             if (!existsOrderRequest)
                 return (false, $"order_request_id={orderRequestId} not found");
 
-            // idempotent
             var existedPaid = await _paymentService.GetPaidByProviderOrderCodeAsync("PAYOS", orderCode, ct);
             if (existedPaid != null)
-                return (true, "Already processed");
+            {
+                await _dealService.MarkAcceptedAsync(orderRequestId);
+
+                var convert = await _service.ConvertToOrderAsync(orderRequestId);
+
+                return (true, $"Already processed. Convert: {convert.Message}");
+            }
 
             var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
@@ -275,22 +279,22 @@ namespace AMMS.API.Controllers
 
             await paymentRepo.SaveChangesAsync(ct);
 
-            // update quote/request status
             await _dealService.MarkAcceptedAsync(orderRequestId);
 
-            // convert to order (idempotent)
             try
             {
                 var convert = await _service.ConvertToOrderAsync(orderRequestId);
                 if (!convert.Success)
                     return (false, "ConvertToOrder failed: " + convert.Message);
+                Console.WriteLine($"Convert result: success={convert.Success}, msg={convert.Message}, orderId={convert.OrderId}");
+
+                return (true, "Processed paid OK + converted");
+
             }
             catch (DbUpdateException dbEx) when (dbEx.InnerException is PostgresException pg && pg.SqlState == "23505")
-            {
-                // duplicate => treat as already converted
+            {               
             }
 
-            // notify email (ignore fail)
             try
             {
                 await _dealService.NotifyConsultantPaidAsync(orderRequestId, (decimal)amount, now);
