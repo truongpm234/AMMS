@@ -4,6 +4,6 @@ namespace AMMS.Application.Interfaces
 {
     public interface IPaymentsService
     {
-        Task<payment?> GetPaidByProviderOrderCodeAsync(string provider, int orderCode, CancellationToken ct = default);
+        Task<payment?> GetPaidByProviderOrderCodeAsync(string provider, long orderCode, CancellationToken ct = default);
     }
 }

@@ -17,7 +17,7 @@ namespace AMMS.Application.Services
             _paymentRepository = paymentRepository;
         }
 
-        public Task<payment?> GetPaidByProviderOrderCodeAsync(string provider, int orderCode, CancellationToken ct = default)
+        public Task<payment?> GetPaidByProviderOrderCodeAsync(string provider, long orderCode, CancellationToken ct = default)
         {
             return _paymentRepository.GetPaidByProviderOrderCodeAsync(provider, orderCode, ct);
         }

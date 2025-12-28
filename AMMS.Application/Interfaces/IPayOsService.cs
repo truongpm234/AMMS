@@ -1,4 +1,5 @@
-﻿using System;
+﻿using AMMS.Shared.DTOs.PayOS;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -18,5 +19,8 @@ namespace AMMS.Application.Interfaces
             string returnUrl,
             string cancelUrl,
             CancellationToken ct = default);
+        Task<PayOsPaymentInfo?> GetPaymentLinkInformationAsync(long orderCode, CancellationToken ct = default);
+
     }
+
 }

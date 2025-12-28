@@ -1,6 +1,7 @@
 ﻿using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
+using AMMS.Shared.DTOs.PayOS;
 using Microsoft.EntityFrameworkCore;
 
 namespace AMMS.Infrastructure.Repositories
@@ -12,8 +13,7 @@ namespace AMMS.Infrastructure.Repositories
 
         public Task AddAsync(payment entity, CancellationToken ct = default)
             => _db.payments.AddAsync(entity, ct).AsTask();
-
-        public Task<payment?> GetPaidByProviderOrderCodeAsync(string provider, int orderCode, CancellationToken ct = default)
+        public Task<payment?> GetPaidByProviderOrderCodeAsync(string provider, long orderCode, CancellationToken ct = default)
             => _db.payments.AsNoTracking()
                 .FirstOrDefaultAsync(x => x.provider == provider && x.order_code == orderCode && x.status == "PAID", ct);
 

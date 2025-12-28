@@ -12,6 +12,7 @@ namespace AMMS.Shared.DTOs.PayOS
         public string ApiKey { get; set; } = null!;
         public string ChecksumKey { get; set; } = null!;
         public string BaseUrl { get; set; } = "https://api-merchant.payos.vn";
+        public string WebhookUrl { get; set; } = "";
     }
 
 }
