@@ -442,8 +442,8 @@ public partial class AppDbContext : DbContext
                 .HasColumnType("timestamp without time zone");
             entity.Property(e => e.qty_bad).HasDefaultValue(0);
             entity.Property(e => e.qty_good).HasDefaultValue(0);
-            entity.Property(e => e.scanned_code).HasMaxLength(100);
-            entity.Property(e => e.scanner_id).HasMaxLength(50);
+            entity.Property(e => e.scanned_code).HasColumnType("text");
+            entity.Property(e => e.scanner_id).HasColumnType("text");
 
             entity.HasOne(d => d._operator).WithMany(p => p.task_logs)
                 .HasForeignKey(d => d.operator_id)

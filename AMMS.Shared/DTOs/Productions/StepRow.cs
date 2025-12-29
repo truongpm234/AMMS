@@ -11,5 +11,7 @@ namespace AMMS.Shared.DTOs.Productions
         public int ProductTypeId { get; set; }
         public int SeqNum { get; set; }
         public string ProcessName { get; set; } = "";
+        public string? ProcessCode { get; set; }
+
     }
 }

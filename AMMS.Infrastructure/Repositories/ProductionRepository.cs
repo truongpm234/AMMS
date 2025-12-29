@@ -83,11 +83,18 @@ namespace AMMS.Infrastructure.Repositories
                         .Select(i => i.product_name)
                         .FirstOrDefault(),
 
+                    first_item_production_process = _db.order_items.AsNoTracking()
+                        .Where(i => i.order_id == o.order_id)
+                        .OrderBy(i => i.item_id)
+                        .Select(i => i.production_process)
+                        .FirstOrDefault(),
+
                     first_item_quantity = _db.order_items.AsNoTracking()
                         .Where(i => i.order_id == o.order_id)
                         .OrderBy(i => i.item_id)
                         .Select(i => (int?)i.quantity)
                         .FirstOrDefault()
+
                 }
             )
             .Skip(skip)
@@ -145,9 +152,9 @@ namespace AMMS.Infrastructure.Repositories
                 {
                     ProductTypeId = p.product_type_id,
                     SeqNum = p.seq_num,
-                    ProcessName = p.process_name
-                })
-                .ToListAsync(ct);
+                    ProcessName = p.process_name,
+                    ProcessCode = p.process_code
+                }).ToListAsync(ct);
 
             var stepsByProductType = stepRows
                 .GroupBy(x => x.ProductTypeId)
@@ -166,7 +173,33 @@ namespace AMMS.Infrastructure.Repositories
                 var ptId = r.product_type_id ?? 0;
 
                 stepsByProductType.TryGetValue(ptId, out var steps);
+
                 steps ??= new List<StepRow>();
+
+                HashSet<string>? selected = null;
+
+                var csv = (r.first_item_production_process ?? "").Trim();
+                if (!string.IsNullOrWhiteSpace(csv))
+                {
+                    selected = csv.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                        .Select(x => x.Trim().ToUpperInvariant())
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .ToHashSet();
+                }
+
+                steps ??= new List<StepRow>();
+
+                if (selected != null && selected.Count > 0)
+                {
+                    steps = steps
+                        .Where(s =>
+                        {
+                            var code = (s.ProcessCode ?? "").Trim().ToUpperInvariant();
+                            return !string.IsNullOrWhiteSpace(code) && selected.Contains(code);
+                        })
+                        .OrderBy(s => s.SeqNum)
+                        .ToList();
+                }
 
                 var stages = steps
                     .Select(s => s.ProcessName)

@@ -23,7 +23,7 @@ namespace AMMS.API.Controllers
             _svc = svc;
         }
 
-        [HttpPost("{taskId:int}/qr")]
+        [HttpPost("qr/{taskId:int}")]
         public async Task<ActionResult<TaskQrResponse>> CreateQr(int taskId, [FromQuery] int ttlMinutes = 60)
         {
             var t = await _taskRepo.GetByIdAsync(taskId);

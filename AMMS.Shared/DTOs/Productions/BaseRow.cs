@@ -22,6 +22,8 @@ namespace AMMS.Shared.DTOs.Productions
 
         public string? first_item_product_name { get; set; }
 
+        public string? first_item_production_process { get; set; }
+
         public int? first_item_quantity { get; set; }
     }
 }
