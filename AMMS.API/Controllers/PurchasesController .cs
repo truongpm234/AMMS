@@ -47,7 +47,7 @@ namespace AMMS.API.Controllers
         }
 
         // ✅ CHANGED: receive theo purchaseId (giữ route cũ để khỏi tạo hàm mới)
-        [HttpPost("orders/receive-all")]
+        [HttpPut("orders/receive-all")]
         public async Task<IActionResult> ReceivePurchaseById(
             [FromQuery] int purchaseId,
             CancellationToken ct)
