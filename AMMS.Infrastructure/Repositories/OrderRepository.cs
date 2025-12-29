@@ -463,78 +463,94 @@ namespace AMMS.Infrastructure.Repositories
             NormalizePaging(ref page, ref pageSize);
             var skip = (page - 1) * pageSize;
 
-            // ✅ Line-level: ép precision ngay tại DB để tránh SUM ra numeric "vô hạn"
-            var lineQuery =
+            // ✅ Lấy line-level nhưng dùng double để tránh Npgsql overflow khi đọc numeric cực lớn
+            var lines = await (
                 from oi in _db.order_items.AsNoTracking()
                 join o in _db.orders.AsNoTracking() on oi.order_id equals o.order_id
                 join b in _db.boms.AsNoTracking() on oi.item_id equals b.order_item_id
                 join m in _db.materials.AsNoTracking() on b.material_id equals m.material_id
                 select new
                 {
-                    MaterialId = m.material_id,
-                    MaterialName = m.name,
-                    Unit = m.unit,
+                    m.material_id,
+                    material_name = m.name,
+                    unit = m.unit,
+                    request_date = o.delivery_date,
 
-                    // stock_qty là numeric(10,2) => giữ 2 số lẻ
-                    Available = Math.Round((decimal)(m.stock_qty ?? 0m), 2),
+                    available = (double)(m.stock_qty ?? 0m),
+                    unit_price = (double)(m.cost_price ?? 0m),
 
-                    // ngày yêu cầu: lấy delivery_date gần nhất
-                    RequestDate = o.delivery_date,
+                    needed_line =
+                        (double)oi.quantity
+                        * (double)(b.qty_per_product ?? 0m)
+                        * (1.0 + ((double)(b.wastage_percent ?? 0m) / 100.0))
+                }
+            ).ToListAsync(ct);
 
-                    // ✅ NeededLine: ROUND lại (ví dụ 4 số lẻ) để SUM không phình precision
-                    NeededLine = Math.Round(
-                        (decimal)oi.quantity
-                        * (decimal)(b.qty_per_product ?? 0m)
-                        * (1m + ((decimal)(b.wastage_percent ?? 0m) / 100m)),
-                        4
-                    )
-                };
+            // ✅ Group + tính toán trong memory (tránh SQL numeric vượt decimal)
+            static decimal SafeToDecimal(double v, int round)
+            {
+                if (double.IsNaN(v) || double.IsInfinity(v)) return 0m;
+                // clamp về range decimal
+                var max = (double)decimal.MaxValue;
+                if (v > max) return decimal.MaxValue;
+                if (v < -max) return decimal.MinValue;
+                return Math.Round((decimal)v, round);
+            }
 
-            // ✅ Aggregate: tiếp tục ROUND ở SUM (và kết quả cuối) để không overflow
-            var query = lineQuery
-                .GroupBy(x => new { x.MaterialId, x.MaterialName, x.Unit })
-                .Select(g => new
+            static decimal SafeMul(decimal a, decimal b)
+            {
+                try { return a * b; }
+                catch (OverflowException) { return decimal.MaxValue; }
+            }
+
+            var grouped = lines
+                .GroupBy(x => new { x.material_id, x.material_name, x.unit })
+                .Select(g =>
                 {
-                    g.Key.MaterialId,
-                    g.Key.MaterialName,
-                    g.Key.Unit,
+                    var neededD = g.Sum(t => t.needed_line);
+                    var availableD = g.Max(t => t.available);
+                    var requestDate = g.Min(t => t.request_date);
+                    var unitPriceD = g.Max(t => t.unit_price);
 
-                    Needed = Math.Round(g.Sum(t => t.NeededLine), 4),
-                    Available = Math.Round(g.Max(t => t.Available), 2),
-                    RequestDate = g.Min(t => t.RequestDate)
-                })
-                .Select(x => new MissingMaterialDto
-                {
-                    material_id = x.MaterialId,
-                    material_name = x.MaterialName,
-                    unit = x.Unit,
+                    var needed = SafeToDecimal(neededD, 4);
+                    var available = SafeToDecimal(availableD, 4);
+                    var missing = needed - available;
+                    if (missing < 0) missing = 0;
 
-                    needed = x.Needed,
-                    available = x.Available,
+                    var unitPrice = SafeToDecimal(unitPriceD, 2);
+                    var totalPrice = SafeMul(missing, unitPrice);
+                    totalPrice = Math.Round(totalPrice, 2);
 
-                    // thiếu = needed - available
-                    quantity = Math.Round(x.Needed - x.Available, 4),
-                    request_date = x.RequestDate
+                    return new MissingMaterialDto
+                    {
+                        material_id = g.Key.material_id,
+                        material_name = g.Key.material_name,
+                        unit = g.Key.unit,
+                        request_date = requestDate,
+
+                        needed = needed,
+                        available = available,
+                        quantity = missing,
+
+                        total_price = totalPrice
+                    };
                 })
                 .Where(x => x.quantity > 0m)
-                .OrderByDescending(x => x.quantity);
+                .OrderByDescending(x => x.quantity)
+                .ToList();
 
-            var rows = await query
-                .Skip(skip)
-                .Take(pageSize + 1)
-                .ToListAsync(ct);
-
-            var hasNext = rows.Count > pageSize;
-            if (hasNext) rows.RemoveAt(rows.Count - 1);
+            // ✅ paging sau khi đã group
+            var pageRows = grouped.Skip(skip).Take(pageSize + 1).ToList();
+            var hasNext = pageRows.Count > pageSize;
+            if (hasNext) pageRows.RemoveAt(pageRows.Count - 1);
 
             return new PagedResultLite<MissingMaterialDto>
             {
                 Page = page,
                 PageSize = pageSize,
                 HasNext = hasNext,
-                Data = rows
+                Data = pageRows
             };
         }
-
     }
 }
