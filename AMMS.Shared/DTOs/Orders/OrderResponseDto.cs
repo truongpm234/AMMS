@@ -16,6 +16,7 @@ namespace AMMS.Shared.DTOs.Orders
         public int quantity { get; set; }
         public string created_at { get; set; } = "";
         public string delivery_date { get; set; } = "";
+        public string? status { get; set; }
         public bool? can_fulfill { get; set; }
         public List<MissingMaterialDto>? missing_materials { get; set; }
     }

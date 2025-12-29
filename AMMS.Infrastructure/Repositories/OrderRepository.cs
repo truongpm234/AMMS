@@ -233,6 +233,7 @@ namespace AMMS.Infrastructure.Repositories
                     quantity = o.FirstItem?.quantity ?? 0,
                     created_at = ToUtcString(o.order_date),
                     delivery_date = ToUtcString(o.delivery_date),
+                    status = o.Status,
 
                     can_fulfill = canFulfill,
 
