@@ -55,7 +55,6 @@ namespace AMMS.Application.Services
                 purchase_id = p.purchase_id,
                 material_id = x.MaterialId,
                 qty_ordered = x.Quantity,
-                price = x.Price
             }).ToList();
 
             await _repo.AddPurchaseItemsAsync(items, ct);
@@ -129,7 +128,6 @@ namespace AMMS.Application.Services
                 purchase_id = p.purchase_id,
                 material_id = x.MaterialId,
                 qty_ordered = x.Quantity,
-                price = x.Price
             }).ToList();
 
             await _repo.AddPurchaseItemsAsync(items, ct);

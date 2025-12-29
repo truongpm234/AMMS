@@ -234,9 +234,7 @@ namespace AMMS.Infrastructure.Repositories
                     created_at = ToUtcString(o.order_date),
                     delivery_date = ToUtcString(o.delivery_date),
                     status = o.Status,
-
                     can_fulfill = canFulfill,
-
                     missing_materials = canFulfill == false
                         ? (missingMaterials ?? new List<MissingMaterialDto>())
                         : null
@@ -246,7 +244,6 @@ namespace AMMS.Infrastructure.Repositories
 
 
 
-        // ===== CRUD & OTHER METHODS ======================================
         public async Task AddOrderAsync(order entity)
         {
             await _db.orders.AddAsync(entity);

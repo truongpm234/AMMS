@@ -10,6 +10,5 @@ namespace AMMS.Shared.DTOs.Purchases
     {
         public int MaterialId { get; set; }
         public decimal Quantity { get; set; }
-        public decimal? Price { get; set; } // optional (nếu chưa biết giá thì null)
     }
 }
