@@ -2,6 +2,7 @@
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Enums;
+using AMMS.Shared.DTOs.ProductTypes;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -37,5 +38,7 @@ namespace AMMS.Application.Services
             var result = Enum.GetNames(typeof(ProductTypeCodeGeneral)).ToList();
             return Task.FromResult(result);
         }
+        public Task<ProductTypeDetailDto?> GetDetailAsync(int productTypeId, CancellationToken ct = default)
+            => _productTypeRepository.GetProductTypeDetailAsync(productTypeId, ct);
     }
 }

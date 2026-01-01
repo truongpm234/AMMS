@@ -1,4 +1,5 @@
 ﻿using AMMS.Infrastructure.Entities;
+using AMMS.Shared.DTOs.ProductTypes;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -11,5 +12,6 @@ namespace AMMS.Infrastructure.Interfaces
     {
         Task<List<product_type>> GetAllAsync();
         Task<product_type?> GetByCodeAsync(string code);
+        Task<ProductTypeDetailDto?> GetProductTypeDetailAsync(int productTypeId, CancellationToken ct = default);
     }
 }

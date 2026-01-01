@@ -41,5 +41,17 @@ namespace AMMS.API.Controllers
             var data = await _productTypeService.GetAllTypeFormGachAsync();
             return Ok(data);
         }
+
+        // GET api/producttypes/{id}/detail
+        [HttpGet("{id:int}/detail")]
+        public async Task<IActionResult> GetDetail(int id, CancellationToken ct)
+        {
+            if (id <= 0) return BadRequest("productTypeId invalid");
+
+            var data = await _productTypeService.GetDetailAsync(id, ct);
+            if (data == null) return NotFound(new { message = "Product type not found" });
+
+            return Ok(data);
+        }
     }
 }
