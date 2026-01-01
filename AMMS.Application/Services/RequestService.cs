@@ -358,6 +358,66 @@ namespace AMMS.Application.Services
         public Task<PagedResultLite<RequestSortedDto>> SearchPagedAsync(
             string keyword, int page, int pageSize, CancellationToken ct = default)
             => _requestRepo.SearchPagedAsync(keyword, page, pageSize, ct);
+
+        public async Task<int> CreateOrderRequestAsync(CreateOrderRequestDto dto, CancellationToken ct = default)
+        {
+            // Validate nhẹ (bạn có thể thêm FluentValidation sau)
+            if (dto.quantity is null or <= 0)
+                throw new ArgumentException("quantity must be > 0");
+            if (string.IsNullOrWhiteSpace(dto.product_name))
+                throw new ArgumentException("product_name is required");
+
+            var now = DateTime.UtcNow;
+
+            var entity = new order_request
+            {
+                // Khách hàng
+                customer_name = dto.customer_name?.Trim(),
+                customer_phone = dto.customer_phone?.Trim(),
+                customer_email = dto.customer_email?.Trim(),
+
+                // Đơn hàng
+                delivery_date = ToUnspecified(dto.delivery_date),
+                detail_address = dto.detail_address?.Trim(),
+
+                // Sản phẩm
+                product_name = dto.product_name?.Trim(),
+                quantity = dto.quantity,
+                description = dto.description,
+
+                // Thiết kế
+                design_file_path = dto.design_file_path,
+                is_send_design = dto.is_send_design,
+
+                // Kỹ thuật
+                product_type = dto.product_type?.Trim(),
+                number_of_plates = dto.number_of_plates,
+                production_processes = dto.production_processes?.Trim(),
+                coating_type = dto.coating_type?.Trim(),
+                paper_code = dto.paper_code?.Trim(),
+                paper_name = dto.paper_name?.Trim(),
+                wave_type = dto.wave_type?.Trim(),
+
+                product_length_mm = dto.product_length_mm,
+                product_width_mm = dto.product_width_mm,
+                product_height_mm = dto.product_height_mm,
+                glue_tab_mm = dto.glue_tab_mm,
+                bleed_mm = dto.bleed_mm,
+                is_one_side_box = dto.is_one_side_box,
+
+                print_width_mm = dto.print_width_mm,
+                print_height_mm = dto.print_height_mm,
+
+                // Mặc định
+                order_request_date = ToUnspecified(now),
+                process_status = "Pending"
+            };
+
+            await _requestRepo.AddAsync(entity);
+            await _requestRepo.SaveChangesAsync();
+
+            return entity.order_request_id;
+        }
         public async Task<OrderRequestDesignFileResponse?> GetDesignFileAsync(int orderRequestId, CancellationToken ct = default)
         {
             var path = await _requestRepo.GetDesignFilePathAsync(orderRequestId, ct);

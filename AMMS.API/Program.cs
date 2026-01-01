@@ -107,6 +107,8 @@ builder.Services.AddScoped<IPaymentRepository, PaymentRepository>();
 builder.Services.AddScoped<IBomRepository, BomRepository>();
 builder.Services.AddScoped<IProcessCostRuleService, ProcessCostRuleService>(); 
 builder.Services.AddScoped<IProcessCostRuleRepository, ProcessCostRuleRepository>();
+builder.Services.AddScoped<IProductTemplateRepository, ProductTemplateRepository>();
+builder.Services.AddScoped<IProductTemplateService, ProductTemplateService>();
 
 
 // Logging

@@ -35,6 +35,14 @@ namespace AMMS.API.Controllers
             _db = db;
             _schedulingService = schedulingService;
         }
+        [HttpPost("create-request-by-consultant")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status201Created)]
+        public async Task<IActionResult> CreateOrderRequest([FromBody] CreateOrderRequestDto dto, CancellationToken ct)
+        {
+            var id = await _service.CreateOrderRequestAsync(dto, ct);
+
+            return CreatedAtAction(actionName: nameof(GetById), routeValues: new { id }, value: new { order_request_id = id });
+        }
 
         [HttpPost]
         [ProducesResponseType(typeof(CreateRequestResponse), StatusCodes.Status201Created)]
