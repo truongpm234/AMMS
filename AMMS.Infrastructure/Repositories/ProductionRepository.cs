@@ -285,7 +285,7 @@ namespace AMMS.Infrastructure.Repositories
             };
         }
 
-        public async Task<ProductionDetailDto?> GetProductionDetailAsync(int prodId, CancellationToken ct = default)
+        public async Task<ProductionDetailDto?> GetProductionDetailByOrderIdAsync(int orderId, CancellationToken ct = default)
         {
             // 1) Header: production + order + customer + first item
             var header = await (
@@ -299,7 +299,9 @@ namespace AMMS.Infrastructure.Repositories
                 join c in _db.customers.AsNoTracking() on q.customer_id equals c.customer_id into cj
                 from c in cj.DefaultIfEmpty()
 
-                where pr.prod_id == prodId
+                    // ⭐ CHANGED: filter theo order_id thay vì prod_id
+                where pr.order_id == orderId
+                orderby pr.start_date ?? pr.end_date ?? o.order_date  // optional: chọn bản ghi mới nhất
                 select new
                 {
                     pr,
@@ -317,14 +319,14 @@ namespace AMMS.Infrastructure.Repositories
                             i.product_name,
                             i.quantity,
                             i.production_process,
-                            // nếu DB chưa có các field này, sẽ null -> xem mục D để bổ sung
                             i_length = (int?)EF.Property<int?>(i, "length_mm"),
                             i_width = (int?)EF.Property<int?>(i, "width_mm"),
                             i_height = (int?)EF.Property<int?>(i, "height_mm"),
                         })
                         .FirstOrDefault()
                 }
-            ).FirstOrDefaultAsync(ct);
+            )
+            .FirstOrDefaultAsync(ct);
 
             if (header == null) return null;
 
@@ -349,7 +351,9 @@ namespace AMMS.Infrastructure.Repositories
                 height_mm = header.first_item?.i_height,
             };
 
-            // 2) Load tasks + logs
+            var prodId = header.pr.prod_id; // ⭐ Lấy lại prodId để dùng cho tasks/logs
+
+            // 2) Load tasks + logs – ⭐ CHANGED: dùng prodId từ header
             var tasks = await _db.tasks.AsNoTracking()
                 .Where(t => t.prod_id == prodId)
                 .Select(t => new
@@ -385,7 +389,7 @@ namespace AMMS.Infrastructure.Repositories
                     scanned_code = l.scanned_code
                 }).ToListAsync(ct);
 
-            // 3) Load product_type_process steps (để render timeline chuẩn theo product_type)
+            // 3) Load product_type_process steps (giữ nguyên)
             var ptId = header.pr.product_type_id;
             List<ProductTypeProcessStepDto> steps = new();
 
@@ -405,8 +409,7 @@ namespace AMMS.Infrastructure.Repositories
                     .ToListAsync(ct);
             }
 
-            // 4) Nếu order_item.production_process có filter, chỉ show đúng công đoạn đã chọn
-            // production_processes dạng "IN,CAT,RALO,DAN"
+            // 4) Filter theo order_item.production_process như cũ
             HashSet<string>? selected = null;
             var production_processes = header.first_item?.production_process;
             if (!string.IsNullOrWhiteSpace(production_processes))
@@ -420,7 +423,6 @@ namespace AMMS.Infrastructure.Repositories
 
             foreach (var s in steps)
             {
-                // nếu có selected processes thì filter theo process_code
                 var pcode = (s.process_code ?? "").Trim().ToUpperInvariant();
                 if (selected != null && selected.Count > 0 && !string.IsNullOrWhiteSpace(pcode))
                 {
@@ -430,12 +432,9 @@ namespace AMMS.Infrastructure.Repositories
                 var task = tasks.FirstOrDefault(t => t.process_id == s.process_id)
                            ?? tasks.FirstOrDefault(t => (t.seq_num ?? -1) == s.seq_num);
 
-                var stageLogs = task == null ? new List<TaskLogDto>() : logs.Where(l => l.task_id == task.task_id).ToList();
-
-                // Map logs by task_id properly
-                stageLogs = task == null
+                var stageLogs = task == null
                     ? new List<TaskLogDto>()
-                    : logsByTaskId(logs, task.task_id);
+                    : logsByTaskId(logs, task.task_id); // hàm helper cũ
 
                 var qtyGood = stageLogs.Sum(x => x.qty_good);
                 var qtyBad = stageLogs.Sum(x => x.qty_bad);

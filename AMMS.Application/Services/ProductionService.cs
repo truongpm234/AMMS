@@ -49,9 +49,9 @@ namespace AMMS.Application.Services
             return progress;
         }
 
-        public async Task<ProductionDetailDto?> GetProductionDetailAsync(int prodId, CancellationToken ct = default)
+        public async Task<ProductionDetailDto?> GetProductionDetailByOrderIdAsync(int orderId, CancellationToken ct = default)
         {
-            return await _repo.GetProductionDetailAsync(prodId, ct);
+            return await _repo.GetProductionDetailByOrderIdAsync(orderId, ct);
         }
 
         public async Task<ProductionWasteReportDto?> GetProductionWasteAsync(int prodId, CancellationToken ct = default)
