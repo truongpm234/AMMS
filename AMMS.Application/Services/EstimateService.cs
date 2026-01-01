@@ -17,13 +17,15 @@ namespace AMMS.Application.Services
         private readonly ICostEstimateRepository _estimateRepo;
         private readonly IMachineRepository _machineRepo;
         private readonly IRequestRepository _requestRepo;
+        private readonly IProcessCostRuleService _processCostRuleService;
 
-        public EstimateService(IMaterialRepository materialRepo, ICostEstimateRepository costEstimateRepository, IMachineRepository machineRepo, IRequestRepository requestRepo)
+        public EstimateService(IMaterialRepository materialRepo, ICostEstimateRepository costEstimateRepository, IMachineRepository machineRepo, IRequestRepository requestRepo, IProcessCostRuleService processCostRuleService)
         {
             _materialRepo = materialRepo;
             _estimateRepo = costEstimateRepository;
             _machineRepo = machineRepo;
             _requestRepo = requestRepo;
+            _processCostRuleService = processCostRuleService;
         }
 
         private static TEnum ParseEnum<TEnum>(string value, string fieldName)
@@ -171,7 +173,7 @@ namespace AMMS.Application.Services
             var processes = ParseProcesses(req.production_processes);
 
             // ✅ DÙNG totalPrintAreaM2 thay vì totalAreaM2
-            var materialCosts = CalculateMaterialCosts(totalPrintAreaM2, productTypeCode, coatingType, processes, req.has_lamination);
+            var materialCosts = CalculateMaterialCosts(totalPrintAreaM2, productTypeCode, coatingType, processes);
 
 
             // =====================
@@ -221,7 +223,7 @@ namespace AMMS.Application.Services
                 orderReq.product_type = req.product_type?.Trim();
                 orderReq.production_processes = req.production_processes?.Trim();
                 orderReq.coating_type = req.coating_type?.Trim();
-                orderReq.has_lamination = req.has_lamination;
+                //orderReq.has_lamination = req.has_lamination;
 
                 var paperMaterial = await _materialRepo.GetByCodeAsync(req.paper.paper_code);
                 orderReq.paper_name = paperMaterial?.name;
@@ -450,7 +452,7 @@ namespace AMMS.Application.Services
                    $"tổng cộng {sheetsWithWaste} tờ.";
         }
 
-        private MaterialCostResult CalculateMaterialCosts(decimal totalAreaM2, string productTypeCode, CoatingType coatingType, List<ProcessType> processes, bool hasLamination)
+        private MaterialCostResult CalculateMaterialCosts(decimal totalAreaM2, string productTypeCode, CoatingType coatingType, List<ProcessType> processes)
         {
             var result = new MaterialCostResult();
 
@@ -478,7 +480,7 @@ namespace AMMS.Application.Services
             }
 
             // MÀNG CÁN
-            if (processes.Contains(ProcessType.CAN_MANG) || hasLamination)
+            if (processes.Contains(ProcessType.CAN_MANG))
             {
                 result.LaminationRate = MaterialRates.LaminationRates.RATE_12MIC;
                 result.LaminationWeightKg = totalAreaM2 * result.LaminationRate;
@@ -842,7 +844,7 @@ namespace AMMS.Application.Services
             };
         }
 
-        private static bool IsProcessApplied(ProcessType p, List<ProcessType> selected, CoatingType coatingType, bool hasLamination)
+        private static bool IsProcessApplied(ProcessType p, List<ProcessType> selected, CoatingType coatingType)
         {
             
             if (p == ProcessType.IN)
@@ -852,7 +854,7 @@ namespace AMMS.Application.Services
                 return selected.Contains(ProcessType.PHU);
 
             if (p == ProcessType.CAN_MANG)
-                return selected.Contains(ProcessType.CAN_MANG) || hasLamination;
+                return selected.Contains(ProcessType.CAN_MANG);
 
             if (p == ProcessType.DUT || p == ProcessType.CAT)
                 return selected.Contains(p); 
@@ -860,21 +862,15 @@ namespace AMMS.Application.Services
             return selected.Contains(p);
         }
 
-        private List<ProcessCostDetail> CalculateAllProcessCostDetails(
-    List<ProcessType> selectedProcesses,
-    CoatingType coatingType,
-    bool hasLamination,
-    int sheetsWithWaste,
-    int productQuantity,
-    decimal totalPrintAreaM2)
+        private async Task<List<ProcessCostDetail>> CalculateAllProcessCostDetails(List<ProcessType> selectedProcesses, CoatingType coatingType, int sheetsWithWaste, int productQuantity, decimal totalPrintAreaM2, CancellationToken ct = default)
         {
             var result = new List<ProcessCostDetail>();
 
             foreach (var p in Enum.GetValues<ProcessType>())
             {
-                var applied = IsProcessApplied(p, selectedProcesses, coatingType, hasLamination);
+                var applied = IsProcessApplied(p, selectedProcesses, coatingType);
 
-                var (unitPrice, unit, note) = ProcessCostRules.GetRate(p);
+                var (unitPrice, unit, note) = await _processCostRuleService.GetRateAsync(p, ct);
 
                 var qty = applied
                     ? GetQuantityForProcess(p, sheetsWithWaste, productQuantity, totalPrintAreaM2)
@@ -895,6 +891,7 @@ namespace AMMS.Application.Services
 
             return result;
         }
+
         private static bool HasProcess(string productionProcesses, string code)
         {
             if (string.IsNullOrWhiteSpace(productionProcesses)) return false;
@@ -905,27 +902,24 @@ namespace AMMS.Application.Services
 
         public async Task<ProcessCostBreakdownResponse> CalculateProcessCostBreakdownAsync(CostEstimateRequest req)
         {
-            // dùng validation cũ cho chắc
             ValidateCostRequest(req);
 
             var coatingType = ParseEnum<CoatingType>(req.coating_type ?? "KEO_NUOC", "coating_type");
             var processes = ParseProcesses(req.production_processes);
 
-            // các số liệu bạn đã có từ client (req.paper)
             int sheetsWithWaste = req.paper.sheets_with_waste;
             int productQuantity = req.paper.quantity;
 
             decimal printAreaM2 = (req.paper.print_width_mm / 1000m) * (req.paper.print_height_mm / 1000m);
             decimal totalPrintAreaM2 = printAreaM2 * productQuantity;
 
-            var details = CalculateAllProcessCostDetails(
-                selectedProcesses: processes,
-                coatingType: coatingType,
-                hasLamination: req.has_lamination,
-                sheetsWithWaste: sheetsWithWaste,
-                productQuantity: productQuantity,
-                totalPrintAreaM2: totalPrintAreaM2
-            );
+            var details = await CalculateAllProcessCostDetails(
+                    selectedProcesses: processes,
+                    coatingType: coatingType,
+                    sheetsWithWaste: sheetsWithWaste,
+                    productQuantity: productQuantity,
+                    totalPrintAreaM2: totalPrintAreaM2,
+                    ct: CancellationToken.None);
 
             return new ProcessCostBreakdownResponse
             {

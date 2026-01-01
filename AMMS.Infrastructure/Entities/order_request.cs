@@ -44,7 +44,7 @@ public partial class order_request
 
     public string? coating_type { get; set; }
 
-    public bool has_lamination { get; set; }
+    //public bool has_lamination { get; set; }
 
     public string? paper_code { get; set; }
 
@@ -71,6 +71,8 @@ public partial class order_request
     public int? print_width_mm { get; set; }
 
     public int? print_height_mm { get; set; }
+
+    public bool? is_send_design { get; set; }
 
     public virtual quote? quote { get; set; }
 

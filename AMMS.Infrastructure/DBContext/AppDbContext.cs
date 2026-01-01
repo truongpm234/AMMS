@@ -58,7 +58,12 @@ public partial class AppDbContext : DbContext
 
     public virtual DbSet<supplier_material> supplier_materials { get; set; }
 
-    public DbSet<payment> payments { get; set; } = null!;
+    public virtual DbSet<payment> payments { get; set; } = null!;
+
+    public virtual DbSet<cost_estimate_process> cost_estimate_processes { get; set; }
+
+    public virtual DbSet<process_cost_rule> process_cost_rules { get; set; }
+
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -230,7 +235,7 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.coating_type)
                 .HasMaxLength(20)
                 .HasDefaultValue("NONE");
-            entity.Property(e => e.has_lamination).HasDefaultValue(false);
+            //entity.Property(e => e.has_lamination).HasDefaultValue(false);
 
             entity.HasOne(d => d.order)
                 .WithMany()
@@ -577,6 +582,39 @@ public partial class AppDbContext : DbContext
                   .OnDelete(DeleteBehavior.Cascade)
                   .HasConstraintName("fk_payments_order_request");
         });
+
+        modelBuilder.Entity<cost_estimate_process>(entity =>
+        {
+            entity.HasKey(e => e.process_cost_id);
+            entity.HasOne(e => e.estimate)
+                .WithMany(e => e.process_costs)
+                .HasForeignKey(e => e.estimate_id)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.Property(e => e.quantity)
+                .HasPrecision(18, 4);
+            entity.Property(e => e.unit_price)
+                .HasPrecision(18, 2);
+            entity.Property(e => e.total_cost)
+                .HasPrecision(18, 2);
+        });
+
+        modelBuilder.Entity<process_cost_rule>(entity =>
+        {
+            entity.HasKey(e => e.process_code).HasName("process_cost_rule_pkey");
+
+            entity.Property(e => e.process_code)
+                  .HasMaxLength(50);
+
+            entity.Property(e => e.process_name)
+                  .HasMaxLength(255);
+
+            entity.Property(e => e.unit)
+                  .HasMaxLength(20);
+
+            entity.Property(e => e.unit_price)
+                  .HasPrecision(18, 2);
+        });
+
         OnModelCreatingPartial(modelBuilder);
     }
 

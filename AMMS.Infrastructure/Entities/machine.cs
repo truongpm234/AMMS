@@ -24,6 +24,10 @@ namespace AMMS.Infrastructure.Entities
 
         public int capacity_min { get; set; }
 
+        public int? busy_quantity { get; set; }
+
+        public int? free_quantity { get; set; }
+
         public int capacity_max { get; set; }
 
         public decimal working_hours_per_day { get; set; } = 24m;
@@ -32,10 +36,6 @@ namespace AMMS.Infrastructure.Entities
 
         public string? note { get; set; }
 
-        /// <summary>
-        /// Công suất thực tế mỗi ngày
-        /// = quantity × capacity_per_hour × working_hours_per_day × efficiency_percent / 100
-        /// </summary>
         [NotMapped]
         public decimal DailyCapacity =>
             quantity * capacity_per_hour * working_hours_per_day * efficiency_percent / 100m;

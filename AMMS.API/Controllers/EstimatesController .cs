@@ -27,10 +27,22 @@ namespace AMMS.API.Controllers
         }
 
         [HttpPost("cost")]
+        [ProducesResponseType(typeof(CostEstimateWithProcessResponse), StatusCodes.Status200OK)]
         public async Task<IActionResult> CalculateCost([FromBody] CostEstimateRequest req)
         {
-            var result = await _service.CalculateCostEstimateAsync(req);
-            return Ok(result);
+            // 1) Tính tổng chi phí (giấy + vật liệu + rush + discount...)
+            var cost = await _service.CalculateCostEstimateAsync(req);
+
+            // 2) Tính chi phí công đoạn (IN, PHU, CAN_MANG, BE, BOI, DAN...)
+            var processCost = await _service.CalculateProcessCostBreakdownAsync(req);
+
+            var response = new CostEstimateWithProcessResponse
+            {
+                cost = cost,
+                process_cost = processCost
+            };
+
+            return Ok(response);
         }
 
         [HttpPut("adjust-cost/{estimateId}")]

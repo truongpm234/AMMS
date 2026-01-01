@@ -9,11 +9,6 @@ namespace AMMS.Application.Rules
 {
     public static class WasteCalculationRules
     {
-        // ==================== HAO HỤT CÔNG ĐOẠN IN ====================
-
-        /// <summary>
-        /// Hao hụt cơ bản theo loại sản phẩm (tờ)
-        /// </summary>
         public static class PrintingWaste
         {
             // Gạch

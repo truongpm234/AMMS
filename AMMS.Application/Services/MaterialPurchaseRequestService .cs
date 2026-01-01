@@ -15,13 +15,10 @@ namespace AMMS.Application.Services
         {
             _db = db;
         }
-
-        // Tính thiếu NVL cho 1 order
         private async Task<List<MaterialShortageDto>> GetShortagesForOrderAsync(
             int orderId,
             CancellationToken ct)
         {
-            // Join order_items -> boms -> materials
             var raw = await (
                 from oi in _db.order_items
                 join b in _db.boms on oi.item_id equals b.order_item_id
@@ -45,7 +42,6 @@ namespace AMMS.Application.Services
     {
         var m = g.First().Material;
 
-        // Tổng nhu cầu = sum(quantity * qty_per_product * (1 + waste%))
         decimal required = g.Sum(x =>
         {
             var factor = 1m + (x.WastagePercent / 100m);
@@ -64,17 +60,12 @@ namespace AMMS.Application.Services
             StockQty = stock,
             RequiredQty = required,
             ShortageQty = shortage,
-            // mặc định số lượng đề xuất mua = số lượng thiếu
             NeedToBuyQty = shortage
         };
-    })
-    .Where(x => x.ShortageQty > 0m)
-    .ToList();
+    }).Where(x => x.ShortageQty > 0m).ToList();
 
             return grouped;
         }
-
-        // Sinh mã phiếu mua: PO-0001, PO-0002,...
         private async Task<string> GenerateNextPurchaseCodeAsync(CancellationToken ct)
         {
             var lastCode = await _db.purchases.AsNoTracking()
@@ -98,7 +89,6 @@ namespace AMMS.Application.Services
     int managerId,
     CancellationToken ct = default)
         {
-            // Check order tồn tại
             var order = await _db.orders
                 .AsNoTracking()
                 .FirstOrDefaultAsync(o => o.order_id == orderId, ct);
@@ -106,18 +96,16 @@ namespace AMMS.Application.Services
             if (order == null)
                 throw new KeyNotFoundException("Order not found");
 
-            // 1) Tính thiếu NVL
             var shortages = await GetShortagesForOrderAsync(orderId, ct);
             if (!shortages.Any())
                 throw new InvalidOperationException("Đơn hàng không thiếu nguyên vật liệu.");
 
-            // 2) Tạo purchase header (chưa chọn supplier)
             var code = await GenerateNextPurchaseCodeAsync(ct);
 
             var purchase = new purchase
             {
                 code = code,
-                supplier_id = null,      // manager sẽ chọn sau
+                supplier_id = null,      
                 created_by = managerId,
                 status = "Pending",
                 eta_date = null,
@@ -125,31 +113,26 @@ namespace AMMS.Application.Services
             };
 
             await _db.purchases.AddAsync(purchase, ct);
-            await _db.SaveChangesAsync(ct); // để có purchase_id
+            await _db.SaveChangesAsync(ct);
 
-            // ===== 3) Tạo chi tiết từng NVL thiếu (MUA DƯ) =====
             const decimal bufferPercent = 0.30m; // mua dư 30%
 
             foreach (var s in shortages)
             {
-                // nếu không thiếu thì bỏ qua
                 if (s.ShortageQty <= 0) continue;
 
-                // mua dư: NeedToBuy = Shortage * (1 + buffer%)
                 var buyQty = s.ShortageQty * (1 + bufferPercent);
 
-                // làm tròn 2 chữ số thập phân (tùy DB)
                 buyQty = decimal.Round(buyQty, 2, MidpointRounding.AwayFromZero);
 
-                // cập nhật lại vào DTO cho FE / manager thấy
                 s.NeedToBuyQty = buyQty;
 
                 var item = new purchase_item
                 {
                     purchase_id = purchase.purchase_id,
                     material_id = s.MaterialId,
-                    qty_ordered = buyQty,   // ✅ dùng NeedToBuyQty thay vì ShortageQty
-                    price = 0m        // manager chỉnh sau
+                    qty_ordered = buyQty,   
+                    price = 0m        
                 };
 
                 await _db.purchase_items.AddAsync(item, ct);
@@ -161,7 +144,7 @@ namespace AMMS.Application.Services
             {
                 PurchaseId = purchase.purchase_id,
                 PurchaseCode = purchase.code!,
-                Items = shortages  // lúc này mỗi item đã có NeedToBuyQty > ShortageQty
+                Items = shortages  
             };
         }
     }
