@@ -336,7 +336,6 @@ namespace AMMS.API.Controllers
                 await _dealService.NotifyCustomerPaidAsync(orderRequestId, (decimal)amount, now);
             }
             catch { }
-
             return (true, "Processed paid OK");
         }
     }
