@@ -468,5 +468,18 @@ namespace AMMS.Application.Services
                 design_file_path = path
             };
         }
+
+        public async Task UpdateDesignFilePathAsync(int orderRequestId, string designFilePath, CancellationToken ct = default)
+        {
+            var entity = await _requestRepo.GetByIdAsync(orderRequestId);
+            if (entity == null)
+                throw new Exception("Order request not found");
+
+            entity.design_file_path = designFilePath;
+            entity.is_send_design = true;
+
+            await _requestRepo.UpdateAsync(entity);
+            await _requestRepo.SaveChangesAsync();
+        }
     }
 }

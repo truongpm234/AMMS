@@ -10,7 +10,6 @@ namespace AMMS.Infrastructure.Helpers
 {
     public static class MachineUsageHelper
     {
-        // Reserve qty machines for a machine_code
         public static async Task ReserveAsync(AppDbContext db, string? machineCode, int qty, CancellationToken ct = default)
         {
             if (string.IsNullOrWhiteSpace(machineCode)) return;
@@ -22,10 +21,8 @@ namespace AMMS.Infrastructure.Helpers
             var total = mc.quantity ;
             var busy = mc.busy_quantity ?? 0;
 
-            // if free null -> compute
             var free = mc.free_quantity ?? Math.Max(0, total - busy);
 
-            // cannot reserve more than free
             var alloc = Math.Min(qty, free);
 
             busy += alloc;
@@ -35,7 +32,6 @@ namespace AMMS.Infrastructure.Helpers
             mc.free_quantity = free;
         }
 
-        // Release qty machines for a machine_code
         public static async Task ReleaseAsync(AppDbContext db, string? machineCode, int qty, CancellationToken ct = default)
         {
             if (string.IsNullOrWhiteSpace(machineCode)) return;
@@ -54,7 +50,6 @@ namespace AMMS.Infrastructure.Helpers
             mc.free_quantity = free;
         }
 
-        // Reserve ALL machines (machines.quantity) for that machine_code
         public static async Task ReserveAllAsync(AppDbContext db, string? machineCode, CancellationToken ct = default)
         {
             if (string.IsNullOrWhiteSpace(machineCode)) return;
@@ -66,7 +61,6 @@ namespace AMMS.Infrastructure.Helpers
             await ReserveAsync(db, machineCode, total, ct);
         }
 
-        // Release ALL machines (machines.quantity) for that machine_code
         public static async Task ReleaseAllAsync(AppDbContext db, string? machineCode, CancellationToken ct = default)
         {
             if (string.IsNullOrWhiteSpace(machineCode)) return;

@@ -44,8 +44,8 @@ namespace AMMS.Infrastructure.Repositories
             _db.cost_estimates.Update(entity);
             await Task.CompletedTask;
         }
-        public async Task<DepositByRequestResponse?> GetDepositByRequestIdAsync(
-    int requestId, CancellationToken ct = default)
+
+        public async Task<DepositByRequestResponse?> GetDepositByRequestIdAsync(int requestId, CancellationToken ct = default)
         {
             return await _db.cost_estimates
                 .AsNoTracking()
@@ -59,6 +59,5 @@ namespace AMMS.Infrastructure.Repositories
                 })
                 .FirstOrDefaultAsync(ct);
         }
-
     }
 }

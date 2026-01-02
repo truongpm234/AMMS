@@ -197,7 +197,7 @@ namespace AMMS.Application.Services
     <li><b>Số lượng:</b> {req.quantity}</li>
     <li><b>Ngày giao dự kiến:</b> {delivery}</li>
     <li><b>Final Total:</b> {finalTotal:n0} VND</li>
-    <li><b>Deposit (cọc):</b> {deposit:n0} VND</li>
+    <li><b>Phí cọc:</b> {deposit:n0} VND</li>
   </ul>
 
   {paidLine}

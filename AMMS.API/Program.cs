@@ -4,7 +4,6 @@ using AMMS.Application.Services;
 using AMMS.Infrastructure.Configurations;
 using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.FileStorage;
-using AMMS.Infrastructure.Interceptors;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Infrastructure.Repositories;
 using AMMS.Shared.DTOs.Email;
@@ -30,9 +29,6 @@ builder.Services.AddDbContext<AppDbContext>((sp, options) =>
                 errorCodesToAdd: null
             );
         });
-    options.AddInterceptors(
-        sp.GetRequiredService<CostEstimateRoundingInterceptor>()
-    );
 });
 
 builder.Services.AddControllers()
@@ -63,7 +59,6 @@ builder.Services.Configure<CloudinaryOptions>(
     builder.Configuration.GetSection("Cloudinary"));
 builder.Services.Configure<SendGridSettings>(
     builder.Configuration.GetSection("SendGrid"));
-builder.Services.AddSingleton<CostEstimateRoundingInterceptor>();
 builder.Services.Configure<PayOsOptions>(builder.Configuration.GetSection("PayOS"));
 
 

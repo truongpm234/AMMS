@@ -28,49 +28,6 @@ namespace AMMS.Application.Services
             _processCostRuleService = processCostRuleService;
         }
 
-        private static TEnum ParseEnum<TEnum>(string value, string fieldName)
-            where TEnum : struct, Enum
-        {
-            if (string.IsNullOrWhiteSpace(value))
-                throw new ArgumentException($"{fieldName} is required");
-
-            if (!Enum.TryParse<TEnum>(value, true, out var result))
-                throw new ArgumentException($"Invalid {fieldName}: {value}");
-
-            return result;
-        }
-
-        private static string ResolveProductTypeCode(string productType, string? formProduct)
-        {
-            productType = (productType ?? "").Trim();
-            formProduct = formProduct?.Trim();
-
-            if (Enum.TryParse<ProductTypeCodeGeneral>(productType, true, out var general))
-            {
-                if (general == ProductTypeCodeGeneral.HOP_MAU ||
-                    general == ProductTypeCodeGeneral.VO_HOP_GACH)
-                {
-                    if (string.IsNullOrWhiteSpace(formProduct))
-                    {
-                        throw new ArgumentException(
-                            $"form_product is required when product_type is '{productType}'. " +
-                            $"Please specify detailed form (e.g., HOP_MAU_1LUOT_THUONG, GACH_NOI_DIA_4SP).");
-                    }
-
-                    return formProduct!;
-                }
-
-                return general.ToString();
-            }
-
-            if (Enum.TryParse<ProductTypeCodeOfGach>(productType, true, out _))
-                return productType;
-
-            if (Enum.TryParse<ProductTypeCodeOfHop_mau>(productType, true, out _))
-                return productType;
-
-            return productType;
-        }
         public async Task<PaperEstimateResponse> EstimatePaperAsync(PaperEstimateRequest req)
         {
             ValidateRequest(req);
@@ -722,41 +679,41 @@ namespace AMMS.Application.Services
             var response = new CostEstimateResponse
             {
                 // Chi phí giấy
-                paper_cost = Math.Round(paperCost, 2),
+                paper_cost = RoundToThousand(paperCost),
                 paper_sheets_used = paperSheetsUsed,
                 paper_unit_price = Math.Round(paperUnitPrice, 2),
 
                 // Chi phí mực
-                ink_cost = Math.Round(materialCosts.InkCost, 2),
+                ink_cost = RoundToThousand(materialCosts.InkCost),
                 ink_weight_kg = Math.Round(materialCosts.InkWeightKg, 4),
                 ink_rate_per_m2 = Math.Round(materialCosts.InkRate, 6),
                 ink_unit_price = MaterialPrices.INK_PRICE_PER_KG,
 
                 // Chi phí keo phủ
-                coating_glue_cost = Math.Round(materialCosts.CoatingGlueCost, 2),
+                coating_glue_cost = RoundToThousand(materialCosts.CoatingGlueCost),
                 coating_glue_weight_kg = Math.Round(materialCosts.CoatingGlueWeightKg, 4),
                 coating_glue_rate_per_m2 = Math.Round(materialCosts.CoatingGlueRate, 6),
                 coating_glue_unit_price = MaterialPrices.GetCoatingGluePrice(coatingType),
                 coating_type = coatingType.ToString(),
 
                 // Chi phí keo bồi
-                mounting_glue_cost = Math.Round(materialCosts.MountingGlueCost, 2),
+                mounting_glue_cost = RoundToThousand(materialCosts.MountingGlueCost),
                 mounting_glue_weight_kg = Math.Round(materialCosts.MountingGlueWeightKg, 4),
                 mounting_glue_rate_per_m2 = Math.Round(materialCosts.MountingGlueRate, 6),
                 mounting_glue_unit_price = MaterialPrices.MOUNTING_GLUE_PER_KG,
 
                 // Chi phí màng
-                lamination_cost = Math.Round(materialCosts.LaminationCost, 2),
+                lamination_cost = RoundToThousand(materialCosts.LaminationCost),
                 lamination_weight_kg = Math.Round(materialCosts.LaminationWeightKg, 4),
                 lamination_rate_per_m2 = Math.Round(materialCosts.LaminationRate, 6),
                 lamination_unit_price = MaterialPrices.LAMINATION_PER_KG,
 
                 // Tổng vật liệu
-                material_cost = Math.Round(materialCost, 2),
+                material_cost = RoundToThousand(materialCost),
 
                 // Khấu hao
                 overhead_percent = overheadPercent,
-                overhead_cost = Math.Round(overheadCost, 2),
+                overhead_cost = RoundToThousand(overheadCost),
 
                 // Chi phí cơ bản
                 base_cost = Math.Round(baseCost, 2),
@@ -764,21 +721,21 @@ namespace AMMS.Application.Services
                 // Rush order
                 is_rush = rushResult.IsRush,
                 rush_percent = rushResult.RushPercent,
-                rush_amount = Math.Round(rushResult.RushAmount, 2),
+                rush_amount = RoundToThousand(rushResult.RushAmount),
                 days_early = rushResult.DaysEarly,
 
                 // Subtotal
-                subtotal = Math.Round(subtotal, 2),
+                subtotal = RoundToThousand(subtotal),
 
                 // Chiết khấu
                 discount_percent = discountResult.DiscountPercent,
-                discount_amount = Math.Round(discountResult.DiscountAmount, 2),
+                discount_amount = RoundToThousand(discountResult.DiscountAmount),
 
                 // cost design
                 design_cost = Math.Round(designCost, 2),
 
                 // Tổng cuối
-                final_total_cost = Math.Round(finalTotal, 2),
+                final_total_cost = RoundToThousand(finalTotal),
                 // Thông tin khác
                 estimated_finish_date = DateTime.SpecifyKind(estimatedFinish, DateTimeKind.Utc),
                 total_area_m2 = Math.Round(totalAreaM2, 4),
@@ -808,8 +765,8 @@ namespace AMMS.Application.Services
                 material_name = "Giấy",
                 quantity = paperSheetsUsed,
                 unit = "tờ",
-                unit_price = Math.Round(paperUnitPrice, 0),
-                total_cost = Math.Round(paperCost, 0),
+                unit_price = RoundToThousand(paperUnitPrice),
+                total_cost = RoundToThousand(paperCost),
                 note = $"Sử dụng {paperSheetsUsed} tờ"
             });
 
@@ -821,8 +778,8 @@ namespace AMMS.Application.Services
                     material_name = "Mực in",
                     quantity = Math.Round(materialCosts.InkWeightKg, 4),
                     unit = "kg",
-                    unit_price = Math.Round(MaterialPrices.INK_PRICE_PER_KG, 0),
-                    total_cost = Math.Round(materialCosts.InkCost, 0),
+                    unit_price = RoundToThousand(MaterialPrices.INK_PRICE_PER_KG),
+                    total_cost = RoundToThousand(materialCosts.InkCost),
                     note = $"Định mức: {materialCosts.InkRate:F6} kg/m²"
                 });
             }
@@ -835,8 +792,8 @@ namespace AMMS.Application.Services
                     material_name = $"Keo phủ ({coatingType})",
                     quantity = Math.Round(materialCosts.CoatingGlueWeightKg, 4),
                     unit = "kg",
-                    unit_price = Math.Round(MaterialPrices.GetCoatingGluePrice(coatingType), 0),
-                    total_cost = Math.Round(materialCosts.CoatingGlueCost, 0),
+                    unit_price = RoundToThousand(MaterialPrices.GetCoatingGluePrice(coatingType)),
+                    total_cost = RoundToThousand(materialCosts.CoatingGlueCost),
                     note = $"Định mức: {materialCosts.CoatingGlueRate:F6} kg/m²"
                 });
             }
@@ -849,8 +806,8 @@ namespace AMMS.Application.Services
                     material_name = "Keo bồi",
                     quantity = Math.Round(materialCosts.MountingGlueWeightKg, 4),
                     unit = "kg",
-                    unit_price = Math.Round(MaterialPrices.MOUNTING_GLUE_PER_KG, 0),
-                    total_cost = Math.Round(materialCosts.MountingGlueCost, 0),
+                    unit_price = RoundToThousand(MaterialPrices.MOUNTING_GLUE_PER_KG),
+                    total_cost = RoundToThousand(materialCosts.MountingGlueCost),
                     note = $"Định mức: {materialCosts.MountingGlueRate:F6} kg/m²"
                 });
             }
@@ -863,8 +820,8 @@ namespace AMMS.Application.Services
                     material_name = "Màng cán",
                     quantity = Math.Round(materialCosts.LaminationWeightKg, 4),
                     unit = "kg",
-                    unit_price = Math.Round(MaterialPrices.LAMINATION_PER_KG, 0),
-                    total_cost = Math.Round(materialCosts.LaminationCost, 0),
+                    unit_price = RoundToThousand(MaterialPrices.LAMINATION_PER_KG),
+                    total_cost = RoundToThousand(materialCosts.LaminationCost),
                     note = $"Định mức: {materialCosts.LaminationRate:F6} kg/m²"
                 });
             }
@@ -887,7 +844,7 @@ namespace AMMS.Application.Services
 
             var subtotal = estimate.subtotal;
 
-            estimate.final_total_cost = Math.Round(finalCost, 2);
+            estimate.final_total_cost = RoundToThousand(finalCost);
 
             await _estimateRepo.SaveChangesAsync();
         }
@@ -964,10 +921,10 @@ namespace AMMS.Application.Services
                 result.Add(new ProcessCostDetail
                 {
                     process = p.ToString(),
-                    unit_price = unitPrice,
+                    unit_price = RoundToThousand(unitPrice),
                     quantity = Math.Round(qty, 4),
                     unit = unit,
-                    total_cost = Math.Round(total, 2),
+                    total_cost = RoundToThousand(total),
                     note = applied ? note : "Not selected"
                 });
             }
@@ -981,6 +938,55 @@ namespace AMMS.Application.Services
             return productionProcesses
                 .Split(',', StringSplitOptions.RemoveEmptyEntries)
                 .Any(x => string.Equals(x.Trim(), code, StringComparison.OrdinalIgnoreCase));
+        }
+        private static TEnum ParseEnum<TEnum>(string value, string fieldName)
+            where TEnum : struct, Enum
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                throw new ArgumentException($"{fieldName} is required");
+
+            if (!Enum.TryParse<TEnum>(value, true, out var result))
+                throw new ArgumentException($"Invalid {fieldName}: {value}");
+
+            return result;
+        }
+
+        
+        private static string ResolveProductTypeCode(string productType, string? formProduct)
+        {
+            productType = (productType ?? "").Trim();
+            formProduct = formProduct?.Trim();
+
+            if (Enum.TryParse<ProductTypeCodeGeneral>(productType, true, out var general))
+            {
+                if (general == ProductTypeCodeGeneral.HOP_MAU ||
+                    general == ProductTypeCodeGeneral.VO_HOP_GACH)
+                {
+                    if (string.IsNullOrWhiteSpace(formProduct))
+                    {
+                        throw new ArgumentException(
+                            $"form_product is required when product_type is '{productType}'. " +
+                            $"Please specify detailed form (e.g., HOP_MAU_1LUOT_THUONG, GACH_NOI_DIA_4SP).");
+                    }
+
+                    return formProduct!;
+                }
+
+                return general.ToString();
+            }
+
+            if (Enum.TryParse<ProductTypeCodeOfGach>(productType, true, out _))
+                return productType;
+
+            if (Enum.TryParse<ProductTypeCodeOfHop_mau>(productType, true, out _))
+                return productType;
+
+            return productType;
+        }
+
+        private static decimal RoundToThousand(decimal value)
+        {
+            return Math.Round(value / 1000m, MidpointRounding.AwayFromZero) * 1000m;
         }
 
         public async Task<ProcessCostBreakdownResponse> CalculateProcessCostBreakdownAsync(CostEstimateRequest req)
@@ -1007,7 +1013,7 @@ namespace AMMS.Application.Services
             return new ProcessCostBreakdownResponse
             {
                 order_request_id = req.order_request_id,
-                total_cost = Math.Round(details.Sum(x => x.total_cost), 2),
+                total_cost = RoundToThousand(details.Sum(x => x.total_cost)),
                 details = details
             };
         }

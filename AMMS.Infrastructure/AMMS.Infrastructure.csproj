@@ -27,7 +27,6 @@
 
   <ItemGroup>
     <Folder Include="DBContext\" />
-    <Folder Include="Hangfire\" />
   </ItemGroup>
 
 </Project>
