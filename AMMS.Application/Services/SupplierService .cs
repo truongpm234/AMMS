@@ -2,9 +2,6 @@
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Suppliers;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace AMMS.Application.Services
 {
@@ -42,5 +39,10 @@ namespace AMMS.Application.Services
         public Task<SupplierDetailDto?> GetSupplierDetailWithMaterialsAsync(
             int supplierId, int page, int pageSize, CancellationToken ct = default)
             => _repo.GetSupplierDetailWithMaterialsAsync(supplierId, page, pageSize, ct);
+
+        public Task<List<SupplierByMaterialIdDto>> ListSupplierByMaterialId(int id)
+        {
+            return _repo.ListSupplierByMaterialId(id);
+        }
     }
 }

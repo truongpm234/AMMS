@@ -18,5 +18,6 @@ namespace AMMS.Application.Interfaces
             int pageSize,
             CancellationToken ct = default);
 
+        Task<string> DeleteDesignFilePath(int orderRequestId);
     }
 }

@@ -1,10 +1,4 @@
-﻿using AMMS.Infrastructure.Entities;
-using AMMS.Shared.DTOs.Suppliers;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿using AMMS.Shared.DTOs.Suppliers;
 
 namespace AMMS.Infrastructure.Interfaces
 {
@@ -18,5 +12,6 @@ namespace AMMS.Infrastructure.Interfaces
 
         Task<SupplierDetailDto?> GetSupplierDetailWithMaterialsAsync(
             int supplierId, int page, int pageSize, CancellationToken ct = default);
+        Task<List<SupplierByMaterialIdDto>> ListSupplierByMaterialId(int id);
     }
 }

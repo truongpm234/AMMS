@@ -1,7 +1,5 @@
 ﻿using AMMS.Application.Interfaces;
 using Microsoft.AspNetCore.Mvc;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace AMMS.API.Controllers
 {
@@ -45,6 +43,13 @@ namespace AMMS.API.Controllers
                 return NotFound(new { message = "Supplier not found", supplierId = id });
 
             return Ok(result);
+        }
+
+        [HttpGet("suppliers-by-material-id")]
+        public async Task<IActionResult> GetSupplierByMaterialId(int id)
+        {
+            var res = await _service.ListSupplierByMaterialId(id);
+            return Ok(res);
         }
     }
 }

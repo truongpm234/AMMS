@@ -5,11 +5,6 @@ using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Orders;
 using Microsoft.EntityFrameworkCore;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace AMMS.Infrastructure.Repositories
 {
@@ -21,7 +16,7 @@ namespace AMMS.Infrastructure.Repositories
         {
             _db = db;
         }
-       
+
         // ===== MAIN PAGED WITH FULFILL ===================================
         public async Task<List<OrderResponseDto>> GetPagedWithFulfillAsync(int skip, int take, CancellationToken ct = default)
         {
@@ -544,6 +539,18 @@ namespace AMMS.Infrastructure.Repositories
                 HasNext = hasNext,
                 Data = pageRows
             };
+        }
+
+        public async Task<string> DeleteDesignFilePath(int orderRequestId)
+        {
+            var designFilePath = _db.order_requests.SingleOrDefault(f => f.order_request_id == orderRequestId);
+            if (designFilePath != null)
+            {
+                designFilePath.design_file_path = "";
+                _db.SaveChanges();
+                return "Delete Success";
+            }
+            return "Delete False";
         }
     }
 }

@@ -1,10 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace AMMS.Shared.DTOs.Requests
+﻿namespace AMMS.Shared.DTOs.Requests
 {
     public class CreateResquest
     {
@@ -26,10 +20,12 @@ namespace AMMS.Shared.DTOs.Requests
 
         public DateTime? order_request_date { get; set; }
 
-        public string? province { get; set; }       
+        public string? province { get; set; }
 
-        public string? district { get; set; }      
-        
-        public string? detail_address { get; set; } 
+        public string? district { get; set; }
+
+        public string? detail_address { get; set; }
+
+        public bool is_send_design { get; set; }
     }
 }

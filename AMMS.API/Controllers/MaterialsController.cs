@@ -1,6 +1,4 @@
 ﻿using AMMS.Application.Interfaces;
-using AMMS.Infrastructure.Entities;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AMMS.API.Controllers

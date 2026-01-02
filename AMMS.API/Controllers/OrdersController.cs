@@ -1,7 +1,5 @@
 ﻿using AMMS.Application.Interfaces;
-using AMMS.Application.Services;
 using AMMS.Shared.DTOs.Purchases;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AMMS.API.Controllers
@@ -82,6 +80,12 @@ namespace AMMS.API.Controllers
         {
             var result = await _service.GetAllMissingMaterialsAsync(page, pageSize, ct);
             return Ok(result);
+        }
+
+        [HttpDelete("delete-design-file-path")]
+        public async Task<string> Delete(int orderRequestId)
+        {
+            return await _service.DeleteDesignFilePath(orderRequestId);
         }
     }
 }

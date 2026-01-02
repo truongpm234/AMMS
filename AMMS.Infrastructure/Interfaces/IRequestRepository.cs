@@ -2,7 +2,6 @@
 using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Orders;
 using AMMS.Shared.DTOs.Requests;
-using Microsoft.EntityFrameworkCore;
 namespace AMMS.Infrastructure.Interfaces
 {
     public interface IRequestRepository
@@ -22,7 +21,7 @@ namespace AMMS.Infrastructure.Interfaces
     bool ascending, int page, int pageSize, CancellationToken ct = default);
         Task<PagedResultLite<RequestSortedDto>> GetSortedByDeliveryDatePagedAsync(
     bool nearestFirst, int page, int pageSize, CancellationToken ct = default);
-        Task<PagedResultLite<RequestEmailStatsDto>>GetEmailsByAcceptedCountPagedAsync(
+        Task<PagedResultLite<RequestEmailStatsDto>> GetEmailsByAcceptedCountPagedAsync(
     int page, int pageSize, CancellationToken ct = default);
         Task<PagedResultLite<RequestStockCoverageDto>> GetSortedByStockCoveragePagedAsync(
     int page, int pageSize, CancellationToken ct = default);

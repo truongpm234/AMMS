@@ -1,13 +1,8 @@
 ﻿using AMMS.Infrastructure.DBContext;
-using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Suppliers;
 using Microsoft.EntityFrameworkCore;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace AMMS.Infrastructure.Repositories
 {
@@ -40,7 +35,7 @@ namespace AMMS.Infrastructure.Repositories
                     Phone = s.phone,
                     Email = s.email,
                     MainMaterialType = s.main_material_type,
-                    Rating = s.rating 
+                    Rating = s.rating
                 })
                 .ToListAsync(ct);
         }
@@ -95,7 +90,7 @@ namespace AMMS.Infrastructure.Repositories
                     x.code,
                     x.name,
                     x.unit,
-                    x.UnitPrice,      
+                    x.UnitPrice,
                     x.is_active,
                     x.note
                 ))
@@ -118,6 +113,24 @@ namespace AMMS.Infrastructure.Repositories
                 }
             };
         }
-
+        public async Task<List<SupplierByMaterialIdDto>> ListSupplierByMaterialId(int id)
+        {
+            var listSuppliers = await _db.suppliers
+            .Join(_db.supplier_materials,
+                 s => s.supplier_id,
+                 sm => sm.supplier_id,
+                 (s, sm) => new { s, sm })
+            .Where(x => x.sm.material_id == id && x.sm.is_active)
+            .Select(x => new SupplierByMaterialIdDto
+            {
+                SupplierId = x.s.supplier_id,
+                Name = x.s.name,
+                Email = x.s.email,
+                Phone = x.s.phone,
+                Price = x.sm.unit_price
+            })
+            .ToListAsync();
+            return listSuppliers;
+        }
     }
 }

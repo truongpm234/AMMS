@@ -5,7 +5,6 @@ using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Requests;
 using Microsoft.EntityFrameworkCore;
-using Npgsql;
 
 namespace AMMS.Application.Services
 {
@@ -54,7 +53,8 @@ namespace AMMS.Application.Services
                 design_file_path = req.design_file_path,
                 order_request_date = ToUnspecified(req.order_request_date),
                 detail_address = req.detail_address,
-                process_status = "Pending"
+                process_status = "Pending",
+                is_send_design = req.is_send_design
             };
 
             await _requestRepo.AddAsync(entity);

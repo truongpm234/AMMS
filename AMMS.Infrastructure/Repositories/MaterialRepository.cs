@@ -4,11 +4,6 @@ using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Materials;
 using Microsoft.EntityFrameworkCore;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace AMMS.Infrastructure.Repositories
 {
@@ -214,6 +209,22 @@ namespace AMMS.Infrastructure.Repositories
                 HasNext = hasNext,
                 Data = dtoList
             };
+        }
+        public async Task<MaterialTypePaperDto> GetAllPaperTypeAsync()
+        {
+            var response = new MaterialTypePaperDto();
+            var materialsPaperType = _db.materials.Where(n => n.main_material_type == "GIẤY").ToList();
+            var paperMaxStockProduct = _db.materials.Where(m => m.main_material_type == "GIẤY").OrderByDescending(m => m.stock_qty).Select(m => m.name).FirstOrDefault();
+            foreach (var material in materialsPaperType)
+            {
+                var paperTypedto = new PaperTypeDto();
+                paperTypedto.Code = material.code;
+                paperTypedto.Name = material.name;
+                paperTypedto.StockQty = material.stock_qty;
+                response.PaperTypes.Add(paperTypedto);
+            }
+            response.MostStockPaperNames = paperMaxStockProduct;
+            return response;
         }
     }
 }

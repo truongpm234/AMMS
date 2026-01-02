@@ -339,6 +339,7 @@ namespace AMMS.API.Controllers
 
             return (true, "Processed paid OK");
         }
+<<<<<<< HEAD
 
         [HttpPost("{requestId:int}/convert-to-order")]
         public async Task<IActionResult> ConvertToOrder(int requestId)
@@ -353,5 +354,7 @@ namespace AMMS.API.Controllers
 
             return Ok(result);
         }
+=======
+>>>>>>> main
     }
 }

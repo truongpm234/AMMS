@@ -3,11 +3,6 @@ using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Orders;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace AMMS.Application.Services
 {
@@ -63,5 +58,10 @@ namespace AMMS.Application.Services
 
         public Task<PagedResultLite<MissingMaterialDto>> GetAllMissingMaterialsAsync(int page, int pageSize, CancellationToken ct = default)
             => _orderRepo.GetAllMissingMaterialsAsync(page, pageSize, ct);
+
+        public Task<string> DeleteDesignFilePath(int orderRequestId)
+        {
+            return _orderRepo.DeleteDesignFilePath(orderRequestId);
+        }
     }
 }
