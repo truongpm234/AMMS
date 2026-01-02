@@ -17,7 +17,14 @@ namespace AMMS.Application.Services
         private readonly ICostEstimateRepository _estimateRepo;
         private readonly IMaterialRepository _materialRepo;
         private readonly IBomRepository _bomRepo;
-        public RequestService(IRequestRepository requestRepo, IOrderRepository orderRepo, ICostEstimateRepository estimateRepo, IMaterialRepository materialRepo, IBomRepository bomRepo, AppDbContext db)
+
+        public RequestService(
+            IRequestRepository requestRepo,
+            IOrderRepository orderRepo,
+            ICostEstimateRepository estimateRepo,
+            IMaterialRepository materialRepo,
+            IBomRepository bomRepo,
+            AppDbContext db)
         {
             _requestRepo = requestRepo;
             _orderRepo = orderRepo;
@@ -79,6 +86,7 @@ namespace AMMS.Application.Services
             entity.detail_address = req.detail_address ?? entity.detail_address;
             entity.delivery_date = ToUnspecified(req.delivery_date);
             entity.order_request_date = ToUnspecified(req.order_request_date);
+
             entity.product_type = req.product_type ?? entity.product_type;
             entity.process_status = "Verified";
 
@@ -123,6 +131,7 @@ namespace AMMS.Application.Services
             };
         }
 
+        // ✅✅✅ UPDATED: ConvertToOrderAsync thêm product_type_id vào order_item
         public async Task<ConvertRequestToOrderResponse> ConvertToOrderAsync(int requestId)
         {
             var strategy = _db.Database.CreateExecutionStrategy();
@@ -189,6 +198,36 @@ namespace AMMS.Application.Services
                     var hasEnoughStock = await _requestRepo.HasEnoughStockForRequestAsync(requestId);
                     var orderStatus = hasEnoughStock ? "Scheduled" : "Not enough";
 
+                    // ✅ Map product_type_id từ order_request.product_type (code)
+                    int? productTypeId = null;
+                    var ptCode = (req.product_type ?? "").Trim();
+
+                    if (string.IsNullOrWhiteSpace(ptCode))
+                    {
+                        return new ConvertRequestToOrderResponse
+                        {
+                            Success = false,
+                            Message = "order_request.product_type is missing, cannot map product_type_id",
+                            RequestId = requestId
+                        };
+                    }
+
+                    productTypeId = await _db.product_types
+                        .AsNoTracking()
+                        .Where(x => x.code == ptCode)
+                        .Select(x => (int?)x.product_type_id)
+                        .FirstOrDefaultAsync();
+
+                    if (productTypeId == null)
+                    {
+                        return new ConvertRequestToOrderResponse
+                        {
+                            Success = false,
+                            Message = $"Product type code '{ptCode}' not found in product_types",
+                            RequestId = requestId
+                        };
+                    }
+
                     var newOrder = new order
                     {
                         code = "TMP-" + Guid.NewGuid().ToString("N"),
@@ -201,7 +240,7 @@ namespace AMMS.Application.Services
                     };
 
                     await _orderRepo.AddOrderAsync(newOrder);
-                    await _orderRepo.SaveChangesAsync(); 
+                    await _orderRepo.SaveChangesAsync();
 
                     newOrder.code = $"ORD-{newOrder.order_id:00000}";
                     await _orderRepo.SaveChangesAsync();
@@ -212,6 +251,10 @@ namespace AMMS.Application.Services
                         product_name = req.product_name,
                         quantity = req.quantity ?? 0,
                         design_url = req.design_file_path,
+
+                        // ✅✅✅ FIELD MỚI
+                        product_type_id = productTypeId,
+
                         paper_code = req.paper_code,
                         production_process = req.production_processes,
                         paper_name = req.paper_name,
@@ -361,7 +404,6 @@ namespace AMMS.Application.Services
 
         public async Task<int> CreateOrderRequestAsync(CreateOrderRequestDto dto, CancellationToken ct = default)
         {
-            // Validate nhẹ (bạn có thể thêm FluentValidation sau)
             if (dto.quantity is null or <= 0)
                 throw new ArgumentException("quantity must be > 0");
             if (string.IsNullOrWhiteSpace(dto.product_name))
@@ -371,25 +413,20 @@ namespace AMMS.Application.Services
 
             var entity = new order_request
             {
-                // Khách hàng
                 customer_name = dto.customer_name?.Trim(),
                 customer_phone = dto.customer_phone?.Trim(),
                 customer_email = dto.customer_email?.Trim(),
 
-                // Đơn hàng
                 delivery_date = ToUnspecified(dto.delivery_date),
                 detail_address = dto.detail_address?.Trim(),
 
-                // Sản phẩm
                 product_name = dto.product_name?.Trim(),
                 quantity = dto.quantity,
                 description = dto.description,
 
-                // Thiết kế
                 design_file_path = dto.design_file_path,
                 is_send_design = dto.is_send_design,
 
-                // Kỹ thuật
                 product_type = dto.product_type?.Trim(),
                 number_of_plates = dto.number_of_plates,
                 production_processes = dto.production_processes?.Trim(),
@@ -408,7 +445,6 @@ namespace AMMS.Application.Services
                 print_width_mm = dto.print_width_mm,
                 print_height_mm = dto.print_height_mm,
 
-                // Mặc định
                 order_request_date = ToUnspecified(now),
                 process_status = "Pending"
             };
@@ -418,14 +454,13 @@ namespace AMMS.Application.Services
 
             return entity.order_request_id;
         }
+
         public async Task<OrderRequestDesignFileResponse?> GetDesignFileAsync(int orderRequestId, CancellationToken ct = default)
         {
             var path = await _requestRepo.GetDesignFilePathAsync(orderRequestId, ct);
 
             if (path == null)
-            {
                 return null;
-            }
 
             return new OrderRequestDesignFileResponse
             {

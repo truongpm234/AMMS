@@ -340,5 +340,18 @@ namespace AMMS.API.Controllers
             return (true, "Processed paid OK");
         }
 
+        [HttpPost("{requestId:int}/convert-to-order")]
+        public async Task<IActionResult> ConvertToOrder(int requestId)
+        {
+            if (requestId <= 0) return BadRequest(new { message = "requestId invalid" });
+
+            var result = await _service.ConvertToOrderAsync(requestId);
+
+            // result.Success=false vẫn trả 400 để dễ test
+            if (!result.Success)
+                return BadRequest(result);
+
+            return Ok(result);
+        }
     }
 }
