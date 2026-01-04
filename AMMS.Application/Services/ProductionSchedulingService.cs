@@ -80,19 +80,17 @@ namespace AMMS.Application.Services
                     {
                         machine? m = null;
 
-                        // 🔥 tự detect: nếu s.machine là machine_code thì lấy theo code
                         if (!string.IsNullOrWhiteSpace(s.machine))
                         {
                             m = await _machineRepo.GetByMachineCodeAsync(s.machine);
                             if (m == null)
-                                m = await _machineRepo.FindMachineByProcess(s.machine); // coi như process_name
+                                m = await _machineRepo.FindMachineByProcess(s.machine);
                         }
 
                         var manual = IsManual(m, s.machine);
 
                         var status = s.seq_num == firstSeq ? "Ready" : "Unassigned";
 
-                        // ✅ chỉ set machine_code khi là máy thật
                         var taskMachine = manual ? null : m!.machine_code;
 
                         tasks.Add(new task
@@ -111,7 +109,6 @@ namespace AMMS.Application.Services
                     await _taskRepo.AddRangeAsync(tasks);
                     await _taskRepo.SaveChangesAsync();
 
-                    // ✅ allocate machine cho task Ready đầu tiên
                     var firstTask = tasks.FirstOrDefault(x => x.status == "Ready" && !string.IsNullOrWhiteSpace(x.machine));
                     if (firstTask != null)
                     {

@@ -299,9 +299,8 @@ namespace AMMS.Infrastructure.Repositories
                 join c in _db.customers.AsNoTracking() on q.customer_id equals c.customer_id into cj
                 from c in cj.DefaultIfEmpty()
 
-                    // ⭐ CHANGED: filter theo order_id thay vì prod_id
                 where pr.order_id == orderId
-                orderby pr.start_date ?? pr.end_date ?? o.order_date  // optional: chọn bản ghi mới nhất
+                orderby pr.start_date ?? pr.end_date ?? o.order_date 
                 select new
                 {
                     pr,
@@ -312,21 +311,19 @@ namespace AMMS.Infrastructure.Repositories
                             : (c != null ? (c.company_name ?? c.contact_name ?? "") : ""),
 
                     first_item = _db.order_items.AsNoTracking()
-                        .Where(i => i.order_id == o.order_id)
-                        .OrderBy(i => i.item_id)
-                        .Select(i => new
-                        {
-                            i.product_name,
-                            i.quantity,
-                            i.production_process,
-                            i_length = (int?)EF.Property<int?>(i, "length_mm"),
-                            i_width = (int?)EF.Property<int?>(i, "width_mm"),
-                            i_height = (int?)EF.Property<int?>(i, "height_mm"),
-                        })
-                        .FirstOrDefault()
-                }
-            )
-            .FirstOrDefaultAsync(ct);
+                            .Where(i => i.order_id == o.order_id)
+                            .OrderBy(i => i.item_id)
+                            .Select(i => new
+                                {
+                                    i.item_id,
+                                    i.product_name,
+                                    i.quantity,
+                                    i.production_process,
+                                    i_length = (int?)EF.Property<int?>(i, "length_mm"),
+                                    i_width = (int?)EF.Property<int?>(i, "width_mm"),
+                                    i_height = (int?)EF.Property<int?>(i, "height_mm"),
+                                }).FirstOrDefault()
+                            }).FirstOrDefaultAsync(ct);
 
             if (header == null) return null;
 
@@ -351,9 +348,17 @@ namespace AMMS.Infrastructure.Repositories
                 height_mm = header.first_item?.i_height,
             };
 
-            var prodId = header.pr.prod_id; // ⭐ Lấy lại prodId để dùng cho tasks/logs
+            int? orderItemId = header.first_item?.item_id;
+            List<bom> bomRows = new();
 
-            // 2) Load tasks + logs – ⭐ CHANGED: dùng prodId từ header
+            if (orderItemId.HasValue)
+            {
+                bomRows = await _db.boms.AsNoTracking()
+                    .Where(b => b.order_item_id == orderItemId.Value)
+                    .ToListAsync(ct);
+            }
+            var prodId = header.pr.prod_id;
+
             var tasks = await _db.tasks.AsNoTracking()
                 .Where(t => t.prod_id == prodId)
                 .Select(t => new
@@ -434,14 +439,79 @@ namespace AMMS.Infrastructure.Repositories
 
                 var stageLogs = task == null
                     ? new List<TaskLogDto>()
-                    : logsByTaskId(logs, task.task_id); // hàm helper cũ
+                    : logsByTaskId(logs, task.task_id); // helper
 
                 var qtyGood = stageLogs.Sum(x => x.qty_good);
                 var qtyBad = stageLogs.Sum(x => x.qty_bad);
                 var denom = qtyGood + qtyBad;
                 var wastePct = denom <= 0 ? 0m : Math.Round((qtyBad * 100m) / denom, 2);
 
-                stages.Add(new ProductionStageDto
+                var outputQty = qtyGood > 0 ? (decimal)qtyGood : (decimal)dto.quantity;
+
+                var outputUnit = "tờ";
+
+                string sizeSuffix = dto.length_mm.HasValue && dto.width_mm.HasValue && dto.height_mm.HasValue
+                    ? $" ({dto.length_mm}×{dto.width_mm}×{dto.height_mm})mm"
+                    : string.Empty;
+
+                var outputName = $"{s.process_name} {dto.product_name}{sizeSuffix}".Trim();
+
+                var outputProduct = new StageMaterialDto
+                {
+                    name = outputName,
+                    code = s.process_code,
+                    quantity = outputQty,
+                    unit = outputUnit
+                };
+
+                var inputMaterials = new List<StageMaterialDto>();
+
+                if (bomRows.Count > 0)
+                {
+                    foreach (var b in bomRows)
+                    {
+                        var mcode = (b.material_code ?? "").Trim().ToUpperInvariant();
+
+                        bool belongs = false;
+
+                        if (pcode == "CAT" || pcode == "RALO")
+                        {
+                            if (!mcode.Contains("INK") &&
+                                !mcode.Contains("MANG") &&
+                                !mcode.StartsWith("BOI"))
+                            {
+                                belongs = true;
+                            }
+                        }
+                        else if (pcode == "IN")
+                        {
+                            if (mcode.Contains("INK") || mcode.Contains("KEM"))
+                                belongs = true;
+                        }
+                        else if (pcode == "BOI")
+                        {
+                            if (mcode.StartsWith("BOI"))
+                                belongs = true;
+                        }
+                        else if (pcode == "CAN_MANG")
+                        {
+                            if (mcode.Contains("LAMINATION") || mcode.Contains("MANG"))
+                                belongs = true;
+                        }
+
+                        if (!belongs) continue;
+
+                        inputMaterials.Add(new StageMaterialDto
+                        {
+                            name = b.material_name ?? b.material_code ?? "",
+                            code = b.material_code,
+                            quantity = b.qty_total ?? 0,
+                            unit = b.unit ?? ""
+                        });
+                    }
+                }
+
+                var stage = new ProductionStageDto
                 {
                     process_id = s.process_id,
                     seq_num = s.seq_num,
@@ -461,8 +531,13 @@ namespace AMMS.Infrastructure.Repositories
                     waste_percent = wastePct,
                     last_scan_time = stageLogs.Count == 0 ? null : stageLogs.Max(x => x.log_time),
 
-                    logs = stageLogs
-                });
+                    logs = stageLogs,
+
+                    input_materials = inputMaterials,
+                    output_product = outputProduct
+                };
+
+                stages.Add(stage);
             }
 
             dto.stages = stages;
@@ -494,7 +569,6 @@ namespace AMMS.Infrastructure.Repositories
                 })
                 .ToListAsync(ct);
 
-            // step meta (process_code/name)
             var ptId = prod.product_type_id;
             var stepMeta = new Dictionary<int, (string? code, string name, int seq)>();
 

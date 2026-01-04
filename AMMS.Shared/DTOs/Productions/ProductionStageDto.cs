@@ -31,5 +31,7 @@ namespace AMMS.Shared.DTOs.Productions
         public DateTime? last_scan_time { get; set; }
 
         public List<TaskLogDto> logs { get; set; } = new();
+        public List<StageMaterialDto> input_materials { get; set; } = new();
+        public StageMaterialDto? output_product { get; set; }
     }
 }

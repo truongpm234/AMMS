@@ -32,7 +32,6 @@ namespace AMMS.Infrastructure.Repositories
 
             if (pt == null) return null;
 
-            // 2) templates  ✅ dùng DbSet: product_templates
             var templates = await _db.product_templates
                 .AsNoTracking()
                 .Where(t => t.product_type_id == productTypeId && t.is_active == true)
