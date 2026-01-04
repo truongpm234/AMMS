@@ -10,6 +10,6 @@ namespace AMMS.Application.Interfaces
         Task<PagedResultLite<PurchaseOrderCardDto>> GetPurchaseOrdersAsync(string? status, int page, int pageSize, CancellationToken ct = default);
         Task<PagedResultLite<PurchaseOrderListItemDto>> GetPendingPurchasesAsync(int page, int pageSize, CancellationToken ct = default);
         Task<PurchaseOrderListItemDto> CreatePurchaseOrderAsync(CreatePurchaseRequestDto dto, CancellationToken ct = default);
-        Task<object> ReceiveAllPendingPurchasesAsync(int purchaseId, CancellationToken ct = default);
+        Task<object> ReceiveAllPendingPurchasesAsync(int purchaseId, ReceivePurchaseRequestDto body, CancellationToken ct = default);
     }
 }

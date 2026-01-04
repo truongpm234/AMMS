@@ -46,16 +46,21 @@ namespace AMMS.API.Controllers
             return StatusCode(StatusCodes.Status201Created, result);
         }
 
-        // ✅ CHANGED: receive theo purchaseId (giữ route cũ để khỏi tạo hàm mới)
+
         [HttpPut("orders/receive-all")]
         public async Task<IActionResult> ReceivePurchaseById(
-            [FromQuery] int purchaseId,
-            CancellationToken ct)
+             [FromQuery] int purchaseId,
+             [FromBody] ReceivePurchaseRequestDto body,
+             CancellationToken ct)
         {
             if (purchaseId <= 0)
                 return BadRequest("purchaseId is required");
 
-            var result = await _service.ReceiveAllPendingPurchasesAsync(purchaseId, ct);
+            // body status bắt buộc
+            if (body == null || string.IsNullOrWhiteSpace(body.status))
+                return BadRequest("Request body status is required");
+
+            var result = await _service.ReceiveAllPendingPurchasesAsync(purchaseId, body, ct);
             return Ok(result);
         }
 

@@ -151,8 +151,13 @@ namespace AMMS.Application.Services
             );
         }
 
-        public async Task<object> ReceiveAllPendingPurchasesAsync(int purchaseId, CancellationToken ct = default)
+        public async Task<object> ReceiveAllPendingPurchasesAsync(int purchaseId, ReceivePurchaseRequestDto body, CancellationToken ct = default)
         {
+            var status = (body?.status ?? "").Trim();
+
+            if (!string.Equals(status, "Delivered", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Request body status must be 'Delivered'");
+
             var managerId = await _repo.GetManagerUserIdAsync(ct);
             if (managerId == null)
                 throw new ArgumentException("User 'manager' not found");
