@@ -626,7 +626,6 @@ namespace AMMS.Infrastructure.Repositories
 
             if (!allFinished) return false;
 
-            // tránh set lại nhiều lần
             if (prod.end_date == null)
                 prod.end_date = now;
 

@@ -123,11 +123,13 @@ namespace AMMS.Infrastructure.Repositories
             .Where(x => x.sm.material_id == id && x.sm.is_active)
             .Select(x => new SupplierByMaterialIdDto
             {
-                SupplierId = x.s.supplier_id,
-                Name = x.s.name,
-                Email = x.s.email,
-                Phone = x.s.phone,
-                Price = x.sm.unit_price
+                supplier_id = x.s.supplier_id,
+                name = x.s.name,
+                email = x.s.email,
+                phone = x.s.phone,
+                price = x.sm.unit_price,
+                contact_person = x.s.contact_person,
+                rating = x.s.rating
             })
             .ToListAsync();
             return listSuppliers;
