@@ -77,6 +77,8 @@ public partial class cost_estimate
 
     public int sheets_total { get; set; }
 
+    public int n_up { get; set; }
+
     public decimal total_area_m2 { get; set; }
 
     public decimal design_cost { get; set; }

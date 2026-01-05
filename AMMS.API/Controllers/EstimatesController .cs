@@ -45,10 +45,10 @@ namespace AMMS.API.Controllers
             return Ok(response);
         }
 
-        [HttpPut("adjust-cost/{estimateId}")]
-        public async Task<IActionResult> AdjustCost(int estimateId, [FromBody] AdjustCostRequest req)
+        [HttpPut("adjust-cost/{orderRequestId:int}")]
+        public async Task<IActionResult> AdjustCost(int orderRequestId, [FromBody] AdjustCostRequest req)
         {
-            await _service.UpdateFinalCostAsync(estimateId, req.final_cost);
+            await _service.UpdateFinalCostAsync(orderRequestId, req.final_cost);
             return NoContent();
         }
 

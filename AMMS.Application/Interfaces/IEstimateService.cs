@@ -14,7 +14,7 @@ namespace AMMS.Application.Interfaces
     {
         Task<PaperEstimateResponse> EstimatePaperAsync(PaperEstimateRequest req);
         Task<CostEstimateResponse> CalculateCostEstimateAsync(CostEstimateRequest req);
-        Task UpdateFinalCostAsync(int estimateId, decimal? finalCostInput);   
+        Task UpdateFinalCostAsync(int orderRequestId, decimal? finalCostInput);
         Task<cost_estimate?> GetEstimateByIdAsync(int estimateId);
         Task<cost_estimate?> GetEstimateByOrderRequestIdAsync(int orderRequestId);
         Task<ProcessCostBreakdownResponse> CalculateProcessCostBreakdownAsync(CostEstimateRequest req);

@@ -544,96 +544,97 @@ namespace AMMS.Application.Services
         }
 
         private async Task SaveCostEstimate(
-                            CostEstimateRequest req,
-                            decimal paperCost,
-                            decimal paperUnitPrice,
-                            MaterialCostResult materialCosts,
-                            decimal materialCost,
-                            decimal overheadPercent,
-                            decimal overheadCost,
-                            decimal baseCost,
-                            RushResult rushResult,
-                            decimal subtotal,
-                            DiscountResult discountResult,
-                            decimal finalTotal,
-                            DateTime estimatedFinish,
-                            DateTime now,
-                            decimal totalAreaM2,
-                            CoatingType coatingType,
-                            List<ProcessCostDetail> processCostDetails,
-                            decimal designCost)
+    CostEstimateRequest req,
+    decimal paperCost,
+    decimal paperUnitPrice,
+    MaterialCostResult materialCosts,
+    decimal materialCost,
+    decimal overheadPercent,
+    decimal overheadCost,
+    decimal baseCost,
+    RushResult rushResult,
+    decimal subtotal,
+    DiscountResult discountResult,
+    decimal finalTotal,
+    DateTime estimatedFinish,
+    DateTime now,
+    decimal totalAreaM2,
+    CoatingType coatingType,
+    List<ProcessCostDetail> processCostDetails,
+    decimal designCost)
         {
-            var entity = new cost_estimate
+            // 1) Tìm cost_estimate hiện có theo order_request_id
+            var entity = await _estimateRepo.GetByOrderRequestIdAsync(req.order_request_id);
+
+            if (entity == null)
             {
-                order_request_id = req.order_request_id,
+                // Chưa có -> tạo mới
+                entity = new cost_estimate
+                {
+                    order_request_id = req.order_request_id
+                };
 
-                // Chi phí giấy
-                paper_cost = Math.Round(paperCost, 2),
-                paper_sheets_used = req.paper.sheets_with_waste,
-                paper_unit_price = Math.Round(paperUnitPrice, 2),
+                await _estimateRepo.AddAsync(entity);
+            }
+            else
+            {
+                // Đã có -> clear process_costs cũ để ghi lại
+                entity.process_costs.Clear();
+            }
 
-                // Chi phí mực
-                ink_cost = Math.Round(materialCosts.InkCost, 2),
-                ink_weight_kg = Math.Round(materialCosts.InkWeightKg, 4),
-                ink_rate_per_m2 = Math.Round(materialCosts.InkRate, 6),
+            // 2) Gán lại toàn bộ field (như code cũ)
+            entity.paper_cost = Math.Round(paperCost, 2);
+            entity.paper_sheets_used = req.paper.sheets_with_waste;
+            entity.paper_unit_price = Math.Round(paperUnitPrice, 2);
 
-                // Chi phí keo phủ
-                coating_glue_cost = Math.Round(materialCosts.CoatingGlueCost, 2),
-                coating_glue_weight_kg = Math.Round(materialCosts.CoatingGlueWeightKg, 4),
-                coating_glue_rate_per_m2 = Math.Round(materialCosts.CoatingGlueRate, 6),
-                coating_type = coatingType.ToString(),
+            entity.ink_cost = Math.Round(materialCosts.InkCost, 2);
+            entity.ink_weight_kg = Math.Round(materialCosts.InkWeightKg, 4);
+            entity.ink_rate_per_m2 = Math.Round(materialCosts.InkRate, 6);
 
-                // Chi phí keo bồi
-                mounting_glue_cost = Math.Round(materialCosts.MountingGlueCost, 2),
-                mounting_glue_weight_kg = Math.Round(materialCosts.MountingGlueWeightKg, 4),
-                mounting_glue_rate_per_m2 = Math.Round(materialCosts.MountingGlueRate, 6),
+            entity.coating_glue_cost = Math.Round(materialCosts.CoatingGlueCost, 2);
+            entity.coating_glue_weight_kg = Math.Round(materialCosts.CoatingGlueWeightKg, 4);
+            entity.coating_glue_rate_per_m2 = Math.Round(materialCosts.CoatingGlueRate, 6);
+            entity.coating_type = coatingType.ToString();
 
-                // Chi phí màng
-                lamination_cost = Math.Round(materialCosts.LaminationCost, 2),
-                lamination_weight_kg = Math.Round(materialCosts.LaminationWeightKg, 4),
-                lamination_rate_per_m2 = Math.Round(materialCosts.LaminationRate, 6),
+            entity.mounting_glue_cost = Math.Round(materialCosts.MountingGlueCost, 2);
+            entity.mounting_glue_weight_kg = Math.Round(materialCosts.MountingGlueWeightKg, 4);
+            entity.mounting_glue_rate_per_m2 = Math.Round(materialCosts.MountingGlueRate, 6);
 
-                // Tổng vật liệu và khấu hao
-                material_cost = Math.Round(materialCost, 2),
-                overhead_percent = overheadPercent,
-                overhead_cost = Math.Round(overheadCost, 2),
+            entity.lamination_cost = Math.Round(materialCosts.LaminationCost, 2);
+            entity.lamination_weight_kg = Math.Round(materialCosts.LaminationWeightKg, 4);
+            entity.lamination_rate_per_m2 = Math.Round(materialCosts.LaminationRate, 6);
 
-                // Chi phí cơ bản
-                base_cost = Math.Round(baseCost, 2),
+            entity.material_cost = Math.Round(materialCost, 2);
+            entity.overhead_percent = overheadPercent;
+            entity.overhead_cost = Math.Round(overheadCost, 2);
 
-                // Rush order
-                is_rush = rushResult.IsRush,
-                rush_percent = rushResult.RushPercent,
-                rush_amount = Math.Round(rushResult.RushAmount, 2),
-                days_early = rushResult.DaysEarly,
+            entity.base_cost = Math.Round(baseCost, 2);
 
-                // Subtotal
-                subtotal = Math.Round(subtotal, 2),
+            entity.is_rush = rushResult.IsRush;
+            entity.rush_percent = rushResult.RushPercent;
+            entity.rush_amount = Math.Round(rushResult.RushAmount, 2);
+            entity.days_early = rushResult.DaysEarly;
 
-                // Chiết khấu
-                discount_percent = discountResult.DiscountPercent,
-                discount_amount = Math.Round(discountResult.DiscountAmount, 2),
+            entity.subtotal = Math.Round(subtotal, 2);
 
-                // Tổng cuối
-                final_total_cost = Math.Round(finalTotal, 2),
+            entity.discount_percent = discountResult.DiscountPercent;
+            entity.discount_amount = Math.Round(discountResult.DiscountAmount, 2);
 
-                // Thông tin khác
-                estimated_finish_date = DateTime.SpecifyKind(estimatedFinish, DateTimeKind.Unspecified),
-                desired_delivery_date = DateTime.SpecifyKind(req.desired_delivery_date, DateTimeKind.Unspecified),
-                created_at = DateTime.SpecifyKind(now, DateTimeKind.Unspecified),
+            entity.final_total_cost = Math.Round(finalTotal, 2);
 
-                // Chi tiết giấy
-                sheets_required = req.paper.sheets_base,
-                sheets_waste = req.paper.total_waste,
-                sheets_total = req.paper.sheets_with_waste,
+            entity.estimated_finish_date = DateTime.SpecifyKind(estimatedFinish, DateTimeKind.Unspecified);
+            entity.desired_delivery_date = DateTime.SpecifyKind(req.desired_delivery_date, DateTimeKind.Unspecified);
+            entity.created_at = DateTime.SpecifyKind(now, DateTimeKind.Unspecified);
 
-                // Diện tích
-                total_area_m2 = Math.Round(totalAreaM2, 4),
+            entity.sheets_required = req.paper.sheets_base;
+            entity.sheets_waste = req.paper.total_waste;
+            entity.sheets_total = req.paper.sheets_with_waste;
+            entity.n_up = req.paper.n_up;
 
-                // ⭐ DESIGN COST
-                design_cost = Math.Round(designCost, 2)
-            };
+            entity.total_area_m2 = Math.Round(totalAreaM2, 4);
+            entity.design_cost = Math.Round(designCost, 2);
 
+            // 3) Ghi lại process_costs
             foreach (var d in processCostDetails)
             {
                 if (d.quantity <= 0 || d.total_cost <= 0)
@@ -652,7 +653,7 @@ namespace AMMS.Application.Services
                 });
             }
 
-            await _estimateRepo.AddAsync(entity);
+            // 4) Lưu
             await _estimateRepo.SaveChangesAsync();
         }
 
@@ -829,10 +830,10 @@ namespace AMMS.Application.Services
             return details;
         }
 
-        public async Task UpdateFinalCostAsync(int estimateId, decimal? finalCostInput)
+        public async Task UpdateFinalCostAsync(int orderRequestId, decimal? finalCostInput)
         {
-            var estimate = await _estimateRepo.GetByIdAsync(estimateId)
-                ?? throw new Exception("Estimate not found");
+            var estimate = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId)
+                ?? throw new Exception("Estimate not found for this order_request_id");
 
             if (finalCostInput is null)
                 throw new ArgumentException("final_total_cost is required");
@@ -842,13 +843,10 @@ namespace AMMS.Application.Services
             if (finalCost < 0m)
                 throw new ArgumentException("final_total_cost must be >= 0");
 
-            var subtotal = estimate.subtotal;
-
             estimate.final_total_cost = RoundToThousand(finalCost);
 
             await _estimateRepo.SaveChangesAsync();
         }
-
 
         public async Task<cost_estimate?> GetEstimateByIdAsync(int estimateId)
         {

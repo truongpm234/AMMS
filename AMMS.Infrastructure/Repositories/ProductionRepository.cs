@@ -41,10 +41,7 @@ namespace AMMS.Infrastructure.Repositories
             => _db.productions.FirstOrDefaultAsync(x => x.prod_id == prodId);
 
 
-        public async Task<PagedResultLite<ProducingOrderCardDto>> GetProducingOrdersAsync(
-    int page,
-    int pageSize,
-    CancellationToken ct = default)
+        public async Task<PagedResultLite<ProducingOrderCardDto>> GetProducingOrdersAsync(int page, int pageSize, CancellationToken ct = default)
         {
             NormalizePaging(ref page, ref pageSize);
             var skip = (page - 1) * pageSize;
@@ -71,7 +68,8 @@ namespace AMMS.Infrastructure.Repositories
                     code = o.code,
                     delivery_date = o.delivery_date,
                     product_type_id = pr.product_type_id,
-                    status = pr.status,
+                    production_status = pr.status,
+                    order_status = o.status,
                     customer_name =
                         o.customer != null
                             ? (o.customer.company_name ?? o.customer.contact_name ?? "")
@@ -137,7 +135,6 @@ namespace AMMS.Infrastructure.Repositories
                     g => g.OrderBy(x => x.SeqNum ?? int.MaxValue).ToList()
                 );
 
-            // 3) Load routing steps by product_type_id from product_type_process
             var productTypeIds = baseRows
                 .Select(x => x.product_type_id)
                 .Where(x => x.HasValue)
@@ -216,11 +213,9 @@ namespace AMMS.Infrastructure.Repositories
                 }
                 else if (tasks.Count > 0 && tasks.All(x => x.EndTime != null))
                 {
-                    // nếu done hết
                     currentStage = stages.LastOrDefault();
                 }
 
-                // progress chia đều theo số công đoạn
                 var progress = ComputeProgressByStages(steps, currentSeq, tasks);
 
                 result.Add(new ProducingOrderCardDto
@@ -234,8 +229,8 @@ namespace AMMS.Infrastructure.Repositories
                     progress_percent = progress,
                     current_stage = currentStage,
                     stages = stages,
-                    status = r.status,
-                    production_status = r.status
+                    status = r.order_status,
+                    production_status = r.production_status
                 });
             }
 
@@ -350,7 +345,11 @@ namespace AMMS.Infrastructure.Repositories
             };
 
             order_request? orderReq = null;
-            int? numberOfPlates = null;
+            cost_estimate? estimate = null;
+
+            int sheetsRequired = 0;
+            int sheetsTotal = 0;
+            int nUp = 1;
 
             if (dto.order_id.HasValue)
             {
@@ -358,7 +357,27 @@ namespace AMMS.Infrastructure.Repositories
                     .AsNoTracking()
                     .FirstOrDefaultAsync(x => x.order_id == dto.order_id.Value, ct);
 
-                numberOfPlates = orderReq?.number_of_plates;
+                if (orderReq != null)
+                {
+                    estimate = await _db.cost_estimates
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(x => x.order_request_id == orderReq.order_request_id, ct);
+
+                    if (estimate != null)
+                    {
+                        sheetsRequired = estimate.sheets_required;
+                        sheetsTotal = estimate.sheets_total;
+
+                        if (estimate.n_up != null && estimate.n_up > 0)
+                        {
+                            nUp = (int)estimate.n_up;
+                        }
+                        else
+                        {
+                            nUp = 1;
+                        }
+                    }
+                }
             }
 
             decimal estInkWeightKg = 0m;
@@ -366,6 +385,8 @@ namespace AMMS.Infrastructure.Repositories
             {
                 estInkWeightKg = header.first_item.i_ink_weight_kg.Value;
             }
+
+            int? numberOfPlates = orderReq?.number_of_plates;
             int? orderItemId = header.first_item?.item_id;
             List<bom> bomRows = new();
 
@@ -442,6 +463,8 @@ namespace AMMS.Infrastructure.Repositories
 
             var stages = new List<ProductionStageDto>();
 
+            // output của công đoạn trước (đơn vị: tờ / sản phẩm bán thành phẩm)
+            // ban đầu: số lượng thành phẩm cuối cùng
             decimal previousOutputQty = dto.quantity;
 
             foreach (var s in steps)
@@ -457,23 +480,26 @@ namespace AMMS.Infrastructure.Repositories
 
                 var stageLogs = task == null
                     ? new List<TaskLogDto>()
-                    : logsByTaskId(logs, task.task_id); // helper
+                    : logsByTaskId(logs, task.task_id);
 
                 var qtyGood = stageLogs.Sum(x => x.qty_good);
                 var qtyBad = stageLogs.Sum(x => x.qty_bad);
                 var denom = qtyGood + qtyBad;
                 var wastePct = denom <= 0 ? 0m : Math.Round((qtyBad * 100m) / denom, 2);
 
-                decimal outputQty = qtyGood > 0 ? qtyGood : previousOutputQty;
-
+                // ⭐ Tính IO cho từng công đoạn
                 var io = BuildStageIO(
                     processCode: pcode,
                     processName: s.process_name ?? "",
                     detail: dto,
-                    inputQty: previousOutputQty,
-                    outputQty: outputQty,
+                    previousOutputQty: previousOutputQty,
+                    sheetsRequired: sheetsRequired,
+                    sheetsTotal: sheetsTotal,
+                    nUp: nUp,
+                    qtyGood: qtyGood,
                     numberOfPlates: numberOfPlates,
-                    estInkWeightKg: estInkWeightKg);
+                    estInkWeightKg: estInkWeightKg
+                );
 
                 var stage = new ProductionStageDto
                 {
@@ -494,18 +520,15 @@ namespace AMMS.Infrastructure.Repositories
                     qty_bad = qtyBad,
                     waste_percent = wastePct,
                     last_scan_time = stageLogs.Count == 0 ? null : stageLogs.Max(x => x.log_time),
-
                     logs = stageLogs,
-
-                    // ⭐ NEW
                     input_materials = io.inputs,
                     output_product = io.output
                 };
 
                 stages.Add(stage);
 
-                // output của công đoạn này là input cho công đoạn sau
-                previousOutputQty = outputQty;
+                // ⭐ số lượng dùng cho công đoạn tiếp theo
+                previousOutputQty = io.nextOutputQty;
             }
 
             dto.stages = stages;
@@ -635,27 +658,74 @@ namespace AMMS.Infrastructure.Repositories
             return true;
         }
 
-        private static (List<StageMaterialDto> inputs, StageMaterialDto output) BuildStageIO(string processCode, string processName, ProductionDetailDto detail, decimal inputQty, decimal outputQty, int? numberOfPlates, decimal estInkWeightKg)
+        private static (List<StageMaterialDto> inputs, StageMaterialDto output, decimal nextOutputQty)
+    BuildStageIO(
+        string processCode,
+        string processName,
+        ProductionDetailDto detail,
+        decimal previousOutputQty,
+        int sheetsRequired,
+        int sheetsTotal,
+        int nUp,
+        int qtyGood,
+        int? numberOfPlates,
+        decimal estInkWeightKg)
         {
             var inputs = new List<StageMaterialDto>();
 
             var code = (processCode ?? "").Trim().ToUpperInvariant();
-            var baseName = detail.product_name ?? "";
 
-            string sizeSuffix = detail.length_mm.HasValue && detail.width_mm.HasValue && detail.height_mm.HasValue
-                ? $" ({detail.length_mm}×{detail.width_mm}×{detail.height_mm})mm"
-                : string.Empty;
+            string sizeSuffix =
+                detail.length_mm.HasValue && detail.width_mm.HasValue && detail.height_mm.HasValue
+                    ? $" ({detail.length_mm}×{detail.width_mm}×{detail.height_mm})mm"
+                    : string.Empty;
 
-            if (code == "CAT" || code == "RALO" || code == "RA_LO")
+            decimal inputQty;
+            decimal outputQty;
+            decimal nextOutputQty;
+
+            // ========= 1) RALO =========
+            // - Thành phẩm: Khuôn ralo (mẫu chung)
+            // - Số lượng khuôn: lấy từ qty_good, nếu chưa scan thì mặc định 1
+            // - Số lượng cho công đoạn CẮT: sheets_total (tờ)
+            if (code == "RALO" || code == "RA_LO")
             {
-                // input: Giấy đã ralo
+                inputQty = 0;
+                outputQty = 1;
+
+                var output = new StageMaterialDto
+                {
+                    name = "Khuôn ralo",
+                    code = processCode,
+                    quantity = outputQty,
+                    unit = "bộ"
+                };
+
+                // công đoạn sau (Cắt) sẽ dùng số tờ cần cắt
+                nextOutputQty = sheetsTotal > 0 ? sheetsTotal : previousOutputQty;
+
+                return (inputs, output, nextOutputQty);
+            }
+
+            // ========= 2) CẮT =========
+            // - Input: Giấy đã ralo, số tờ = sheets_total
+            // - Output: Giấy đã cắt (L×W×H)mm, số tờ >= sheets_required (thường = sheets_total)
+            // - Công đoạn sau (In) chỉ dùng sheets_required tờ
+            if (code == "CAT")
+            {
+                inputQty = sheetsTotal > 0 ? sheetsTotal : previousOutputQty;
+
                 inputs.Add(new StageMaterialDto
                 {
                     name = "Giấy đã ralo",
-                    code = null,
                     quantity = inputQty,
                     unit = "tờ"
                 });
+
+                outputQty = qtyGood > 0 ? qtyGood : inputQty;
+
+                if (sheetsRequired > 0 && outputQty < sheetsRequired)
+                    outputQty = sheetsRequired;
 
                 var output = new StageMaterialDto
                 {
@@ -665,11 +735,23 @@ namespace AMMS.Infrastructure.Repositories
                     unit = "tờ"
                 };
 
-                return (inputs, output);
+                nextOutputQty = sheetsRequired > 0 ? sheetsRequired : outputQty;
+
+                return (inputs, output, nextOutputQty);
             }
 
+            // ========= 3) IN =========
+            // - Input:
+            //     + Giấy đã cắt: sheets_required tờ
+            //     + Kẽm in: number_of_plates
+            //     + Mực các loại: est_ink_weight_kg (kg)
+            // - Output: Giấy đã in (L×W×H)mm
+            //   + quantity lấy từ qty_good nhưng không nhỏ hơn sheets_required
+            // - Công đoạn sau lấy số sp = outputQty * n_up
             if (code == "IN")
             {
+                inputQty = sheetsRequired > 0 ? sheetsRequired : previousOutputQty;
+
                 inputs.Add(new StageMaterialDto
                 {
                     name = $"Giấy đã cắt{sizeSuffix}",
@@ -697,6 +779,11 @@ namespace AMMS.Infrastructure.Repositories
                     });
                 }
 
+                outputQty = qtyGood > 0 ? qtyGood : inputQty;
+
+                if (sheetsRequired > 0 && outputQty < sheetsRequired)
+                    outputQty = sheetsRequired;
+
                 var output = new StageMaterialDto
                 {
                     name = $"Giấy đã in{sizeSuffix}",
@@ -705,25 +792,33 @@ namespace AMMS.Infrastructure.Repositories
                     unit = "tờ"
                 };
 
-                return (inputs, output);
+                var up = nUp <= 0 ? 1 : nUp;
+                nextOutputQty = outputQty * up;
+
+                return (inputs, output, nextOutputQty);
             }
+
+            inputQty = previousOutputQty;
 
             inputs.Add(new StageMaterialDto
             {
-                name = baseName + sizeSuffix,
+                name = detail.product_name ?? "Bán thành phẩm",
                 quantity = inputQty,
                 unit = "tờ"
             });
 
+            outputQty = qtyGood > 0 ? qtyGood : inputQty;
+
             var defaultOutput = new StageMaterialDto
             {
-                name = $"{processName} {baseName}{sizeSuffix}".Trim(),
+                name = $"{processName} {(detail.product_name ?? "")}".Trim(),
                 code = processCode,
                 quantity = outputQty,
                 unit = "tờ"
             };
 
-            return (inputs, defaultOutput);
+            nextOutputQty = outputQty;
+            return (inputs, defaultOutput, nextOutputQty);
         }
 
         static List<TaskLogDto> logsByTaskId(List<TaskLogDto> all, int taskId)
