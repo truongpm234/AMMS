@@ -9,10 +9,12 @@ namespace AMMS.Application.Services
     public class PurchaseService : IPurchaseService
     {
         private readonly IPurchaseRepository _repo;
+        private readonly IOrderRepository _orderRepo;
 
-        public PurchaseService(IPurchaseRepository repo)
+        public PurchaseService(IPurchaseRepository repo, IOrderRepository orderRepo)
         {
             _repo = repo;
+            _orderRepo = orderRepo;
         }
 
         private DateTime? ToUnspecified(DateTime? dt)
@@ -57,8 +59,15 @@ namespace AMMS.Application.Services
                 qty_ordered = x.Quantity,
             }).ToList();
 
+            foreach (var it in items)
+            {
+                if (it.material_id.HasValue)
+                    await _orderRepo.MarkOrdersBuyByMaterialAsync(it.material_id.Value, ct);
+            }
+
             await _repo.AddPurchaseItemsAsync(items, ct);
             await _repo.SaveChangesAsync(ct);
+            await _orderRepo.SaveChangesAsync();
 
             return new CreatePurchaseRequestResponse(
                 p.purchase_id,
@@ -133,6 +142,12 @@ namespace AMMS.Application.Services
             await _repo.AddPurchaseItemsAsync(items, ct);
             await _repo.SaveChangesAsync(ct);
 
+            await _orderRepo.MarkOrdersBuyByMaterialsAsync(
+                dto.Items.Select(i => i.MaterialId).ToList(),
+                ct
+            );
+            await _orderRepo.SaveChangesAsync();
+
             var totalQty = dto.Items.Sum(x => (decimal)x.Quantity);
             var supplierName = await _repo.GetSupplierNameAsync(dto.SupplierId, ct) ?? "N/A";
 
@@ -162,7 +177,13 @@ namespace AMMS.Application.Services
             if (managerId == null)
                 throw new ArgumentException("User 'manager' not found");
 
-            return await _repo.ReceiveAllPendingPurchasesAsync(purchaseId, managerId.Value, ct);
+            var result = await _repo.ReceiveAllPendingPurchasesAsync(purchaseId, managerId.Value, ct);
+
+            await _orderRepo.RecalculateIsEnoughForOrdersAsync(ct);
+            await _orderRepo.SaveChangesAsync();
+
+            return result;
+
         }
     }
 }

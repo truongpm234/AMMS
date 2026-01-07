@@ -547,9 +547,8 @@ namespace AMMS.Infrastructure.Repositories
                         (anyTrue && !g.Any(x => x.is_enough == null) ? true : (bool?)null);
                     var anyBuyFalse = g.Any(x => x.is_buy == false);
                     var anyBuyTrue = g.Any(x => x.is_buy == true);
-                    bool? isBuySummary =
-                        anyBuyFalse ? false :
-                        (anyBuyTrue && !g.Any(x => x.is_buy == null) ? true : (bool?)null);
+                    bool? isBuySummary = g.Any(x => x.is_buy == true) ? true : (bool?)false;
+
 
                     return new MissingMaterialDto
                     {
@@ -801,10 +800,144 @@ namespace AMMS.Infrastructure.Repositories
             return perMaterial.All(x => x.Missing <= 0m);
         }
 
+
+
+
         public async Task<List<order>> GetAllOrderInprocessStatus()
         {
             return _db.orders.Where(o => o.productions.Any(p => p.status == "InProcessing")).ToList();
 
+
         }
+
+        public async Task MarkOrdersBuyByMaterialAsync(int materialId, CancellationToken ct = default)
+        {
+            // Orders nào có BOM chứa materialId -> set is_buy=true
+            var orderIds = await (
+                from o in _db.orders.AsNoTracking()
+                join oi in _db.order_items.AsNoTracking() on o.order_id equals oi.order_id
+                join b in _db.boms.AsNoTracking() on oi.item_id equals b.order_item_id
+                where b.material_id == materialId
+                select o.order_id
+            ).Distinct().ToListAsync(ct);
+
+            if (orderIds.Count == 0) return;
+
+            var orders = await _db.orders
+                .AsTracking()
+                .Where(o => orderIds.Contains(o.order_id))
+                .ToListAsync(ct);
+
+            foreach (var o in orders)
+                o.is_buy = true;
+        }
+
+        public async Task RecalculateIsEnoughForOrdersAsync(CancellationToken ct = default)
+        {
+            // 1) Load lines nhưng dùng double để tránh Npgsql overflow khi đọc numeric quá lớn
+            var lines = await (
+    from oi in _db.order_items.AsNoTracking()
+    join b in _db.boms.AsNoTracking() on oi.item_id equals b.order_item_id
+    join m in _db.materials.AsNoTracking() on b.material_id equals m.material_id
+    where oi.order_id != null && b.material_id != null
+    select new
+    {
+        OrderId = oi.order_id!.Value,
+        MaterialId = b.material_id!.Value,
+
+        // ✅ CAST trước, rồi mới ?? 0d
+        StockQtyD = (double?)m.stock_qty ?? 0d,
+        QtyD = (double)oi.quantity,
+        QtyPerProductD = (double?)b.qty_per_product ?? 0d,
+        WastagePercentD = (double?)b.wastage_percent ?? 0d,
+    }
+).ToListAsync(ct);
+
+
+            if (lines.Count == 0) return;
+
+            static decimal SafeToDecimal(double v, int round = 4)
+            {
+                if (double.IsNaN(v) || double.IsInfinity(v)) return 0m;
+                var max = (double)decimal.MaxValue;
+                if (v > max) return decimal.MaxValue;
+                if (v < -max) return decimal.MinValue;
+                return Math.Round((decimal)v, round);
+            }
+
+            // 2) Tính required trong memory (double -> decimal safe)
+            var reqByOrderMaterial = lines
+                .GroupBy(x => new { x.OrderId, x.MaterialId })
+                .Select(g =>
+                {
+                    double requiredLineSumD = 0;
+
+                    foreach (var r in g)
+                    {
+                        var factor = 1.0 + (r.WastagePercentD / 100.0);
+                        var reqLine = r.QtyD * r.QtyPerProductD * factor;
+                        if (reqLine < 0) reqLine = 0;
+                        requiredLineSumD += reqLine;
+                    }
+
+                    var required = SafeToDecimal(requiredLineSumD, 4);
+                    var stockQty = SafeToDecimal(g.Max(t => t.StockQtyD), 4);
+
+                    return new
+                    {
+                        g.Key.OrderId,
+                        Required = required,
+                        StockQty = stockQty
+                    };
+                })
+                .ToList();
+
+            // 3) isEnough per order (tất cả materials đều đủ)
+            var isEnoughMap = reqByOrderMaterial
+                .GroupBy(x => x.OrderId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.All(x => x.StockQty >= x.Required)
+                );
+
+            var orderIds = isEnoughMap.Keys.ToList();
+
+            var orders = await _db.orders
+                .AsTracking()
+                .Where(o => orderIds.Contains(o.order_id))
+                .ToListAsync(ct);
+
+            foreach (var o in orders)
+                o.is_enough = isEnoughMap.TryGetValue(o.order_id, out var ok) ? ok : (bool?)null;
+        }
+
+        public async Task MarkOrdersBuyByMaterialsAsync(List<int> materialIds, CancellationToken ct = default)
+        {
+            materialIds = materialIds?
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList() ?? new List<int>();
+
+            if (materialIds.Count == 0) return;
+
+            var orderIds = await (
+                from o in _db.orders.AsNoTracking()
+                join oi in _db.order_items.AsNoTracking() on o.order_id equals oi.order_id
+                join b in _db.boms.AsNoTracking() on oi.item_id equals b.order_item_id
+                where b.material_id != null && materialIds.Contains(b.material_id.Value)
+                select o.order_id
+            ).Distinct().ToListAsync(ct);
+
+            if (orderIds.Count == 0) return;
+
+            var orders = await _db.orders
+                .AsTracking()
+                .Where(o => orderIds.Contains(o.order_id))
+                .ToListAsync(ct);
+
+            foreach (var o in orders)
+                o.is_buy = true;
+        }
+
     }
 }
