@@ -46,7 +46,7 @@ namespace AMMS.Infrastructure.Repositories
             newUser.created_at = DateTime.Now;
             newUser.is_active = true;
             newUser.role_id = 6;
-            //newUser.email = req.email;
+            newUser.email = req.email;
 
             _db.users.Add(newUser);
             await _db.SaveChangesAsync();
