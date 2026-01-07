@@ -59,7 +59,7 @@ namespace AMMS.Infrastructure.Repositories
                 join ce in _db.cost_estimates.AsNoTracking()
                     on r.order_request_id equals ce.order_request_id into ceJoin
                 from ce in ceJoin
-                    .OrderByDescending(x => x.estimate_id) // lấy estimate mới nhất (nếu có nhiều)
+                    .OrderByDescending(x => x.estimate_id) // lấy estimate mới nhất nếu có nhiều
                     .Take(1)
                     .DefaultIfEmpty()
 
@@ -74,6 +74,11 @@ namespace AMMS.Infrastructure.Repositories
                     delivery_date = r.delivery_date,
                     product_name = r.product_name,
                     quantity = r.quantity,
+                    description = r.description,
+                    design_file_path = r.design_file_path,
+                    detail_address = r.detail_address,
+                    number_of_plates = r.number_of_plates,
+                    coating_type = r.coating_type,
                     process_status = r.process_status,
                     order_request_date = r.order_request_date,
                     final_cost = ce != null ? ce.final_total_cost : null
@@ -83,6 +88,7 @@ namespace AMMS.Infrastructure.Repositories
             .Take(takePlusOne)
             .ToListAsync();
         }
+
 
         public Task<bool> AnyOrderLinkedAsync(int requestId)
             => _db.order_requests
