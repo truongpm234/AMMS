@@ -9,7 +9,6 @@ using AMMS.Infrastructure.Repositories;
 using AMMS.Shared.DTOs.Email;
 using AMMS.Shared.DTOs.PayOS;
 using Microsoft.EntityFrameworkCore;
-using Npgsql;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -67,7 +66,7 @@ builder.Services.AddScoped<IUploadFileService, UploadFileService>();
 builder.Services.AddScoped<ICloudinaryFileStorageService, CloudinaryFileStorageService>();
 builder.Services.AddScoped<IRequestService, RequestService>();
 builder.Services.AddScoped<IRequestRepository, RequestRepository>();
-builder.Services.AddScoped<IMaterialRepository, MaterialRepository>(); 
+builder.Services.AddScoped<IMaterialRepository, MaterialRepository>();
 builder.Services.AddScoped<IMaterialService, MaterialService>();
 builder.Services.AddScoped<IEstimateService, EstimateService>();
 builder.Services.AddScoped<ICostEstimateRepository, CostEstimateRepository>();
@@ -100,10 +99,12 @@ builder.Services.AddHttpClient<IPayOsService, PayOsService>();
 builder.Services.AddScoped<IPaymentsService, PaymentsService>();
 builder.Services.AddScoped<IPaymentRepository, PaymentRepository>();
 builder.Services.AddScoped<IBomRepository, BomRepository>();
-builder.Services.AddScoped<IProcessCostRuleService, ProcessCostRuleService>(); 
+builder.Services.AddScoped<IProcessCostRuleService, ProcessCostRuleService>();
 builder.Services.AddScoped<IProcessCostRuleRepository, ProcessCostRuleRepository>();
 builder.Services.AddScoped<IProductTemplateRepository, ProductTemplateRepository>();
 builder.Services.AddScoped<IProductTemplateService, ProductTemplateService>();
+builder.Services.AddScoped<IUserRepository, UserRepository>();
+builder.Services.AddScoped<IUserService, UserService>();
 
 
 // Logging
