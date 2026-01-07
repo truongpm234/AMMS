@@ -28,5 +28,7 @@ namespace AMMS.Infrastructure.Interfaces
             decimal quantity,
             int managerUserId,
             CancellationToken ct = default);
+        Task<List<order>> GetAllOrderInprocessStatus();
+
     }
 }

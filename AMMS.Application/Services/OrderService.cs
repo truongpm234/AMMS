@@ -112,6 +112,10 @@ namespace AMMS.Application.Services
             var managerUserId = 3;
 
             return await _orderRepo.BuyMaterialAndRecalcOrdersAsync(materialId, body.quantity, managerUserId, ct);
+
+        public Task<List<order>> GetAllOrderWithStatusInProcess()
+        {
+            return _orderRepo.GetAllOrderInprocessStatus();
         }
     }
 }

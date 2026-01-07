@@ -598,6 +598,7 @@ namespace AMMS.Infrastructure.Repositories
             return "Delete False";
         }
 
+<<<<<<< HEAD
         public async Task<object> BuyMaterialAndRecalcOrdersAsync(
             int materialId,
             decimal quantity,
@@ -799,6 +800,12 @@ namespace AMMS.Infrastructure.Repositories
 
             // If any missing > 0 => not enough
             return perMaterial.All(x => x.Missing <= 0m);
+=======
+        public async Task<List<order>> GetAllOrderInprocessStatus()
+        {
+            return _db.orders.Where(o => o.productions.Any(p => p.status == "InProcessing")).ToList();
+
+>>>>>>> main
         }
     }
 }
