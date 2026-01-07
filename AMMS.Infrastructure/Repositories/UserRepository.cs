@@ -15,7 +15,7 @@ namespace AMMS.Infrastructure.Repositories
         public async Task<UserLoginResponseDto?> GetUserByUsernamePassword(UserLoginRequestDto req)
         {
             var user = await _db.users
-                .SingleOrDefaultAsync(u => u.username == req.user_name);
+                .SingleOrDefaultAsync(u => u.username == req.user_name || u.email == req.email);
 
             if (user == null)
                 throw new Exception("USERNAME_NOT_FOUND");
