@@ -39,6 +39,13 @@ namespace AMMS.Application.Services
             return DateTime.SpecifyKind(dateTime.Value, DateTimeKind.Unspecified);
         }
 
+        private static string Trunc20(string? s)
+        {
+            s = (s ?? "").Trim();
+            if (s.Length <= 20) return s;
+            return s.Substring(0, 20);
+        }
+
         public async Task<CreateRequestResponse> CreateAsync(CreateResquest req)
         {
             var entity = new order_request
@@ -210,12 +217,8 @@ namespace AMMS.Application.Services
                         };
                     }
 
-                    var hasEnoughStock = await _requestRepo.HasEnoughStockForRequestAsync(requestId);
-                    var orderStatus = hasEnoughStock ? "Scheduled" : "Not enough";
-
-                    int? productTypeId = null;
+                    // ===== map product_type_id from req.product_type (code) =====
                     var ptCode = (req.product_type ?? "").Trim();
-
                     if (string.IsNullOrWhiteSpace(ptCode))
                     {
                         return new ConvertRequestToOrderResponse
@@ -226,7 +229,7 @@ namespace AMMS.Application.Services
                         };
                     }
 
-                    productTypeId = await _db.product_types
+                    var productTypeId = await _db.product_types
                         .AsNoTracking()
                         .Where(x => x.code == ptCode)
                         .Select(x => (int?)x.product_type_id)
@@ -242,23 +245,31 @@ namespace AMMS.Application.Services
                         };
                     }
 
+                    // ✅ order.status luôn Scheduled, is_enough mới phản ánh đủ/thiếu NVL
                     var newOrder = new order
                     {
-                        code = "TMP-" + Guid.NewGuid().ToString("N"),
+                        code = "TMP-ORD", // ✅ <= 20, tránh lỗi varchar(20)
                         order_date = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
                         delivery_date = req.delivery_date,
+
                         status = "Scheduled",
                         payment_status = "Deposited",
                         quote_id = req.quote_id,
-                        total_amount = est.final_total_cost
+                        total_amount = est.final_total_cost,
+
+                        is_enough = null,   // sẽ calc sau BOM
+                        is_buy = false
                     };
 
                     await _orderRepo.AddOrderAsync(newOrder);
                     await _orderRepo.SaveChangesAsync();
 
-                    newOrder.code = $"ORD-{newOrder.order_id:00000}";
+                    // set code chuẩn theo order_id
+                    newOrder.code = $"ORD-{newOrder.order_id:00000}"; // <= 20
+                    _orderRepo.Update(newOrder);
                     await _orderRepo.SaveChangesAsync();
 
+                    // ===== order_item =====
                     var newItem = new order_item
                     {
                         order_id = newOrder.order_id,
@@ -266,7 +277,6 @@ namespace AMMS.Application.Services
                         quantity = req.quantity ?? 0,
                         design_url = req.design_file_path,
 
-                        // ✅✅✅ FIELD MỚI
                         product_type_id = productTypeId,
 
                         paper_code = req.paper_code,
@@ -274,26 +284,27 @@ namespace AMMS.Application.Services
                         paper_name = req.paper_name,
                         glue_type = req.coating_type,
                         wave_type = req.wave_type,
+
                         est_paper_sheets_total = est.sheets_total,
                         est_ink_weight_kg = est.ink_weight_kg,
                         est_coating_glue_weight_kg = est.coating_glue_weight_kg,
                         est_mounting_glue_weight_kg = est.mounting_glue_weight_kg,
                         est_lamination_weight_kg = est.lamination_weight_kg,
+
                         height_mm = req.product_height_mm,
                         length_mm = req.product_length_mm,
                         width_mm = req.product_width_mm
                     };
 
                     await _orderRepo.AddOrderItemAsync(newItem);
-                    await _orderRepo.SaveChangesAsync(); // get item_id
+                    await _orderRepo.SaveChangesAsync(); // lấy item_id
 
-                    // 4) BOM
+                    // ===== BOM =====
                     material? paperMaterial = null;
                     if (!string.IsNullOrWhiteSpace(req.paper_code))
                         paperMaterial = await _materialRepo.GetByCodeAsync(req.paper_code!);
 
                     var qty = (decimal)(newItem.quantity <= 0 ? 1 : newItem.quantity);
-
                     var bomTasks = new List<Task>();
 
                     if (est.sheets_total > 0)
@@ -301,7 +312,7 @@ namespace AMMS.Application.Services
                         {
                             order_item_id = newItem.item_id,
                             material_id = paperMaterial?.material_id,
-                            material_code = req.paper_code ?? "PAPER",
+                            material_code = Trunc20(req.paper_code ?? "PAPER"),
                             material_name = req.paper_name ?? "Giấy",
                             unit = "tờ",
                             qty_total = est.sheets_total,
@@ -313,7 +324,7 @@ namespace AMMS.Application.Services
                         bomTasks.Add(_bomRepo.AddBomAsync(new bom
                         {
                             order_item_id = newItem.item_id,
-                            material_code = "INK",
+                            material_code = Trunc20("INK"),
                             material_name = "Mực in",
                             unit = "kg",
                             qty_total = est.ink_weight_kg,
@@ -325,7 +336,7 @@ namespace AMMS.Application.Services
                         bomTasks.Add(_bomRepo.AddBomAsync(new bom
                         {
                             order_item_id = newItem.item_id,
-                            material_code = req.coating_type ?? "COATING_GLUE",
+                            material_code = Trunc20(req.coating_type ?? "COATING_GLUE"),
                             material_name = "Keo phủ",
                             unit = "kg",
                             qty_total = est.coating_glue_weight_kg,
@@ -339,7 +350,7 @@ namespace AMMS.Application.Services
                         bomTasks.Add(_bomRepo.AddBomAsync(new bom
                         {
                             order_item_id = newItem.item_id,
-                            material_code = codeBoi,
+                            material_code = Trunc20(codeBoi),
                             material_name = "Keo bồi",
                             unit = "kg",
                             qty_total = est.mounting_glue_weight_kg,
@@ -352,7 +363,7 @@ namespace AMMS.Application.Services
                         bomTasks.Add(_bomRepo.AddBomAsync(new bom
                         {
                             order_item_id = newItem.item_id,
-                            material_code = "LAMINATION",
+                            material_code = Trunc20("LAMINATION"),
                             material_name = "Màng cán",
                             unit = "kg",
                             qty_total = est.lamination_weight_kg,
@@ -363,7 +374,81 @@ namespace AMMS.Application.Services
                     await Task.WhenAll(bomTasks);
                     await _bomRepo.SaveChangesAsync();
 
-                    // 5) Link request -> order
+                    // ===== calc is_enough cho đúng yêu cầu (dùng stock hiện tại) =====
+                    // Nếu BOM có material_id null => không check được stock => coi là NOT enough để an toàn
+                    var bomHasNullMaterial = await (
+                        from oi in _db.order_items.AsNoTracking()
+                        join b in _db.boms.AsNoTracking() on oi.item_id equals b.order_item_id
+                        where oi.order_id == newOrder.order_id
+                        select b.material_id
+                    ).AnyAsync(x => x == null);
+
+                    bool isEnough;
+                    if (bomHasNullMaterial)
+                    {
+                        isEnough = false;
+                    }
+                    else
+                    {
+                        isEnough = await (
+                            from oi in _db.order_items.AsNoTracking()
+                            join b in _db.boms.AsNoTracking() on oi.item_id equals b.order_item_id
+                            join m in _db.materials.AsNoTracking() on b.material_id equals m.material_id
+                            where oi.order_id == newOrder.order_id
+                            group new { oi, b, m } by b.material_id into g
+                            select new
+                            {
+                                Required = g.Sum(x =>
+                                    ((decimal)x.oi.quantity)
+                                    * (x.b.qty_per_product ?? 0m)
+                                    * (1m + ((x.b.wastage_percent ?? 0m) / 100m))
+                                ),
+                                StockQty = g.Max(x => x.m.stock_qty ?? 0m)
+                            }
+                        ).AllAsync(x => x.StockQty >= x.Required);
+                    }
+
+                    newOrder.is_enough = isEnough;
+                    _orderRepo.Update(newOrder);
+                    await _orderRepo.SaveChangesAsync();
+
+                    // ===== ✅ auto create production Scheduled =====
+                    var managerId = await _db.users
+    .AsNoTracking()
+    .Where(u => u.username == "manager")
+    .Select(u => (int?)u.user_id)
+    .FirstOrDefaultAsync();
+
+                    // Nếu không có "manager" thì fallback consultant_id của order (nếu có)
+                    managerId ??= newOrder.consultant_id;
+
+                    var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+                    var prod = new production
+                    {
+                        code = "TMP-PROD",
+                        order_id = newOrder.order_id,
+                        status = "Scheduled",
+                        product_type_id = productTypeId,
+
+                        manager_id = managerId,                 // ✅ set
+                        start_date = now,                       // ✅ set
+                        end_date = newOrder.delivery_date       // ✅ hoặc null tuỳ bạn
+                    };
+
+                    await _db.productions.AddAsync(prod);
+                    await _db.SaveChangesAsync(); // lấy prod_id
+
+                    prod.code = $"PROD-{prod.prod_id:00000}"; // <= 20
+                    _db.productions.Update(prod);
+                    await _db.SaveChangesAsync();
+
+                    // Link order.production_id (entity order đã có field sẵn)
+                    newOrder.production_id = prod.prod_id;
+                    _orderRepo.Update(newOrder);
+                    await _orderRepo.SaveChangesAsync();
+
+                    // ===== link request -> order =====
                     req.order_id = newOrder.order_id;
                     await _requestRepo.UpdateAsync(req);
                     await _requestRepo.SaveChangesAsync();
@@ -387,6 +472,9 @@ namespace AMMS.Application.Services
                 }
             });
         }
+
+
+
 
         public Task<PagedResultLite<RequestSortedDto>> GetSortedByQuantityPagedAsync(
             bool ascending, int page, int pageSize, CancellationToken ct = default)
