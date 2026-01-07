@@ -51,14 +51,44 @@ namespace AMMS.Infrastructure.Repositories
             return _db.order_requests.AsNoTracking().CountAsync();
         }
 
-        public Task<List<order_request>> GetPagedAsync(int skip, int takePlusOne)
+        public Task<List<RequestPagedDto>> GetPagedAsync(int skip, int takePlusOne)
         {
-            return _db.order_requests
-                .OrderByDescending(x => x.order_request_date)
-                .Skip(skip)
-                .Take(takePlusOne)
-                .ToListAsync();
+            return (
+                from r in _db.order_requests.AsNoTracking()
+
+                join ce in _db.cost_estimates.AsNoTracking()
+                    on r.order_request_id equals ce.order_request_id into ceJoin
+                from ce in ceJoin
+                    .OrderByDescending(x => x.estimate_id) // lấy estimate mới nhất nếu có nhiều
+                    .Take(1)
+                    .DefaultIfEmpty()
+
+                orderby r.order_request_date descending
+
+                select new RequestPagedDto
+                {
+                    order_request_id = r.order_request_id,
+                    customer_name = r.customer_name ?? "",
+                    customer_phone = r.customer_phone ?? "",
+                    customer_email = r.customer_email,
+                    delivery_date = r.delivery_date,
+                    product_name = r.product_name,
+                    quantity = r.quantity,
+                    description = r.description,
+                    design_file_path = r.design_file_path,
+                    detail_address = r.detail_address,
+                    number_of_plates = r.number_of_plates,
+                    coating_type = r.coating_type,
+                    process_status = r.process_status,
+                    order_request_date = r.order_request_date,
+                    final_cost = ce != null ? ce.final_total_cost : null
+                }
+            )
+            .Skip(skip)
+            .Take(takePlusOne)
+            .ToListAsync();
         }
+
 
         public Task<bool> AnyOrderLinkedAsync(int requestId)
             => _db.order_requests

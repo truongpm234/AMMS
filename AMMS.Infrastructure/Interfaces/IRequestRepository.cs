@@ -12,7 +12,8 @@ namespace AMMS.Infrastructure.Interfaces
         Task DeleteAsync(int id);
         Task<int> SaveChangesAsync();
         Task<int> CountAsync();
-        Task<List<order_request>> GetPagedAsync(int skip, int take);
+        Task<List<RequestPagedDto>> GetPagedAsync(int skip, int take);
+
         Task<bool> AnyOrderLinkedAsync(int requestId);
         Task<bool> HasEnoughStockForRequestAsync(int requestId, CancellationToken ct = default);
         Task<PagedResultLite<RequestSortedDto>> GetSortedByQuantityPagedAsync(

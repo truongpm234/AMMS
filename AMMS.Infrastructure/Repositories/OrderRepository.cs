@@ -249,7 +249,7 @@ namespace AMMS.Infrastructure.Repositories
                 {
                     order_id = o.order_id.ToString(),
                     code = o.code,
-                    customer_name = o.customer_name ?? "",   // ✅ giờ sẽ có fallback
+                    customer_name = o.customer_name ?? "",  
                     product_name = o.FirstItem?.product_name,
                     product_id = o.FirstItem?.product_type_id?.ToString(),
                     quantity = o.FirstItem?.quantity ?? 0,

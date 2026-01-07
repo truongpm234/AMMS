@@ -10,7 +10,8 @@ namespace AMMS.Application.Interfaces
         Task<UpdateRequestResponse> UpdateAsync(int id, UpdateOrderRequest req);
         Task DeleteAsync(int id);
         Task<order_request?> GetByIdAsync(int id);
-        Task<PagedResultLite<order_request>> GetPagedAsync(int page, int pageSize);
+        Task<PagedResultLite<RequestPagedDto>> GetPagedAsync(int page, int pageSize);
+
         Task<ConvertRequestToOrderResponse> ConvertToOrderAsync(int requestId);
         Task<PagedResultLite<RequestSortedDto>> GetSortedByQuantityPagedAsync(
     bool ascending, int page, int pageSize, CancellationToken ct = default);

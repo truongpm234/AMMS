@@ -125,7 +125,7 @@ namespace AMMS.Application.Services
 
         public Task<order_request?> GetByIdAsync(int id) => _requestRepo.GetByIdAsync(id);
 
-        public async Task<PagedResultLite<order_request>> GetPagedAsync(int page, int pageSize)
+        public async Task<PagedResultLite<RequestPagedDto>> GetPagedAsync(int page, int pageSize)
         {
             if (page <= 0) page = 1;
             if (pageSize <= 0) pageSize = 10;
@@ -135,9 +135,9 @@ namespace AMMS.Application.Services
             var list = await _requestRepo.GetPagedAsync(skip, pageSize + 1);
 
             var hasNext = list.Count > pageSize;
-            var data = list.Take(pageSize).ToList();
+            var data = hasNext ? list.Take(pageSize).ToList() : list;
 
-            return new PagedResultLite<order_request>
+            return new PagedResultLite<RequestPagedDto>
             {
                 Page = page,
                 PageSize = pageSize,
@@ -145,6 +145,7 @@ namespace AMMS.Application.Services
                 Data = data
             };
         }
+
 
         public async Task<ConvertRequestToOrderResponse> ConvertToOrderAsync(int requestId)
         {
