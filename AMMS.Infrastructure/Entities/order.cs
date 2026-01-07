@@ -1,6 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel.DataAnnotations.Schema;
+﻿using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AMMS.Infrastructure.Entities;
 
@@ -27,7 +25,7 @@ public partial class order
 
     public bool? is_enough { get; set; }
 
-    public bool? is_full { get; set; }
+    public bool? is_buy { get; set; }
 
     public string? payment_status { get; set; }
 
