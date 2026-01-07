@@ -19,5 +19,7 @@ namespace AMMS.Application.Interfaces
             CancellationToken ct = default);
 
         Task<string> DeleteDesignFilePath(int orderRequestId);
+
+        Task<List<order>> GetAllOrderWithStatusInProcess();
     }
 }

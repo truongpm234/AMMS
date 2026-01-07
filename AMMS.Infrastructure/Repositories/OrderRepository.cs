@@ -552,5 +552,11 @@ namespace AMMS.Infrastructure.Repositories
             }
             return "Delete False";
         }
+
+        public async Task<List<order>> GetAllOrderInprocessStatus()
+        {
+            return _db.orders.Where(o => o.productions.Any(p => p.status == "InProcessing")).ToList();
+
+        }
     }
 }

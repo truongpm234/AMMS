@@ -63,5 +63,10 @@ namespace AMMS.Application.Services
         {
             return _orderRepo.DeleteDesignFilePath(orderRequestId);
         }
+
+        public Task<List<order>> GetAllOrderWithStatusInProcess()
+        {
+            return _orderRepo.GetAllOrderInprocessStatus();
+        }
     }
 }

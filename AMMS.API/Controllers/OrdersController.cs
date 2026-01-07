@@ -1,4 +1,5 @@
 ﻿using AMMS.Application.Interfaces;
+using AMMS.Infrastructure.Entities;
 using AMMS.Shared.DTOs.Purchases;
 using Microsoft.AspNetCore.Mvc;
 
@@ -86,6 +87,12 @@ namespace AMMS.API.Controllers
         public async Task<string> Delete(int orderRequestId)
         {
             return await _service.DeleteDesignFilePath(orderRequestId);
+        }
+
+        [HttpGet("/get-all-order-with-status-Inprocess")]
+        public async Task<List<order>> GetAllOrderWithInProcess()
+        {
+            return await _service.GetAllOrderWithStatusInProcess();
         }
     }
 }
