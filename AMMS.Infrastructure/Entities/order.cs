@@ -27,6 +27,8 @@ public partial class order
 
     public bool? is_enough { get; set; }
 
+    public bool? is_full { get; set; }
+
     public string? payment_status { get; set; }
 
     public int? production_id { get; set; }
