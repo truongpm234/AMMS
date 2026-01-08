@@ -83,7 +83,10 @@ namespace AMMS.Application.Services
             await _requestRepo.AddAsync(entity);
             await _requestRepo.SaveChangesAsync();
 
-            return new CreateRequestResponse();
+            return new CreateRequestResponse
+            {
+                order_request_id = entity.order_request_id
+            };
         }
         public async Task<UpdateRequestResponse> UpdateAsync(int id, UpdateOrderRequest req)
         {

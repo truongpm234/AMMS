@@ -37,12 +37,11 @@ namespace AMMS.API.Controllers
             _schedulingService = schedulingService;
         }
         [HttpPost("create-request-by-consultant")]
-        [ProducesResponseType(typeof(object), StatusCodes.Status201Created)]
+        [ProducesResponseType(typeof(CreateRequestResponse), StatusCodes.Status201Created)]
         public async Task<IActionResult> CreateOrderRequest([FromBody] CreateResquestConsultant dto)
         {
-            var id = await _service.CreateRequestByConsultantAsync(dto);
-
-            return StatusCode(201);
+            var result = await _service.CreateRequestByConsultantAsync(dto);
+            return StatusCode(StatusCodes.Status201Created, result);
         }
 
         [HttpPost]

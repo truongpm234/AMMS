@@ -8,6 +8,7 @@ namespace AMMS.Shared.DTOs.Requests
 {
     public class CreateRequestResponse
     {
-        public string Message { get; set; } = "Create order successfully";
+        public string message { get; set; } = "Create order successfully";
+        public int order_request_id { get; set; }
     }
 }
