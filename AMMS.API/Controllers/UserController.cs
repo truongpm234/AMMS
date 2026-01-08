@@ -7,6 +7,7 @@ namespace AMMS.API.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
+    [Tags("Auth")]
     public class UserController : ControllerBase
     {
         private readonly IUserService _userService;
