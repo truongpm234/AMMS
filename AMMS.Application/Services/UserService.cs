@@ -1,4 +1,5 @@
 ﻿using AMMS.Application.Interfaces;
+using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.User;
 
@@ -32,6 +33,11 @@ namespace AMMS.Application.Services
             {
                 status = "Register Failed",
             };
+        }
+
+        public async Task<user?> GetUserForGoogleAuth(string email, string name)
+        {
+            return await _userRepository.GetUserForGoogleAuth(email, name);
         }
     }
 }

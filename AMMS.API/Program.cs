@@ -190,6 +190,7 @@ builder.Services.AddScoped<IProductTemplateService, ProductTemplateService>();
 builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<JWTService>();
+builder.Services.AddScoped<GoogleAuthService>();
 
 
 // Logging

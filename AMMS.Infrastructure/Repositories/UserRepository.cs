@@ -61,5 +61,25 @@ namespace AMMS.Infrastructure.Repositories
             };
         }
 
+        public async Task<user?> GetUserForGoogleAuth(string email, string name)
+        {
+            var exitUser = _db.users.SingleOrDefault(u => u.email == email);
+            var newUser = new user();
+            if (exitUser == null)
+            {
+                newUser.email = email;
+                newUser.username = email;
+                newUser.password_hash = "null123";
+                newUser.full_name = name;
+                newUser.created_at = DateTime.Now;
+                newUser.is_active = true;
+                newUser.role_id = 6;
+                _db.users.Add(newUser);
+                await _db.SaveChangesAsync();
+                return newUser;
+            }
+            return exitUser;
+        }
+
     }
 }
