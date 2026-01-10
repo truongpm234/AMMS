@@ -25,5 +25,13 @@ namespace AMMS.API.Controllers
             var data = await _service.GetByProductTypeIdAsync(productTypeId, ct);
             return Ok(data);
         }
+
+        [HttpGet("get-all-templates")]
+        [ProducesResponseType(typeof(List<ProductTemplateDto>), StatusCodes.Status200OK)]
+        public async Task<ActionResult<List<ProductTemplateDto>>> GetAllTemplates(CancellationToken ct)
+        {
+            var data = await _service.GetAllAsync(ct);
+            return Ok(data);
+        }
     }
 }

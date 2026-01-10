@@ -1,4 +1,5 @@
 ﻿using AMMS.Application.Interfaces;
+using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.ProductTemplates;
 using System.Collections.Generic;
@@ -55,6 +56,11 @@ namespace AMMS.Application.Services
                 created_at = x.created_at,
                 updated_at = x.updated_at
             }).ToList();
+        }
+
+        public async Task<List<product_template>> GetAllAsync(CancellationToken ct = default)
+        {
+            return await _repo.GetAllAsync(ct);
         }
     }
 }

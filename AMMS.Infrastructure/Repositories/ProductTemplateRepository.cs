@@ -28,5 +28,15 @@ namespace AMMS.Infrastructure.Repositories
                 .OrderBy(x => x.template_code)
                 .ToListAsync(ct);
         }
+
+        public async Task<List<product_template>> GetAllAsync(CancellationToken ct = default)
+        {
+            return await _db.product_templates
+                .AsNoTracking()
+                .Where(x => x.is_active)
+                .OrderBy(x => x.template_code)
+                .ToListAsync(ct);
+        }
+        
     }
 }
