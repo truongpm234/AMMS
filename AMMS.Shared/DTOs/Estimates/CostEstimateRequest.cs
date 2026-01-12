@@ -22,7 +22,7 @@ namespace AMMS.Shared.DTOs.Estimates
 
         public string coating_type { get; set; } = "KEO_NUOC";
 
-        //public bool has_lamination { get; set; } = false;
+        public bool? is_send_design { get; set; }
 
         public decimal discount_percent { get; set; } = 0m;
 

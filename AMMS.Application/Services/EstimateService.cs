@@ -195,18 +195,29 @@ namespace AMMS.Application.Services
             );
 
             decimal totalProcessCost = Math.Round(processDetails.Sum(x => x.total_cost), 2);
-
-            // =====================
-            // ⭐ 11. DESIGN COST – DỰA VÀO order_request
-            // =====================
+            // ⭐ 11. DESIGN COST – DỰA VÀO order_request + is_send_design từ FE
             var orderReq = await _requestRepo.GetByIdAsync(req.order_request_id);
 
             decimal designCost = 0m;
+
+            // ✅ NẾU FE GỬI is_send_design THÌ CẬP NHẬT VÀO order_request
+            if (orderReq != null && req.is_send_design.HasValue)
+            {
+                orderReq.is_send_design = req.is_send_design.Value;
+                await _requestRepo.UpdateAsync(orderReq);
+                await _requestRepo.SaveChangesAsync();
+            }
+
+            bool isSendDesign =
+                orderReq?.is_send_design
+                ?? req.is_send_design
+                ?? false;
+
             if (orderReq == null ||
-                orderReq.is_send_design == false ||
+                isSendDesign == false ||
                 string.IsNullOrWhiteSpace(orderReq.design_file_path))
             {
-                designCost = 200_000m; // 200k nếu KH chưa gửi thiết kế
+                designCost = 200_000m; 
             }
 
             // =====================
