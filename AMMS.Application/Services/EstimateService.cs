@@ -30,6 +30,13 @@ namespace AMMS.Application.Services
 
         public async Task<PaperEstimateResponse> EstimatePaperAsync(PaperEstimateRequest req)
         {
+            if (req.order_request_id <= 0)
+                throw new ArgumentException("order_request_id is required and must be greater than 0", nameof(req.order_request_id));
+
+            var existingRequest = await _requestRepo.GetByIdAsync(req.order_request_id);
+            if (existingRequest == null)
+                throw new KeyNotFoundException($"Order request with id {req.order_request_id} not found");
+
             ValidateRequest(req);
 
             var paper = await GetPaperMaterial(req.paper_code);
@@ -91,6 +98,12 @@ namespace AMMS.Application.Services
 
         public async Task<CostEstimateResponse> CalculateCostEstimateAsync(CostEstimateRequest req)
         {
+            if (req.order_request_id <= 0)
+                throw new ArgumentException("order_request_id is required and must be greater than 0", nameof(req.order_request_id));
+
+            var existingRequest = await _requestRepo.GetByIdAsync(req.order_request_id);
+            if (existingRequest == null)
+                throw new KeyNotFoundException($"Order request with id {req.order_request_id} not found");
             // =====================
             // 1. VALIDATION
             // =====================
@@ -949,7 +962,7 @@ namespace AMMS.Application.Services
             return result;
         }
 
-        
+
         private static string ResolveProductTypeCode(string productType, string? formProduct)
         {
             productType = (productType ?? "").Trim();
@@ -1017,6 +1030,9 @@ namespace AMMS.Application.Services
         }
         public Task<DepositByRequestResponse?> GetDepositByRequestIdAsync(int requestId, CancellationToken ct = default)
             => _estimateRepo.GetDepositByRequestIdAsync(requestId, ct);
-
+        public async Task<bool> OrderRequestExistsAsync(int orderRequestId)
+        {
+            return await _estimateRepo.OrderRequestExistsAsync(orderRequestId);
+        }
     }
 }

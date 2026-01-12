@@ -25,7 +25,6 @@ namespace AMMS.API.Controllers
             try
             {
                 await _lookupService.SendOtpForPhoneAsync(req.Phone, ct);
-                // Không tiết lộ quá nhiều chi tiết (tránh lộ thông tin phone có tồn tại)
                 return Ok(new { message = "Nếu số điện thoại tồn tại trong hệ thống, OTP đã được gửi đến email tương ứng." });
             }
             catch (Exception ex)
@@ -42,13 +41,7 @@ namespace AMMS.API.Controllers
         {
             try
             {
-                var result = await _lookupService.GetOrdersByPhoneWithOtpAsync(
-                    req.Phone,
-                    req.Otp,
-                    req.Page,
-                    req.PageSize,
-                    ct);
-
+                var result = await _lookupService.GetOrdersByPhoneWithOtpAsync(req.Phone, req.Otp, req.Page, req.PageSize, ct);
                 return Ok(result);
             }
             catch (Exception ex)

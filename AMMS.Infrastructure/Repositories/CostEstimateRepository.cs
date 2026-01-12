@@ -58,5 +58,10 @@ namespace AMMS.Infrastructure.Repositories
                 })
                 .FirstOrDefaultAsync(ct);
         }
+
+        public async Task<bool> OrderRequestExistsAsync(int order_request_id)
+        {
+            return await _db.order_requests.AnyAsync(x => x.order_request_id == order_request_id);
+        }
     }
 }

@@ -114,12 +114,9 @@ namespace AMMS.Application.Services
             var html = $@"
 <div style='font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:auto;color:#333'>
   <h2 style='margin:0'>Mã OTP xác thực</h2>
-  <p style='margin:10px 0 0;color:#666'>OTP có hiệu lực trong <b>{ExpiryMinutes} phút</b>.</p>
-
   <div style='margin:18px 0;padding:14px;border:1px solid #eee;border-radius:8px;text-align:center'>
     <div style='font-size:28px;letter-spacing:6px;font-weight:700'>{otp}</div>
   </div>
-
   <p style='font-size:12px;color:#888'>Nếu bạn không yêu cầu mã này, hãy bỏ qua email.</p>
 </div>";
 

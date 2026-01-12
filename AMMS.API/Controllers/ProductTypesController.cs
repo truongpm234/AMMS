@@ -42,7 +42,6 @@ namespace AMMS.API.Controllers
             return Ok(data);
         }
 
-        // GET api/producttypes/{id}/detail
         [HttpGet("{id:int}/detail")]
         public async Task<IActionResult> GetDetail(int id, CancellationToken ct)
         {

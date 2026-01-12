@@ -104,7 +104,7 @@ namespace AMMS.Application.Services
             var est = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId)
                 ?? throw new Exception("Estimate not found");
 
-            await SendConsultantStatusEmailAsync(req, est, statusText: "KHÁCH ĐỒNG Ý BÁO GIÁ (CHỜ THANH TOÁN CỌC)");
+            await SendConsultantStatusEmailAsync(req, est, statusText: "KHÁCH ĐỒNG Ý BÁO GIÁ");
 
             var deposit = est.deposit_amount;
             var amount = (int)Math.Round(deposit, 0);
