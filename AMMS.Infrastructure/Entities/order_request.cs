@@ -66,6 +66,8 @@ public partial class order_request
 
     public bool? is_send_design { get; set; }
 
+    public string? reason { get; set; }
+
     public virtual quote? quote { get; set; }
 
     public virtual order? order { get; set; }
