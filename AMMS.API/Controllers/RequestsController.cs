@@ -62,11 +62,12 @@ namespace AMMS.API.Controllers
         }
 
         [HttpDelete("{id:int}")]
-        public async Task<IActionResult> Delete(int id)
+        public async Task<IActionResult> Delete(int id, CancellationToken ct)
         {
-            await _service.DeleteAsync(id);
-            return NoContent();
+            await _service.CancelAsync(id, ct);
+            return Ok(new { message = "Cancelled", order_request_id = id });
         }
+
 
         [HttpGet("{id:int}")]
         public async Task<IActionResult> GetById(int id)

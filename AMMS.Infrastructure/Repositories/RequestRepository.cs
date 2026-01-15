@@ -40,11 +40,20 @@ namespace AMMS.Infrastructure.Repositories
             await _db.order_requests.AddAsync(entity);
         }
 
-        public async Task DeleteAsync(int id)
+        public async Task CancelAsync(int id, CancellationToken ct = default)
         {
-            var entity = await _db.order_requests.FindAsync(id);
-            if (entity != null)
-                _db.order_requests.Remove(entity);
+            var entity = await _db.order_requests
+                .FirstOrDefaultAsync(x => x.order_request_id == id, ct);
+
+            if (entity == null) return;
+
+            // Nếu đã convert sang order thì bạn có thể chặn cancel (tuỳ rule)
+            // Ở đây mình cho phép cancel nếu chưa có order_id
+            if (entity.order_id != null)
+                throw new InvalidOperationException("This request is already linked to an order, cannot cancel.");
+
+            entity.process_status = "Cancel"; // hoặc "Cancelled"
+            _db.order_requests.Update(entity);
         }
         public Task<int> CountAsync()
         {

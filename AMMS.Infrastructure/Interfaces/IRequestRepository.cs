@@ -9,7 +9,7 @@ namespace AMMS.Infrastructure.Interfaces
         Task AddAsync(order_request entity);
         Task UpdateAsync(order_request entity);
         Task<order_request?> GetByIdAsync(int id);
-        Task DeleteAsync(int id);
+        Task CancelAsync(int id, CancellationToken ct = default);
         Task<int> SaveChangesAsync();
         Task<int> CountAsync();
         Task<List<RequestPagedDto>> GetPagedAsync(int skip, int take);

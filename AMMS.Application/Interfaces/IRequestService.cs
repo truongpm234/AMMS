@@ -8,7 +8,7 @@ namespace AMMS.Application.Interfaces
     {
         Task<CreateRequestResponse> CreateAsync(CreateResquest req);
         Task<UpdateRequestResponse> UpdateAsync(int id, UpdateOrderRequest req);
-        Task DeleteAsync(int id);
+        Task CancelAsync(int id, CancellationToken ct = default);
         Task<order_request?> GetByIdAsync(int id);
         Task<PagedResultLite<RequestPagedDto>> GetPagedAsync(int page, int pageSize);
 

@@ -127,9 +127,17 @@ namespace AMMS.Application.Services
             };
         }
 
-        public async Task DeleteAsync(int id)
+        public async Task CancelAsync(int id, CancellationToken ct = default)
         {
-            await _requestRepo.DeleteAsync(id);
+            // optional: check exists
+            var entity = await _requestRepo.GetByIdAsync(id);
+            if (entity == null) return;
+
+            // optional business rule
+            if (entity.order_id != null)
+                throw new InvalidOperationException("This request is already linked to an order, cannot cancel.");
+
+            await _requestRepo.CancelAsync(id, ct);
             await _requestRepo.SaveChangesAsync();
         }
 
