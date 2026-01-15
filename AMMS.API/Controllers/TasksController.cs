@@ -45,6 +45,10 @@ namespace AMMS.API.Controllers
         [HttpPost("finish")]
         public async Task<ActionResult<ScanTaskResult>> Finish([FromBody] ScanTaskRequest req)
         {
+            if (req == null || string.IsNullOrEmpty(req.token))
+            {
+                return BadRequest("Invalid request or missing token.");
+            }
             var res = await _svc.ScanFinishAsync(req);
             return Ok(res);
         }
