@@ -23,20 +23,20 @@ namespace AMMS.API.Controllers
             _svc = svc;
         }
 
-        [HttpPost("qr/{taskId:int}")]
-        public async Task<ActionResult<TaskQrResponse>> CreateQr(int taskId, [FromQuery] int ttlMinutes = 60)
+        [HttpPost("qr")]
+        public async Task<ActionResult<TaskQrResponse>> CreateQr([FromBody] CreateTaskQrRequest req)
         {
-            var t = await _taskRepo.GetByIdAsync(taskId);
+            var t = await _taskRepo.GetByIdAsync(req.task_id);
             if (t == null) return NotFound();
 
-            var ttl = TimeSpan.FromMinutes(Math.Max(1, ttlMinutes));
-            var token = _tokenSvc.CreateToken(taskId, ttl);
+            var ttl = TimeSpan.FromMinutes(Math.Max(1, req.ttl_minutes));
 
+            var token = _tokenSvc.CreateToken(req.task_id, ttl);
             var expiresAt = DateTimeOffset.UtcNow.Add(ttl).ToUnixTimeSeconds();
 
             return new TaskQrResponse
             {
-                task_id = taskId,
+                task_id = req.task_id,
                 token = token,
                 expires_at_unix = expiresAt
             };
