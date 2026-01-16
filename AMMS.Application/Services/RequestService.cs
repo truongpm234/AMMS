@@ -77,7 +77,8 @@ namespace AMMS.Application.Services
                 customer_name = req.customer_name,
                 customer_phone = req.customer_phone,
                 customer_email = req.customer_email,
-                detail_address = req.detail_address
+                detail_address = req.detail_address,
+                process_status = "Pending"
             };
 
             await _requestRepo.AddAsync(entity);

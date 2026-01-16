@@ -16,9 +16,9 @@ public partial class purchase
 
     public string? status { get; set; }
 
-    public DateTime? eta_date { get; set; }
-
     public DateTime? created_at { get; set; }
+
+    public DateTime? eta_date { get; set; }
 
     public virtual user? created_byNavigation { get; set; }
 

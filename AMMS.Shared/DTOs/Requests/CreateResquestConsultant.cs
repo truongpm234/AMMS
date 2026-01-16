@@ -15,6 +15,7 @@ namespace AMMS.Shared.DTOs.Requests
         public string? customer_email { get; set; }
 
         public string? detail_address { get; set; }
+
     }
 }
 

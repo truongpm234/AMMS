@@ -309,7 +309,6 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.created_at)
                 .HasDefaultValueSql("CURRENT_TIMESTAMP")
                 .HasColumnType("timestamp without time zone");
-            entity.Property(e => e.eta_date).HasColumnType("timestamp without time zone");
             entity.Property(e => e.status)
                 .HasMaxLength(20)
                 .HasDefaultValueSql("'Pending'::character varying");
