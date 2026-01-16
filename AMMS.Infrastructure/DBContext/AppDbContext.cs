@@ -422,11 +422,7 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.status)
                 .HasMaxLength(20)
                 .HasDefaultValueSql("'Unassigned'::character varying");
-
-            entity.HasOne(d => d.assigned_toNavigation).WithMany(p => p.tasks)
-                .HasForeignKey(d => d.assigned_to)
-                .HasConstraintName("tasks_assigned_to_fkey");
-
+         
             entity.HasOne(d => d.process).WithMany(p => p.tasks)
                 .HasForeignKey(d => d.process_id)
                 .HasConstraintName("tasks_process_id_fkey");
@@ -446,14 +442,8 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.log_time)
                 .HasDefaultValueSql("CURRENT_TIMESTAMP")
                 .HasColumnType("timestamp without time zone");
-            entity.Property(e => e.qty_bad).HasDefaultValue(0);
             entity.Property(e => e.qty_good).HasDefaultValue(0);
             entity.Property(e => e.scanned_code).HasColumnType("text");
-            entity.Property(e => e.scanner_id).HasColumnType("text");
-
-            entity.HasOne(d => d._operator).WithMany(p => p.task_logs)
-                .HasForeignKey(d => d.operator_id)
-                .HasConstraintName("task_logs_operator_id_fkey");
 
             entity.HasOne(d => d.task).WithMany(p => p.task_logs)
                 .HasForeignKey(d => d.task_id)

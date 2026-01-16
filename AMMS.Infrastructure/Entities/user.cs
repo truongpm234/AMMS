@@ -38,8 +38,4 @@ public partial class user
     public virtual role? role { get; set; }
 
     public virtual ICollection<stock_move> stock_moves { get; set; } = new List<stock_move>();
-
-    public virtual ICollection<task_log> task_logs { get; set; } = new List<task_log>();
-
-    public virtual ICollection<task> tasks { get; set; } = new List<task>();
 }

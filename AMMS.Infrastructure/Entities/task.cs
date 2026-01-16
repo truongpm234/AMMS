@@ -18,8 +18,6 @@ public partial class task
 
     public string? status { get; set; }
 
-    public int? assigned_to { get; set; }
-
     public string? machine { get; set; }
 
     public DateTime? start_time { get; set; }
@@ -27,8 +25,6 @@ public partial class task
     public DateTime? end_time { get; set; }
 
     public int? process_id { get; set; }
-
-    public virtual user? assigned_toNavigation { get; set; }
 
     public virtual product_type_process? process { get; set; }
 

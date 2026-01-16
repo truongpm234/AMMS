@@ -17,33 +17,39 @@ namespace AMMS.Application.Services
             _secret = config["Qr:Secret"] ?? throw new Exception("Missing Qr:Secret");
         }
 
-        public string CreateToken(int taskId, TimeSpan ttl)
+        public string CreateToken(int taskId, int qtyGood, TimeSpan ttl)
         {
             var expiresAt = DateTimeOffset.UtcNow.Add(ttl).ToUnixTimeSeconds();
             var nonce = Guid.NewGuid().ToString("N");
-            var payload = $"{taskId}|{expiresAt}|{nonce}";
+            var payload = $"{taskId}|{expiresAt}|{qtyGood}|{nonce}";
             var sig = Sign(payload);
             return $"{payload}|{sig}";
         }
 
-        public bool TryValidate(string token, out int taskId, out string reason)
+        public bool TryValidate(string token, out int taskId, out int qtyGood, out string reason)
         {
             taskId = 0;
             reason = "";
+            qtyGood = 0;
 
             var parts = token.Split('|');
-            if (parts.Length != 4) { reason = "Invalid token format"; return false; }
+            if (parts.Length != 5) { reason = "Invalid token format"; return false; }
 
             if (!int.TryParse(parts[0], out taskId)) { reason = "Invalid taskId"; return false; }
             if (!long.TryParse(parts[1], out var exp)) { reason = "Invalid expiry"; return false; }
+            if (!int.TryParse(parts[2], out qtyGood)) { reason = "Invalid qty_good"; return false;}
 
-            var payload = $"{parts[0]}|{parts[1]}|{parts[2]}";
-            var sig = parts[3];
+            var payload = $"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}";
+            var sig = parts[4];
 
             if (!FixedEquals(sig, Sign(payload))) { reason = "Bad signature"; return false; }
 
             var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            if (now > exp) { reason = "Token expired"; return false; }
+            if (now > exp) 
+            { 
+                reason = "Token expired"; 
+                return false; 
+            }
 
             return true;
         }

@@ -407,7 +407,6 @@ namespace AMMS.Infrastructure.Repositories
                     t.seq_num,
                     t.name,
                     t.status,
-                    t.assigned_to,
                     t.machine,
                     t.start_time,
                     t.end_time,
@@ -426,10 +425,7 @@ namespace AMMS.Infrastructure.Repositories
                     task_id = l.task_id!.Value,
                     action_type = l.action_type,
                     qty_good = l.qty_good ?? 0,
-                    qty_bad = l.qty_bad ?? 0,
-                    operator_id = l.operator_id,
                     log_time = l.log_time,
-                    scanner_id = l.scanner_id,
                     scanned_code = l.scanned_code
                 }).ToListAsync(ct);
 
@@ -512,7 +508,6 @@ namespace AMMS.Infrastructure.Repositories
                     task_id = task?.task_id,
                     task_name = task?.name,
                     status = task?.status,
-                    assigned_to = task?.assigned_to,
                     start_time = task?.start_time,
                     end_time = task?.end_time,
 
@@ -555,7 +550,6 @@ namespace AMMS.Infrastructure.Repositories
                 {
                     task_id = l.task_id!.Value,
                     qty_good = l.qty_good ?? 0,
-                    qty_bad = l.qty_bad ?? 0,
                     log_time = l.log_time
                 })
                 .ToListAsync(ct);
@@ -588,9 +582,7 @@ namespace AMMS.Infrastructure.Repositories
             {
                 var tlogs = logs.Where(x => x.task_id == t.task_id).ToList();
                 var good = tlogs.Sum(x => x.qty_good);
-                var bad = tlogs.Sum(x => x.qty_bad);
-                var denom = good + bad;
-                var waste = denom <= 0 ? 0m : Math.Round((bad * 100m) / denom, 2);
+                var denom = good;
 
                 string pname = t.name;
                 string? pcode = null;
@@ -610,8 +602,6 @@ namespace AMMS.Infrastructure.Repositories
                     process_name = pname,
                     process_code = pcode,
                     qty_good = good,
-                    qty_bad = bad,
-                    waste_percent = waste,
                     first_scan = tlogs.Count == 0 ? null : tlogs.Min(x => x.log_time),
                     last_scan = tlogs.Count == 0 ? null : tlogs.Max(x => x.log_time),
                 });

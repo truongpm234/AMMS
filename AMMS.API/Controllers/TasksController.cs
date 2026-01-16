@@ -31,7 +31,7 @@ namespace AMMS.API.Controllers
 
             var ttl = TimeSpan.FromMinutes(Math.Max(1, req.ttl_minutes));
 
-            var token = _tokenSvc.CreateToken(req.task_id, ttl);
+            var token = _tokenSvc.CreateToken(req.task_id, req.qty_good, ttl);
             var expiresAt = DateTimeOffset.UtcNow.Add(ttl).ToUnixTimeSeconds();
 
             return new TaskQrResponse

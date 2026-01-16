@@ -37,7 +37,7 @@ namespace AMMS.Application.Services
 
         public async Task<ScanTaskResult> ScanFinishAsync(ScanTaskRequest req)
         {
-            if (!_tokenSvc.TryValidate(req.token, out var taskId, out var reason))
+            if (!_tokenSvc.TryValidate(req.token, out var taskId, out var qtyGood, out var reason))
                 throw new ArgumentException(reason);
 
             var strategy = _db.Database.CreateExecutionStrategy();
@@ -74,12 +74,9 @@ namespace AMMS.Application.Services
                     var log = new task_log
                     {
                         task_id = t.task_id,
-                        scanner_id = req.scanner_id,
                         scanned_code = req.token,
                         action_type = "Finished",
-                        qty_good = req.qty_good ?? 0,
-                        qty_bad = req.qty_bad ?? 0,
-                        operator_id = req.operator_id,
+                        qty_good = qtyGood,
                         log_time = now
                     };
 
@@ -111,7 +108,7 @@ namespace AMMS.Application.Services
                     {
                         task_id = t.task_id,
                         prod_id = t.prod_id,
-                        message = "Finished & progressed"
+                        message = $"Finished & logged qty_good={qtyGood}"
                     };
                 }
                 catch
