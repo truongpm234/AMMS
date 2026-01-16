@@ -18,8 +18,6 @@ public partial class purchase
 
     public DateTime? created_at { get; set; }
 
-    public DateTime? eta_date { get; set; }
-
     public virtual user? created_byNavigation { get; set; }
 
     public virtual ICollection<purchase_item> purchase_items { get; set; } = new List<purchase_item>();

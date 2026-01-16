@@ -13,7 +13,6 @@ namespace AMMS.Shared.DTOs.Purchases
         DateTime? created_at,
         string cretae_by_name,
         decimal total_quantity,
-        DateTime? eta_date,
         string status,
         string? received_by_name,
         string? unit_summary

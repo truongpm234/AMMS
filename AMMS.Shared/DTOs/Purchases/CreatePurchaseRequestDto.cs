@@ -8,8 +8,7 @@ namespace AMMS.Shared.DTOs.Purchases
 {
     public class CreatePurchaseRequestDto
     {
-        public int? SupplierId { get; set; }     // optional: có thể null nếu chưa chọn NCC
-        public DateTime? EtaDate { get; set; }   // optional
+        public int? supplier_id { get; set; }     
         public List<CreatePurchaseRequestItemDto> Items { get; set; } = new();
     }
 }

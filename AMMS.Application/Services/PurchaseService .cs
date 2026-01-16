@@ -30,11 +30,11 @@ namespace AMMS.Application.Services
 
             foreach (var i in dto.Items)
             {
-                if (i.MaterialId <= 0) throw new ArgumentException("MaterialId invalid");
-                if (i.Quantity <= 0) throw new ArgumentException("Quantity must be > 0");
+                if (i.material_id <= 0) throw new ArgumentException("MaterialId invalid");
+                if (i.quantity <= 0) throw new ArgumentException("Quantity must be > 0");
 
-                var exists = await _repo.MaterialExistsAsync(i.MaterialId, ct);
-                if (!exists) throw new ArgumentException($"MaterialId {i.MaterialId} not found");
+                var exists = await _repo.MaterialExistsAsync(i.material_id, ct);
+                if (!exists) throw new ArgumentException($"MaterialId {i.material_id} not found");
             }
 
             var code = await _repo.GenerateNextPurchaseCodeAsync(ct);
@@ -42,10 +42,9 @@ namespace AMMS.Application.Services
             var p = new purchase
             {
                 code = code,
-                supplier_id = dto.SupplierId,
+                supplier_id = dto.supplier_id,
                 created_by = createdBy,
                 status = "Pending",
-                eta_date = ToUnspecified(dto.EtaDate),
                 created_at = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Unspecified),
             };
 
@@ -55,8 +54,8 @@ namespace AMMS.Application.Services
             var items = dto.Items.Select(x => new purchase_item
             {
                 purchase_id = p.purchase_id,
-                material_id = x.MaterialId,
-                qty_ordered = x.Quantity,
+                material_id = x.material_id,
+                qty_ordered = x.quantity,
             }).ToList();
 
             foreach (var it in items)
@@ -103,15 +102,15 @@ namespace AMMS.Application.Services
             // ✅ Validate items + material exists + price
             foreach (var i in dto.Items)
             {
-                if (i.MaterialId <= 0) throw new ArgumentException("MaterialId invalid");
-                if (i.Quantity <= 0) throw new ArgumentException("Quantity must be > 0");
+                if (i.material_id <= 0) throw new ArgumentException("MaterialId invalid");
+                if (i.quantity <= 0) throw new ArgumentException("Quantity must be > 0");
 
-                // price optional; nếu bạn muốn bắt buộc: if (i.Price is null || i.Price <= 0) throw...
-                if (i.Price.HasValue && i.Price.Value < 0)
+                // price optional; nếu muốn bắt buộc: if (i.Price is null || i.Price <= 0) throw ...
+                if (i.price.HasValue && i.price.Value < 0)
                     throw new ArgumentException("Price must be >= 0");
 
-                var exists = await _repo.MaterialExistsAsync(i.MaterialId, ct);
-                if (!exists) throw new ArgumentException($"MaterialId {i.MaterialId} not found");
+                var exists = await _repo.MaterialExistsAsync(i.material_id, ct);
+                if (!exists) throw new ArgumentException($"MaterialId {i.material_id} not found");
             }
 
             // ✅ Manager (created_by)
@@ -125,10 +124,10 @@ namespace AMMS.Application.Services
             // - fallback dto.SupplierId (để tương thích kiểu cũ)
             var normalizedItems = dto.Items.Select(x => new
             {
-                SupplierId = x.SupplierId ?? dto.SupplierId,
-                MaterialId = x.MaterialId,
-                Quantity = x.Quantity,
-                Price = x.Price
+                SupplierId = x.supplier_id ?? dto.supplier_id,
+                MaterialId = x.material_id,
+                Quantity = x.quantity,
+                Price = x.price
             }).ToList();
 
             if (normalizedItems.Any(x => x.SupplierId == null))
@@ -153,7 +152,6 @@ namespace AMMS.Application.Services
                 int SupplierId,
                 string SupplierName,
                 DateTime? CreatedAt,
-                DateTime? EtaDate,
                 decimal TotalQty
             )>();
 
@@ -161,7 +159,6 @@ namespace AMMS.Application.Services
             {
                 var supplierId = g.Key;
 
-                // code: POxxxx
                 var code = await _repo.GenerateNextPurchaseCodeAsync(ct);
 
                 var p = new purchase
@@ -170,7 +167,6 @@ namespace AMMS.Application.Services
                     supplier_id = supplierId,
                     created_by = managerId,
                     status = "Ordered",
-                    eta_date = ToUnspecified(dto.EtaDate),
                     created_at = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Unspecified),
                 };
 
@@ -194,11 +190,10 @@ namespace AMMS.Application.Services
 
                 createdPurchases.Add((
                     p.purchase_id,
-                    p.code,
+                    p.code ?? code,
                     supplierId,
                     supplierName,
                     p.created_at,
-                    p.eta_date,
                     totalQty
                 ));
             }
@@ -222,10 +217,9 @@ namespace AMMS.Application.Services
                     one.CreatedAt,
                     createdByName,
                     one.TotalQty,
-                    one.EtaDate,
                     "Ordered",
-                    received_by_name: null,
-                    unit_summary: null
+                    null,
+                    null
                 );
             }
             else
@@ -242,18 +236,18 @@ namespace AMMS.Application.Services
 
                 return new PurchaseOrderListItemDto(
                     first.PurchaseId,
-                    $"BATCH({createdPurchases.Count}): {codes}", // chỉ trả về để bạn nhìn, không lưu DB
+                    $"BATCH({createdPurchases.Count}): {codes}", // chỉ để trả response
                     "MIXED",
                     createdAt,
                     createdByName,
                     totalAll,
-                    ToUnspecified(dto.EtaDate),
                     "Ordered",
-                    received_by_name: null,
-                    unit_summary: codes
+                    null,
+                    codes // unit_summary
                 );
             }
         }
+
 
 
         public async Task<object> ReceiveAllPendingPurchasesAsync(int purchaseId, ReceivePurchaseRequestDto body, CancellationToken ct = default)

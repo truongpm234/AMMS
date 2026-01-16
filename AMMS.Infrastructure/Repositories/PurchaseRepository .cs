@@ -145,7 +145,6 @@ namespace AMMS.Infrastructure.Repositories
                     p.purchase_id,
                     p.code,
                     p.created_at,
-                    p.eta_date,  // ✅
                     p.status,    // ✅
                     SupplierName = (string?)(s != null ? s.name : null)
                 }
@@ -162,7 +161,6 @@ namespace AMMS.Infrastructure.Repositories
                     g.Sum(x => (decimal?)(x.i != null ? (x.i.qty_ordered ?? 0) : 0)) ?? 0m,
 
                     // ✅ CHANGED: eta_date + status + receivedByName + unit
-                    g.Key.eta_date,
                     g.Key.status ?? "Pending",
                     g.Max(x => x.u != null ? x.u.full_name : null),
 
@@ -229,7 +227,6 @@ namespace AMMS.Infrastructure.Repositories
                     p.supplier_id,
                     SupplierName = p.supplier != null ? p.supplier.name : "N/A",
                     p.created_at,
-                    p.eta_date,
 
                     // ✅ LẤY STATUS 100% từ purchases.status
                     Status = p.status ?? "Ordered",
@@ -315,7 +312,6 @@ namespace AMMS.Infrastructure.Repositories
                     Code = p.code,
                     SupplierId = p.supplier_id,
                     SupplierName = p.SupplierName,
-                    EtaDate = p.eta_date,
                     CreatedAt = p.created_at ?? DateTime.MinValue,
                     CreatedByName = p.CreatedByName,
                     Status = p.Status,

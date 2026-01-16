@@ -8,13 +8,13 @@ namespace AMMS.Shared.DTOs.Purchases
 {
     public class CreatePurchaseRequestItemDto
     {
-        public int MaterialId { get; set; }
-        public decimal Quantity { get; set; }
+        public int material_id { get; set; }
+        public decimal quantity { get; set; }
 
         // ✅ item-level supplier (multi supplier)
-        public int? SupplierId { get; set; }
+        public int? supplier_id { get; set; }
 
         // ✅ NEW: unit price
-        public decimal? Price { get; set; }
+        public decimal? price { get; set; }
     }
 }
