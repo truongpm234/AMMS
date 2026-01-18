@@ -191,6 +191,7 @@ builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<JWTService>();
 builder.Services.AddScoped<GoogleAuthService>();
+builder.Services.AddScoped<ISmsOtpService, TwilioSmsOtpService>();
 
 
 // Logging

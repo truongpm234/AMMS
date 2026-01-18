@@ -2,6 +2,7 @@
 using AMMS.Shared.DTOs.Email;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using static AMMS.Shared.DTOs.Auth.Auth;
 
 namespace AMMS.API.Controllers
 {
@@ -10,9 +11,11 @@ namespace AMMS.API.Controllers
     public class OtpsController : ControllerBase
     {
         private readonly IEmailService _emailService;
-        public OtpsController(IEmailService emailService)
+        private readonly ISmsOtpService _otp;
+        public OtpsController(IEmailService emailService, ISmsOtpService otp)
         {
             _emailService = emailService;
+            _otp = otp;
         }
 
         [HttpPost("send-otp")]
@@ -36,6 +39,27 @@ namespace AMMS.API.Controllers
                 return BadRequest(new { message = "Invalid or expired OTP" });
 
             return Ok(new { message = "OTP verified" }); // ✅ 200
+        }
+
+        [HttpPost("sms/send")]
+        public async Task<IActionResult> Send([FromBody] SendOtpSmsRequest req, CancellationToken ct)
+        {
+            var result = await _otp.SendOtpAsync(req, ct);
+            if (!result.success) return BadRequest(result);
+            return Ok(result);
+        }
+
+        // POST: /api/auth/otp/sms/verify
+        [HttpPost("sms/verify")]
+        public async Task<IActionResult> Verify([FromBody] VerifyOtpSmsRequest req, CancellationToken ct)
+        {
+            var result = await _otp.VerifyOtpAsync(req, ct);
+
+            // yêu cầu của bạn: trả true/false
+            // -> vẫn trả object có valid, nhưng bạn có thể chỉ return Ok(result.valid)
+            if (!result.success) return BadRequest(result);
+
+            return Ok(new { valid = result.valid });
         }
     }
 }
