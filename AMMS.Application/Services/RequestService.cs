@@ -449,9 +449,8 @@ namespace AMMS.Application.Services
                         status = "Scheduled",
                         product_type_id = productTypeId,
 
-                        manager_id = managerId,                 // ✅ set
-                        start_date = now,                       // ✅ set
-                        end_date = newOrder.delivery_date       // ✅ hoặc null tuỳ bạn
+                        manager_id = managerId,                
+                        start_date = now
                     };
 
                     await _db.productions.AddAsync(prod);
