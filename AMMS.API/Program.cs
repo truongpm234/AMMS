@@ -84,7 +84,7 @@ builder.Services.AddAuthentication(options =>
 });
 builder.Services.AddAuthorization(options =>
 {
-    options.AddPolicy("system_handler", policy =>
+    options.AddPolicy("admin", policy =>
         policy.RequireClaim("roleid", "1"));
 
     options.AddPolicy("consultant", policy =>
