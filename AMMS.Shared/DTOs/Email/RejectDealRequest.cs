@@ -8,7 +8,7 @@ namespace AMMS.Shared.DTOs.Email
 {
     public class RejectDealRequest
     {
-        public int orderRequestId { get; set; }
+        public int order_request_id { get; set; }
         public string token { get; set; } = null!;
         public string reason { get; set; } = null!;
         public string? phone { get; set; }
