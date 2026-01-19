@@ -22,7 +22,7 @@ namespace AMMS.Infrastructure.Repositories
                 from pr in _db.productions.AsNoTracking()
                 join o in _db.orders.AsNoTracking() on pr.order_id equals o.order_id
                 where pr.start_date != null
-                      && pr.end_date == null
+                      && pr.end_date == null 
                       && o.delivery_date != null
                 orderby o.delivery_date
                 select o.delivery_date

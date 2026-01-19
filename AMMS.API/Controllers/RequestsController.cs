@@ -5,6 +5,7 @@ using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Email;
 using AMMS.Shared.DTOs.Requests;
+using AMMS.Shared.DTOs.Requests.AMMS.Shared.DTOs.Requests;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -65,13 +66,12 @@ namespace AMMS.API.Controllers
             return StatusCode(StatusCodes.Status200OK, update);
         }
 
-        [HttpDelete("{id:int}")]
-        public async Task<IActionResult> Delete(int id, CancellationToken ct)
+        [HttpPut("cancel-request")]
+        public async Task<IActionResult> Delete([FromBody] CancelRequestDto dto, CancellationToken ct)
         {
-            await _service.CancelAsync(id, ct);
-            return Ok(new { message = "Cancelled", order_request_id = id });
+            await _service.CancelAsync(dto.id, dto.reason, ct);
+            return Ok(new { message = "Cancelled", order_request_id = dto.id });
         }
-
 
         [HttpGet("{id:int}")]
         public async Task<IActionResult> GetById(int id)
