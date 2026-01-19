@@ -55,8 +55,6 @@ namespace AMMS.API.Controllers
         {
             var result = await _otp.VerifyOtpAsync(req, ct);
 
-            // yêu cầu của bạn: trả true/false
-            // -> vẫn trả object có valid, nhưng bạn có thể chỉ return Ok(result.valid)
             if (!result.success) return BadRequest(result);
 
             return Ok(new { valid = result.valid });

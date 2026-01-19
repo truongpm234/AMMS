@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using System.Text.Json;
+using static AMMS.Shared.DTOs.Auth.Auth;
 
 namespace AMMS.API.Controllers
 {
@@ -22,19 +23,22 @@ namespace AMMS.API.Controllers
         private readonly IPaymentsService _paymentService;
         private readonly IProductionSchedulingService _schedulingService;
         private readonly AppDbContext _db;
+        private readonly ISmsOtpService _smsOtp;
 
         public RequestsController(
             IRequestService service,
             IDealService dealService,
             IPaymentsService paymentService,
             AppDbContext db,
-            IProductionSchedulingService schedulingService)
+            IProductionSchedulingService schedulingService,
+            ISmsOtpService smsOtp)
         {
             _service = service;
             _dealService = dealService;
             _paymentService = paymentService;
             _db = db;
             _schedulingService = schedulingService;
+            _smsOtp = smsOtp;
         }
         [HttpPost("create-request-by-consultant")]
         [ProducesResponseType(typeof(CreateRequestResponse), StatusCodes.Status201Created)]
@@ -111,23 +115,74 @@ namespace AMMS.API.Controllers
         [HttpGet("accept-pay")]
         public async Task<IActionResult> AcceptPay([FromQuery] int orderRequestId, [FromQuery] string token)
         {
+            var req = await _service.GetByIdAsync(orderRequestId);
+            if (req == null)
+                return NotFound(new { message = "Order request not found" });
+
+            if (string.Equals(req.process_status, "Rejected", StringComparison.OrdinalIgnoreCase))
+            {
+                var fe = "https://sep490-fe.vercel.app";
+                return Redirect($"{fe}/deal-invalid?orderRequestId={orderRequestId}&reason=rejected");
+            }
+
             var checkoutUrl = await _dealService.AcceptAndCreatePayOsLinkAsync(orderRequestId);
             return Redirect(checkoutUrl);
         }
 
         [HttpGet("reject-form")]
-        public IActionResult RejectForm([FromQuery] int orderRequestId, [FromQuery] string token)
+        public async Task<IActionResult> RejectForm([FromQuery] int orderRequestId, [FromQuery] string token)
         {
             var fe = "https://sep490-fe.vercel.app";
+
+            var req = await _service.GetByIdAsync(orderRequestId);
+            if (req == null)
+            {
+                return Redirect($"{fe}/reject-deal?orderRequestId={orderRequestId}&token={token}&error=not_found");
+            }
+
+            if (string.Equals(req.process_status, "Accepted", StringComparison.OrdinalIgnoreCase))
+            {
+                return Redirect($"{fe}/reject-deal?orderRequestId={orderRequestId}&token={token}&error=accepted");
+            }
+
             return Redirect($"{fe}/reject-deal?orderRequestId={orderRequestId}&token={token}");
         }
 
         [HttpPost("reject")]
-        public async Task<IActionResult> RejectDeal([FromBody] RejectDealRequest dto)
+        public async Task<IActionResult> RejectDeal([FromBody] RejectDealRequest dto, CancellationToken ct)
         {
+            // 1. Lấy order_request
+            var req = await _service.GetByIdAsync(dto.orderRequestId);
+            if (req == null)
+                return NotFound(new { message = "Order request not found" });
+
+            if (string.Equals(req.process_status, "Accepted", StringComparison.OrdinalIgnoreCase))
+            {
+                return BadRequest(new { message = "Order has already been accepted, cannot reject." });
+            }
+
+            if (string.IsNullOrWhiteSpace(dto.otp))
+                return BadRequest(new { message = "OTP is required to reject this deal." });
+
+            var phone = dto.phone;
+            if (string.IsNullOrWhiteSpace(phone))
+                phone = req.customer_phone ?? "";
+
+            if (string.IsNullOrWhiteSpace(phone))
+                return BadRequest(new { message = "Customer phone is missing, cannot verify OTP." });
+
+            var verifyReq = new VerifyOtpSmsRequest(phone, dto.otp);
+
+            var verifyRes = await _smsOtp.VerifyOtpAsync(verifyReq, ct);
+            if (!verifyRes.success || !verifyRes.valid)
+            {
+                return BadRequest(new { message = verifyRes.message ?? "Invalid or expired OTP" });
+            }
+
             await _dealService.RejectDealAsync(dto.orderRequestId, dto.reason ?? "Customer rejected");
             return Ok(new { ok = true });
         }
+
 
         [HttpGet("payos/return")]
         public async Task<IActionResult> PayOsReturn([FromQuery] int orderRequestId, [FromQuery] long orderCode, [FromServices] IPaymentRepository paymentRepo, CancellationToken ct)

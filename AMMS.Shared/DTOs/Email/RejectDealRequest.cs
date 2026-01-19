@@ -11,6 +11,8 @@ namespace AMMS.Shared.DTOs.Email
         public int orderRequestId { get; set; }
         public string token { get; set; } = null!;
         public string reason { get; set; } = null!;
+        public string? phone { get; set; }
+        public string? otp { get; set; }
     }
 
 }

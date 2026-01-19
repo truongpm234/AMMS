@@ -26,27 +26,21 @@ namespace AMMS.Application.Services
             TwilioClient.Init(_accountSid, _authToken);
         }
 
-        // Chuẩn hoá phone về E.164: +84...
-        // Bạn có thể làm chặt hơn, nhưng basic thế này đủ test.
         private static string NormalizePhone(string phone)
         {
             phone = (phone ?? "").Trim();
             if (string.IsNullOrWhiteSpace(phone))
                 throw new ArgumentException("phone is required");
 
-            // Nếu đã có + thì assume đúng E.164
             if (phone.StartsWith("+"))
                 return phone;
 
-            // Nếu user nhập 0xxxxxxxxx => đổi sang +84xxxxxxxxx
             if (phone.StartsWith("0"))
                 return "+84" + phone.Substring(1);
 
-            // Nếu user nhập 84xxxxxxxxx => +84...
             if (phone.StartsWith("84"))
                 return "+" + phone;
 
-            // fallback: bạn có thể throw để bắt user nhập đúng
             return phone;
         }
 
