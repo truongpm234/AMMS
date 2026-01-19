@@ -447,8 +447,8 @@ namespace AMMS.Application.Services
                         status = "Scheduled",
                         product_type_id = productTypeId,
 
-                        manager_id = managerId,                 
-                        start_date = now                      
+                        manager_id = managerId,
+                        start_date = now
                     };
 
                     await _db.productions.AddAsync(prod);
