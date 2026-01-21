@@ -1,4 +1,5 @@
-﻿using AMMS.Application.Interfaces;
+﻿using AMMS.Application.Helpers;
+using AMMS.Application.Interfaces;
 using AMMS.Application.Services;
 using AMMS.Shared.DTOs.Estimates;
 using AMMS.Shared.DTOs.Estimates.AMMS.Shared.DTOs.Estimates;
@@ -76,6 +77,13 @@ namespace AMMS.API.Controllers
                 return NotFound(new { message = "Cost estimate not found for this requestId" });
 
             return Ok(result);
+        }
+        [HttpGet("base-config")]
+        [ProducesResponseType(typeof(EstimateBaseConfigDto), StatusCodes.Status200OK)]
+        public IActionResult GetBaseConfig()
+        {
+            var cfg = EstimateConfigBuilder.Build();
+            return Ok(cfg);
         }
     }
 }

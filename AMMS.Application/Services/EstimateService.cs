@@ -126,10 +126,6 @@ namespace AMMS.Application.Services
             // Dùng cho: Mực in, Keo phủ, Màng cán
             decimal totalPrintAreaM2 = printAreaM2 * req.paper.quantity;
 
-            // 3.3. (Tùy chọn) Diện tích TỜ GIẤY - Nếu cần cho keo bồi
-            // decimal sheetAreaM2 = (req.paper.sheet_width_mm / 1000m) * (req.paper.sheet_height_mm / 1000m);
-            // decimal totalSheetAreaM2 = sheetAreaM2 * req.paper.sheets_with_waste;SaveCostEstimate
-
             // =====================
             // 4. TÍNH CHI PHÍ GIẤY
             // =====================
@@ -892,14 +888,10 @@ namespace AMMS.Application.Services
                 ProcessType.IN => totalPrintAreaM2,
                 ProcessType.PHU => totalPrintAreaM2,
                 ProcessType.CAN_MANG => totalPrintAreaM2,
-
                 ProcessType.BE => sheetsWithWaste,
                 ProcessType.BOI => sheetsWithWaste,
                 ProcessType.RALO => sheetsWithWaste,
-
                 ProcessType.DAN => productQuantity,
-                ProcessType.DOT => productQuantity,
-
                 ProcessType.DUT => 0,
                 ProcessType.CAT => 0,
                 _ => 0

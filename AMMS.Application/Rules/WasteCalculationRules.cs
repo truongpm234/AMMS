@@ -261,7 +261,7 @@ namespace AMMS.Application.Rules
         /// </summary>
         public static class LaminationRates
         {
-            public const decimal RATE_12MIC = 0.017m;  // 12 micron
+            public const decimal RATE_12MIC = 0.017m;
         }
     }
 
@@ -300,8 +300,8 @@ namespace AMMS.Application.Rules
     /// </summary>
     public static class SystemParameters
     {
-        // Khấu hao máy móc và chi phí khác (%)
-        public const decimal OVERHEAD_PERCENT = 5m;  // Giảm từ 10% xuống 5%
+        // Khấu hao máy móc
+        public const decimal OVERHEAD_PERCENT = 5m;
 
         // Số ngày làm việc dự kiến để hoàn thành đơn hàng
         public const int DEFAULT_PRODUCTION_DAYS = 5;
@@ -320,9 +320,5 @@ namespace AMMS.Application.Rules
                 _ => 0m
             };
         }
-
-        // Ngưỡng đơn hàng nhỏ (tờ)
-        //public const int SMALL_ORDER_THRESHOLD = 500;
-        //public const int FULL_WASTE_THRESHOLD = 2000;
     }
 }

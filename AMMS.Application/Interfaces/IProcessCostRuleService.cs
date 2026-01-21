@@ -1,4 +1,5 @@
-﻿using AMMS.Shared.DTOs.Enums;
+﻿using AMMS.Infrastructure.Entities;
+using AMMS.Shared.DTOs.Enums;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -10,6 +11,7 @@ namespace AMMS.Application.Interfaces
     public interface IProcessCostRuleService
     {
         Task<(decimal unitPrice, string unit, string note)> GetRateAsync(ProcessType p, CancellationToken ct = default);
+        Task<List<process_cost_rule>> GetAllAsync();
     }
 
 }

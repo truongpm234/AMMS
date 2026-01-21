@@ -172,5 +172,10 @@ namespace AMMS.Infrastructure.Repositories
 
             await _db.SaveChangesAsync(ct);
         }
+
+        public async Task<List<machine>> GetAllAsync()
+        {
+            return await _db.machines.ToListAsync();
+        }
     }
 }
