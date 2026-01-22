@@ -126,10 +126,6 @@ namespace AMMS.Application.Services
             // Dùng cho: Mực in, Keo phủ, Màng cán
             decimal totalPrintAreaM2 = printAreaM2 * req.paper.quantity;
 
-            // 3.3. (Tùy chọn) Diện tích TỜ GIẤY - Nếu cần cho keo bồi
-            // decimal sheetAreaM2 = (req.paper.sheet_width_mm / 1000m) * (req.paper.sheet_height_mm / 1000m);
-            // decimal totalSheetAreaM2 = sheetAreaM2 * req.paper.sheets_with_waste;SaveCostEstimate
-
             // =====================
             // 4. TÍNH CHI PHÍ GIẤY
             // =====================
@@ -673,7 +669,7 @@ namespace AMMS.Application.Services
                     unit_price = d.unit_price,
                     total_cost = d.total_cost,
                     note = d.note,
-                    created_at = now
+                    created_at = ToUnspecified(now)
                 });
             }
 
@@ -892,14 +888,10 @@ namespace AMMS.Application.Services
                 ProcessType.IN => totalPrintAreaM2,
                 ProcessType.PHU => totalPrintAreaM2,
                 ProcessType.CAN_MANG => totalPrintAreaM2,
-
                 ProcessType.BE => sheetsWithWaste,
                 ProcessType.BOI => sheetsWithWaste,
                 ProcessType.RALO => sheetsWithWaste,
-
                 ProcessType.DAN => productQuantity,
-                ProcessType.DOT => productQuantity,
-
                 ProcessType.DUT => 0,
                 ProcessType.CAT => 0,
                 _ => 0
@@ -1044,6 +1036,138 @@ namespace AMMS.Application.Services
         public async Task<bool> OrderRequestExistsAsync(int orderRequestId)
         {
             return await _estimateRepo.OrderRequestExistsAsync(orderRequestId);
+        }
+        public async Task SaveFeCostEstimateAsync(CostEstimateInsertRequest req, CancellationToken ct = default)
+        {
+            if (req.order_request_id <= 0)
+                throw new ArgumentException("order_request_id must be > 0");
+
+            // tìm cost_estimate hiện có
+            var entity = await _estimateRepo.GetByOrderRequestIdAsync(req.order_request_id);
+
+            bool isNew = false;
+            var now = DateTime.UtcNow;
+
+            if (entity == null)
+            {
+                isNew = true;
+                entity = new cost_estimate
+                {
+                    order_request_id = req.order_request_id,
+                    created_at = ToUnspecified(req.created_at ?? now),
+                };
+
+                await _estimateRepo.AddAsync(entity);
+            }
+
+            // helper set nếu có giá trị
+            static void SetIfHasValue<T>(T? value, Action<T> setter) where T : struct
+            {
+                if (value.HasValue) setter(value.Value);
+            }
+
+            static void SetIfNotNull(string? value, Action<string> setter)
+            {
+                if (value != null) setter(value);
+            }
+
+            // ----- PAPER -----
+            SetIfHasValue(req.paper_cost, v => entity.paper_cost = v);
+            SetIfHasValue(req.paper_sheets_used, v => entity.paper_sheets_used = v);
+            SetIfHasValue(req.paper_unit_price, v => entity.paper_unit_price = v);
+
+            // ----- INK -----
+            SetIfHasValue(req.ink_cost, v => entity.ink_cost = v);
+            SetIfHasValue(req.ink_weight_kg, v => entity.ink_weight_kg = v);
+            SetIfHasValue(req.ink_rate_per_m2, v => entity.ink_rate_per_m2 = v);
+
+            // ----- COATING GLUE -----
+            SetIfHasValue(req.coating_glue_cost, v => entity.coating_glue_cost = v);
+            SetIfHasValue(req.coating_glue_weight_kg, v => entity.coating_glue_weight_kg = v);
+            SetIfHasValue(req.coating_glue_rate_per_m2, v => entity.coating_glue_rate_per_m2 = v);
+            SetIfNotNull(req.coating_type, v => entity.coating_type = v);
+
+            // ----- MOUNTING GLUE -----
+            SetIfHasValue(req.mounting_glue_cost, v => entity.mounting_glue_cost = v);
+            SetIfHasValue(req.mounting_glue_weight_kg, v => entity.mounting_glue_weight_kg = v);
+            SetIfHasValue(req.mounting_glue_rate_per_m2, v => entity.mounting_glue_rate_per_m2 = v);
+
+            // ----- LAMINATION -----
+            SetIfHasValue(req.lamination_cost, v => entity.lamination_cost = v);
+            SetIfHasValue(req.lamination_weight_kg, v => entity.lamination_weight_kg = v);
+            SetIfHasValue(req.lamination_rate_per_m2, v => entity.lamination_rate_per_m2 = v);
+
+            // ----- MATERIAL / OVERHEAD -----
+            SetIfHasValue(req.material_cost, v => entity.material_cost = v);
+            SetIfHasValue(req.overhead_percent, v => entity.overhead_percent = v);
+            SetIfHasValue(req.overhead_cost, v => entity.overhead_cost = v);
+            SetIfHasValue(req.base_cost, v => entity.base_cost = v);
+
+            // ----- RUSH -----
+            if (req.is_rush.HasValue) entity.is_rush = req.is_rush.Value;
+            SetIfHasValue(req.rush_percent, v => entity.rush_percent = v);
+            SetIfHasValue(req.rush_amount, v => entity.rush_amount = v);
+            SetIfHasValue(req.days_early, v => entity.days_early = v);
+
+            // ----- SUBTOTAL / DISCOUNT / FINAL -----
+            SetIfHasValue(req.subtotal, v => entity.subtotal = v);
+            SetIfHasValue(req.discount_percent, v => entity.discount_percent = v);
+            SetIfHasValue(req.discount_amount, v => entity.discount_amount = v);
+            SetIfHasValue(req.final_total_cost, v => entity.final_total_cost = v);
+
+            // ----- DATES -----
+            if (req.estimated_finish_date.HasValue)
+                entity.estimated_finish_date = ToUnspecified(req.estimated_finish_date.Value);
+
+            if (req.desired_delivery_date.HasValue)
+                entity.desired_delivery_date = ToUnspecified(req.desired_delivery_date.Value);
+
+            if (req.created_at.HasValue)
+                entity.created_at = ToUnspecified(req.created_at.Value);
+            else if (isNew)
+                entity.created_at = ToUnspecified(now);
+
+            // ----- SHEETS / AREA -----
+            SetIfHasValue(req.sheets_required, v => entity.sheets_required = v);
+            SetIfHasValue(req.sheets_waste, v => entity.sheets_waste = v);
+            SetIfHasValue(req.sheets_total, v => entity.sheets_total = v);
+            SetIfHasValue(req.n_up, v => entity.n_up = v);
+            SetIfHasValue(req.total_area_m2, v => entity.total_area_m2 = v);
+
+            // ----- DESIGN -----
+            SetIfHasValue(req.design_cost, v => entity.design_cost = v);
+            SetIfNotNull(req.cost_note, v => entity.cost_note = v);
+
+            // ----- PROCESS COSTS -----
+            if (req.process_costs != null)
+            {
+                entity.process_costs.Clear();
+
+                foreach (var p in req.process_costs)
+                {
+                    // cho phép quantity / price null -> 0
+                    entity.process_costs.Add(new cost_estimate_process
+                    {
+                        process_code = p.process_code,
+                        process_name = p.process_name ?? p.process_code,
+                        quantity = p.quantity ?? 0m,
+                        unit = p.unit ?? "",
+                        unit_price = p.unit_price ?? 0m,
+                        total_cost = p.total_cost ?? 0m,
+                        note = p.note,
+                        created_at = ToUnspecified(now)
+                    });
+                }
+            }
+
+            await _estimateRepo.SaveChangesAsync();
+        }
+        public static DateTime ToUnspecified(DateTime dt)
+        {
+            if (dt.Kind == DateTimeKind.Unspecified)
+                return dt;
+
+            return DateTime.SpecifyKind(dt, DateTimeKind.Unspecified);
         }
     }
 }

@@ -29,5 +29,12 @@ namespace AMMS.API.Controllers
             var result = await _service.GetCapacityAsync();
             return Ok(result);
         }
+
+        [HttpGet("get-all-machines")]
+        public async Task<IActionResult> GetAllMachines()
+        {
+            var result = await _service.GetAllAsync();
+            return Ok(result);
+        }
     }
 }

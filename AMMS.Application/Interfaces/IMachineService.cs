@@ -1,4 +1,5 @@
-﻿using AMMS.Shared.DTOs.Estimates;
+﻿using AMMS.Infrastructure.Entities;
+using AMMS.Shared.DTOs.Estimates;
 using AMMS.Shared.DTOs.Machines;
 using System;
 using System.Collections.Generic;
@@ -12,5 +13,7 @@ namespace AMMS.Application.Interfaces
     {
         Task<List<FreeMachineDto>> GetFreeMachinesAsync();
         Task<MachineCapacityResponse> GetCapacityAsync();
+        Task<List<machine>> GetAllAsync();
+
     }
 }

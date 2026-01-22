@@ -1,4 +1,5 @@
 ﻿using AMMS.Infrastructure.DBContext;
+using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -33,6 +34,11 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             return (rule.unit_price, rule.unit, rule.note ?? "");
+        }
+
+        public async Task<List<process_cost_rule>> GetAllAsync()
+        {
+            return await _db.process_cost_rules.ToListAsync();
         }
     }
 }

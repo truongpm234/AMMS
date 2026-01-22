@@ -37,7 +37,7 @@ namespace AMMS.Application.Rules
                 }
 
                 // Tổng công suất hàng ngày của công đoạn
-                decimal totalDailyCapacity = processMachines.Sum(m => m.DailyCapacity);
+                decimal totalDailyCapacity = processMachines.Sum(m => m.daily_capacity);
 
                 if (totalDailyCapacity <= 0)
                 {
@@ -91,7 +91,7 @@ namespace AMMS.Application.Rules
                     continue;
                 }
 
-                decimal totalDailyCapacity = processMachines.Sum(m => m.DailyCapacity);
+                decimal totalDailyCapacity = processMachines.Sum(m => m.daily_capacity);
                 int requiredQty = GetRequiredQuantity(process, sheetsWithWaste, productQuantity);
 
                 double daysNeeded = totalDailyCapacity > 0 ? Math.Ceiling((double)requiredQty / (double)totalDailyCapacity) : 0;
@@ -135,7 +135,6 @@ namespace AMMS.Application.Rules
                 ProcessType.DUT => "Dứt",
                 ProcessType.RALO => "Ralo",
                 ProcessType.CAT => "Cắt",
-                ProcessType.DOT => "Đột",
                 _ => processType.ToString()
 
             };
@@ -157,13 +156,9 @@ namespace AMMS.Application.Rules
                 ProcessType.BOI => sheets,
                 ProcessType.BE => sheets,
                 ProcessType.RALO => sheets,
-                
-
-                // Các công đoạn xử lý SẢN PHẨM
                 ProcessType.DUT => products,
                 ProcessType.DAN => products,
                 ProcessType.CAT => products,
-                ProcessType.DOT => products,
                 // Mặc định
                 _ => sheets
             };

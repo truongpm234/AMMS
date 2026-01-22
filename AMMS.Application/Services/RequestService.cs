@@ -128,7 +128,7 @@ namespace AMMS.Application.Services
             entity.print_height_mm = req.print_height_mm ?? entity.print_height_mm;
             entity.is_send_design = req.is_send_design ?? entity.is_send_design;
             entity.production_processes = req.production_processes ?? entity.production_processes;
-            entity.process_status = "Verified";
+            entity.process_status = "Pending";
 
             await _requestRepo.UpdateAsync(entity);
             await _requestRepo.SaveChangesAsync();
@@ -143,16 +143,14 @@ namespace AMMS.Application.Services
         }
 
 
-        public async Task CancelAsync(int id, CancellationToken ct = default)
+        public async Task CancelAsync(int id, string? reason, CancellationToken ct = default)
         {
-            // optional: check exists
             var entity = await _requestRepo.GetByIdAsync(id);
             if (entity == null) return;
-
-            // optional business rule
+           
             if (entity.order_id != null)
                 throw new InvalidOperationException("This request is already linked to an order, cannot cancel.");
-
+            entity.reason = reason;
             await _requestRepo.CancelAsync(id, ct);
             await _requestRepo.SaveChangesAsync();
         }
@@ -449,9 +447,8 @@ namespace AMMS.Application.Services
                         status = "Scheduled",
                         product_type_id = productTypeId,
 
-                        manager_id = managerId,                 // ✅ set
-                        start_date = now,                       // ✅ set
-                        end_date = newOrder.delivery_date       // ✅ hoặc null tuỳ bạn
+                        manager_id = managerId,
+                        start_date = now
                     };
 
                     await _db.productions.AddAsync(prod);

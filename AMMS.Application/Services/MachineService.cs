@@ -1,4 +1,5 @@
 ﻿using AMMS.Application.Interfaces;
+using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Estimates;
 using AMMS.Shared.DTOs.Machines;
@@ -33,6 +34,11 @@ namespace AMMS.Application.Services
                 ActiveMachines = active,
                 RunningMachines = running
             };
+        }
+
+        public async Task<List<machine>> GetAllAsync()
+        {
+            return await _repo.GetAllAsync();
         }
     }
 }

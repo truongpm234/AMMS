@@ -22,7 +22,6 @@ namespace AMMS.Application.Rules
                 ProcessType.BE => (150m, "sheet", "Công bế theo tờ"),
                 ProcessType.DUT => (0m, "sheet", "Tính chung với bế"),
                 ProcessType.DAN => (300m, "box", "Công dán theo hộp"),
-                ProcessType.DOT => (0m, "box", "Chưa cấu hình giá"),
                 _ => (0m, "unit", "Chưa cấu hình")
             };
         }
