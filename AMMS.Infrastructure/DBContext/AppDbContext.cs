@@ -583,6 +583,7 @@ public partial class AppDbContext : DbContext
                 .HasPrecision(18, 2);
             entity.Property(e => e.total_cost)
                 .HasPrecision(18, 2);
+            entity.Property(e => e.created_at).HasColumnType("timestamp without time zone");
         });
 
         modelBuilder.Entity<process_cost_rule>(entity =>

@@ -78,12 +78,28 @@ namespace AMMS.API.Controllers
 
             return Ok(result);
         }
+
         [HttpGet("base-config")]
         [ProducesResponseType(typeof(EstimateBaseConfigDto), StatusCodes.Status200OK)]
         public IActionResult GetBaseConfig()
         {
             var cfg = EstimateConfigBuilder.Build();
             return Ok(cfg);
+        }
+
+        [HttpPost("cost-save")]
+        public async Task<IActionResult> SaveFeCost([FromBody] CostEstimateInsertRequest req, CancellationToken ct)
+        {
+            if (req.order_request_id <= 0)
+                return BadRequest(new { message = "order_request_id is required and must be greater than 0" });
+
+            var exists = await _service.OrderRequestExistsAsync(req.order_request_id);
+            if (!exists)
+                return NotFound(new { message = $"Order request with id {req.order_request_id} not found" });
+
+            await _service.SaveFeCostEstimateAsync(req, ct);
+
+            return NoContent();
         }
     }
 }

@@ -128,7 +128,7 @@ namespace AMMS.Application.Services
             entity.print_height_mm = req.print_height_mm ?? entity.print_height_mm;
             entity.is_send_design = req.is_send_design ?? entity.is_send_design;
             entity.production_processes = req.production_processes ?? entity.production_processes;
-            entity.process_status = "Verified";
+            entity.process_status = "Pending";
 
             await _requestRepo.UpdateAsync(entity);
             await _requestRepo.SaveChangesAsync();

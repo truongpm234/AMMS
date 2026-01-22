@@ -20,5 +20,6 @@ namespace AMMS.Application.Interfaces
         Task<ProcessCostBreakdownResponse> CalculateProcessCostBreakdownAsync(CostEstimateRequest req);
         Task<DepositByRequestResponse?> GetDepositByRequestIdAsync(int requestId, CancellationToken ct = default);
         Task<bool> OrderRequestExistsAsync(int order_request_id);
+        Task SaveFeCostEstimateAsync(CostEstimateInsertRequest req, CancellationToken ct = default);
     }
 }
