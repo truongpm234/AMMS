@@ -112,7 +112,7 @@ namespace AMMS.Application.Services
             var req = await _requestRepo.GetByIdAsync(orderRequestId)
                       ?? throw new InvalidOperationException("Order request not found");
 
-            var est = await _estimateRepo.GetByIdAsync(orderRequestId)
+            var est = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId)
                       ?? throw new InvalidOperationException("Cost estimate not found");
 
             var expiredAt = est.created_at.AddHours(24);
