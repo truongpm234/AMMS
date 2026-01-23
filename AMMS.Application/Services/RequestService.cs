@@ -487,9 +487,10 @@ namespace AMMS.Application.Services
                 }
             });
         }
-
-
-
+        public async Task<RequestDetailDto?> GetInformationRequestById(int requestId, CancellationToken ct = default)
+        {
+            return await _requestRepo.GetInformationRequestById(requestId, ct);
+        }
 
         public Task<PagedResultLite<RequestSortedDto>> GetSortedByQuantityPagedAsync(
             bool ascending, int page, int pageSize, CancellationToken ct = default)

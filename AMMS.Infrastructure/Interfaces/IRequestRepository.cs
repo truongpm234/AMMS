@@ -35,6 +35,6 @@ namespace AMMS.Infrastructure.Interfaces
         Task<string?> GetDesignFilePathAsync(int orderRequestId, CancellationToken ct = default);
         Task<PagedResultLite<RequestSortedDto>> GetRequestsByPhonePagedAsync(
     string phone, int page, int pageSize, CancellationToken ct = default);
-
+        Task<RequestDetailDto?> GetInformationRequestById(int requestId, CancellationToken ct = default);
     }
 }

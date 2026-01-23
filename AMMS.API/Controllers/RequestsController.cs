@@ -410,5 +410,13 @@ namespace AMMS.API.Controllers
             }
         }
 
+        [HttpGet("full-data-by-request_id/{request_id:int}")]
+        public async Task<IActionResult> GetFullDataByRequestId(int request_id, CancellationToken ct)
+        {
+            var result = await _service.GetInformationRequestById(request_id, ct);
+            if (result == null)
+                return NotFound(new { message = "Order request not found" });
+            return Ok(result);
+        }
     }
 }
