@@ -531,5 +531,48 @@ namespace AMMS.Infrastructure.Repositories
                 .Select(x => x.design_file_path)
                 .FirstOrDefaultAsync(ct);
         }
+        public async Task<PagedResultLite<RequestSortedDto>> GetRequestsByPhonePagedAsync(
+    string phone, int page, int pageSize, CancellationToken ct = default)
+        {
+            if (page <= 0) page = 1;
+            if (pageSize <= 0) pageSize = 10;
+
+            var skip = (page - 1) * pageSize;
+            phone = phone.Trim();
+
+            var query = _db.order_requests
+                .AsNoTracking()
+                .Where(r => r.customer_phone == phone)
+                .OrderByDescending(r => r.order_request_date)   
+                .ThenByDescending(r => r.order_request_id);
+
+            var list = await query
+                .Skip(skip)
+                .Take(pageSize + 1)
+                .Select(o => new RequestSortedDto(
+                    o.order_request_id,
+                    o.customer_name ?? "",
+                    o.customer_phone ?? "",
+                    o.customer_email,
+                    o.delivery_date,
+                    o.product_name ?? "",
+                    o.quantity ?? 0,
+                    o.process_status,
+                    o.order_request_date
+                ))
+                .ToListAsync(ct);
+
+            var hasNext = list.Count > pageSize;
+            if (hasNext) list = list.Take(pageSize).ToList();
+
+            return new PagedResultLite<RequestSortedDto>
+            {
+                Page = page,
+                PageSize = pageSize,
+                HasNext = hasNext,
+                Data = list
+            };
+        }
+
     }
 }

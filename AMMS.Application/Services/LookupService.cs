@@ -2,6 +2,7 @@
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Orders;
+using AMMS.Shared.DTOs.Requests;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -10,12 +11,12 @@ using System.Threading.Tasks;
 
 namespace AMMS.Application.Services
 {
-    public class OrderLookupService : IOrderLookupService
+    public class LookupService : ILookupService
     {
         private readonly IRequestRepository _requestRepo;
         private readonly IEmailService _emailService;
 
-        public OrderLookupService(
+        public LookupService(
             IRequestRepository requestRepo,
             IEmailService emailService)
         {
@@ -63,6 +64,25 @@ namespace AMMS.Application.Services
 
             // 3) Lấy lịch sử đơn hàng
             return await _requestRepo.GetOrdersByPhonePagedAsync(phone, page, pageSize, ct);
+        }
+        public async Task<PagedResultLite<RequestSortedDto>> GetRequestsByPhoneWithOtpAsync(string phone, string otp, int page, int pageSize, CancellationToken ct = default)
+        {
+            if (string.IsNullOrWhiteSpace(phone))
+                throw new ArgumentException("phone is required");
+            if (string.IsNullOrWhiteSpace(otp))
+                throw new ArgumentException("otp is required");
+
+            phone = phone.Trim();
+
+            var email = await _requestRepo.GetEmailByPhoneAsync(phone, ct);
+            if (email == null)
+                throw new InvalidOperationException("Không tìm thấy email nào gắn với số điện thoại này.");
+
+            var ok = await _emailService.VerifyOtpAsync(email, otp);
+            if (!ok)
+                throw new InvalidOperationException("OTP không hợp lệ hoặc đã hết hạn.");
+
+            return await _requestRepo.GetRequestsByPhonePagedAsync(phone, page, pageSize, ct);
         }
     }
 }

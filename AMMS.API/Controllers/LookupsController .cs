@@ -1,5 +1,6 @@
 ﻿using AMMS.Application.Interfaces;
 using AMMS.Shared.DTOs.Orders;
+using AMMS.Shared.DTOs.Requests;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
@@ -7,11 +8,11 @@ namespace AMMS.API.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
-    public class PublicOrdersController : ControllerBase
+    public class LookupsController : ControllerBase
     {
-        private readonly IOrderLookupService _lookupService;
+        private readonly ILookupService _lookupService;
 
-        public PublicOrdersController(IOrderLookupService lookupService)
+        public LookupsController(ILookupService lookupService)
         {
             _lookupService = lookupService;
         }
@@ -36,12 +37,32 @@ namespace AMMS.API.Controllers
         /// <summary>
         /// Verify OTP và trả về lịch sử đơn hàng (phân trang)
         /// </summary>
-        [HttpPost("history")]
+        [HttpPost("order-history")]
         public async Task<IActionResult> GetHistory([FromBody] OrderLookupWithOtpRequest req, CancellationToken ct)
         {
             try
             {
                 var result = await _lookupService.GetOrdersByPhoneWithOtpAsync(req.Phone, req.Otp, req.Page, req.PageSize, ct);
+                return Ok(result);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+        }
+
+        [HttpPost("request-history")]
+        public async Task<IActionResult> GetRequestHistory([FromBody] RequestLookupWithOtpRequest req, CancellationToken ct)
+        {
+            try
+            {
+                var result = await _lookupService.GetRequestsByPhoneWithOtpAsync(
+                    req.Phone,
+                    req.Otp,
+                    req.Page,
+                    req.PageSize,
+                    ct);
+
                 return Ok(result);
             }
             catch (Exception ex)

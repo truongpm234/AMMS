@@ -7,14 +7,14 @@ using System.Threading.Tasks;
 namespace AMMS.Shared.DTOs.Requests
 {
     public record RequestSortedDto(
-    int OrderRequestId,
-    string CustomerName,
-    string CustomerPhone,
-    string? CustomerEmail,
-    DateTime? DeliveryDate,
-    string ProductName,
-    int Quantity,
-    string? ProcessStatus,
-    DateTime? OrderRequestDate
+    int request_id,
+    string customer_name,
+    string phone,
+    string? email,
+    DateTime? delivery_date,
+    string product_name,
+    int quantity,
+    string? status,
+    DateTime? request_date
 );
 }

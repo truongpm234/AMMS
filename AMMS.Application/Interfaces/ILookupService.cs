@@ -1,5 +1,6 @@
 ﻿using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Orders;
+using AMMS.Shared.DTOs.Requests;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -8,7 +9,7 @@ using System.Threading.Tasks;
 
 namespace AMMS.Application.Interfaces
 {
-    public interface IOrderLookupService
+    public interface ILookupService
     {
         /// <summary>
         /// Gửi OTP tới email tương ứng với số điện thoại.
@@ -24,5 +25,11 @@ namespace AMMS.Application.Interfaces
             int page,
             int pageSize,
             CancellationToken ct = default);
+        Task<PagedResultLite<RequestSortedDto>> GetRequestsByPhoneWithOtpAsync(
+        string phone,
+        string otp,
+        int page,
+        int pageSize,
+        CancellationToken ct = default);
     }
 }

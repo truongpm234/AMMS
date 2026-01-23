@@ -169,7 +169,7 @@ builder.Services.AddScoped<ISupplierRepository, SupplierRepository>();
 builder.Services.AddScoped<ISupplierService, SupplierService>();
 builder.Services.AddScoped<IPurchaseRepository, PurchaseRepository>();
 builder.Services.AddScoped<IPurchaseService, PurchaseService>();
-builder.Services.AddScoped<IOrderLookupService, OrderLookupService>();
+builder.Services.AddScoped<ILookupService, LookupService>();
 builder.Services.AddScoped<IProductTypeProcessRepository, ProductTypeProcessRepository>();
 builder.Services.AddScoped<ITaskRepository, TaskRepository>();
 builder.Services.AddScoped<ITaskLogRepository, TaskLogRepository>();
