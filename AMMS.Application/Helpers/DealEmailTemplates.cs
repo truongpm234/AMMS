@@ -8,186 +8,211 @@ namespace AMMS.Application.Helpers
     {
         private static string VND(decimal v)
             => string.Format(new CultureInfo("vi-VN"), "{0:N0} ₫", v);
-
-        public static string QuoteEmail(order_request req, cost_estimate est, decimal deposit,
-    string acceptUrl, string rejectUrl)
+        private static string MapProcessCode(string code) => code.Trim().ToUpperInvariant() switch
         {
-            var address = $"{req.detail_address}";
-            var delivery = req.delivery_date?.ToString("dd/MM/yyyy") ?? "N/A";
+            "IN" => "In",
+            "RALO" => "Ra lô",
+            "CAT" => "Cắt",
+            "CAN_MANG" => "Cán",
+            "BOI" => "Bồi",
+            "PHU" => "Phủ",
+            "DUT" => "Dứt",
+            "DAN" => "Dán",
+            "BE" => "Bế",
+            _ => code
+        };
+        private static string BuildProductionProcessText(order_request req, cost_estimate est)
+        {
+            var codes = new List<string>();
 
-            return $@"
-<html>
-  <body style='font-family: Arial, Helvetica, sans-serif;'>
-    <h2 style='margin-top:0;'>Báo giá đơn hàng in ấn</h2>
+            if (!string.IsNullOrWhiteSpace(req.production_processes))
+            {
+                codes = req.production_processes
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .ToList();
+            }
+            else if (est.process_costs is { Count: > 0 })
+            {
+                codes = est.process_costs
+                    .Select(p => p.process_code)
+                    .Where(c => !string.IsNullOrWhiteSpace(c))
+                    .Distinct()
+                    .ToList();
+            }
 
-    <h3>Thông tin người đặt</h3>
-    <table style='border-collapse:collapse;width:100%;margin-bottom:12px;'>
-      <tr>
-        <td style='border:1px solid transparent;padding:4px 8px;width:30%;'><b>Tên</b></td>
-        <td style='border:1px solid transparent;padding:4px 8px;'>{req.customer_name}</td>
-      </tr>
-      <tr>
-        <td style='border:1px solid transparent;padding:4px 8px;'><b>SĐT</b></td>
-        <td style='border:1px solid transparent;padding:4px 8px;'>{req.customer_phone}</td>
-      </tr>
-      <tr>
-        <td style='border:1px solid transparent;padding:4px 8px;'><b>Email</b></td>
-        <td style='border:1px solid transparent;padding:4px 8px;'>{req.customer_email}</td>
-      </tr>
-      <tr>
-        <td style='border:1px solid transparent;padding:4px 8px;'><b>Địa chỉ</b></td>
-        <td style='border:1px solid transparent;padding:4px 8px;'>{address}</td>
-      </tr>
-    </table>
+            if (codes.Count == 0)
+                return "Không có / Không áp dụng";
 
-    <h3>Thông tin giao hàng</h3>
-    <table style='border-collapse:collapse;width:100%;margin-bottom:12px;'>
-      <tr>
-        <td style='border:1px solid transparent;padding:4px 8px;width:30%;'><b>Địa chỉ giao</b></td>
-        <td style='border:1px solid transparent;padding:4px 8px;'>{address}</td>
-      </tr>
-      <tr>
-        <td style='border:1px solid transparent;padding:4px 8px;'><b>Ngày giao dự kiến</b></td>
-        <td style='border:1px solid transparent;padding:4px 8px;'>{delivery}</td>
-      </tr>
-    </table>
-
-    <h3>Thông tin đơn hàng</h3>
-    <table style='border-collapse:collapse;width:100%;margin-bottom:16px;'>
-      <tr>
-        <td style='border:1px solid transparent;padding:4px 8px;width:30%;'><b>Sản phẩm</b></td>
-        <td style='border:1px solid transparent;padding:4px 8px;'>{req.product_name}</td>
-      </tr>
-      <tr>
-        <td style='border:1px solid transparent;padding:4px 8px;'><b>Số lượng</b></td>
-        <td style='border:1px solid transparent;padding:4px 8px;'>{req.quantity}</td>
-      </tr>
-      <tr>
-        <td style='border:1px solid transparent;padding:4px 8px;'><b>Tổng giá trị đơn hàng</b></td>
-        <td style='border:1px solid transparent;padding:4px 8px;'>{est.final_total_cost:n0} VND</td>
-      </tr>
-      <tr>
-        <td style='border:1px solid transparent;padding:4px 8px;'><b>Số tiền đặt cọc</b></td>
-        <td style='border:1px solid transparent;padding:4px 8px;'>{deposit:n0} VND</td>
-      </tr>
-    </table>
-
-    <p style='margin:16px 0;'>
-      <a href='{acceptUrl}'
-         style='padding:10px 16px;background:#16a34a;color:white;text-decoration:none;border-radius:6px;display:inline-block;'>
-        Đồng ý &amp; Thanh toán cọc
-      </a>
-      &nbsp;
-      <a href='{rejectUrl}'
-         style='padding:10px 16px;background:#dc2626;color:white;text-decoration:none;border-radius:6px;display:inline-block;'>
-        Từ chối báo giá
-      </a>
-    </p>
-
-    <p style='color:#666;font-size:12px;margin-top:16px;'>
-      Nếu bạn không thực hiện yêu cầu này, vui lòng bỏ qua email.
-    </p>
-  </body>
-</html>";
+            return string.Join(", ", codes.Select(MapProcessCode));
         }
 
-        public static string QuoteEmailNeedDesign(
-            order_request req,
-            cost_estimate est,
-            decimal deposit,
-            string acceptUrl,
-            string rejectUrl,
-            string orderDetailUrl)
-        {
+        /// <summary>
+        /// Email báo giá: dùng 1 form duy nhất.
+        /// </summary>
+        public static string QuoteEmail(order_request req, cost_estimate est, string orderDetailUrl)
+        {           
+            var address = $"{req.detail_address}";
             var delivery = req.delivery_date?.ToString("dd/MM/yyyy") ?? "N/A";
-            var finalTotal = est.final_total_cost;
+            var requestDate = req.order_request_date?.ToString("dd/MM/yyyy HH:mm") ?? "N/A";
+            var productName = req.product_name ?? "";
+            var quantity = req.quantity ?? 0;
+            var paperName = string.IsNullOrWhiteSpace(req.paper_name) ? "N/A" : req.paper_name;
+            var designType = req.is_send_design == true ? "Tự gửi file thiết kế" : "Sử dụng bản thiết kế của doanh nghiệp";
+            var materialCost = est.paper_cost + est.ink_cost;
+            var laborCost = est.process_costs != null
+                ? est.process_costs
+                    .Where(p => p.estimate_id == est.estimate_id)
+                    .Sum(p => p.total_cost)
+                : 0m;
+            var otherFees = est.design_cost + est.overhead_cost;                      
+            var rushAmount = est.rush_amount;
+            var subtotal = est.subtotal;                                              
+            var finalTotal = est.final_total_cost;                                    
+            var discountPercent = est.discount_percent;
+            var discountAmount = est.discount_amount;
+            var deposit = est.deposit_amount;                                         
+            var productionProcessText = BuildProductionProcessText(req, est);
+            var expiredAt = est.created_at.AddHours(24);
+            var expiredAtText = expiredAt.ToString("dd/MM/yyyy HH:mm");
 
             return $@"
 <div style='font-family:Arial,Helvetica,sans-serif;max-width:720px;margin:24px auto;color:#111;line-height:1.6'>
   <h2 style='margin-top:0'>BÁO GIÁ ĐƠN HÀNG IN ẤN</h2>
 
   <p>Chào {req.customer_name},</p>
-  <p>Chúng tôi gửi đến bạn báo giá cho đơn hàng <b>{req.product_name}</b> với các thông tin như sau:</p>
+  <p>Chúng tôi gửi đến bạn báo giá cho đơn hàng <b>{productName}</b> với các thông tin như sau:</p>
 
-  <h3>Thông tin đơn hàng</h3>
+  <h3>Thông tin yêu cầu</h3>
   <table style='border-collapse:collapse;width:100%;margin-bottom:12px;'>
     <tr>
       <td style='border:1px solid transparent;padding:4px 8px;width:30%;'><b>Mã yêu cầu</b></td>
       <td style='border:1px solid transparent;padding:4px 8px;'>AM{req.order_request_id:D6}</td>
     </tr>
     <tr>
-      <td style='border:1px solid transparent;padding:4px 8px;'><b>Sản phẩm</b></td>
-      <td style='border:1px solid transparent;padding:4px 8px;'>{req.product_name}</td>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Ngày yêu cầu</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{requestDate}</td>
+    </tr>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Người yêu cầu</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{req.customer_name}</td>
+    </tr>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>SĐT</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{req.customer_phone}</td>
+    </tr>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Email</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{req.customer_email}</td>
+    </tr>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Địa chỉ</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{address}</td>
+    </tr>
+  </table>
+
+  <h3>Thông tin đơn hàng</h3>
+  <table style='border-collapse:collapse;width:100%;margin-bottom:12px;'>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;width:30%;'><b>Sản phẩm</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{productName}</td>
     </tr>
     <tr>
       <td style='border:1px solid transparent;padding:4px 8px;'><b>Số lượng</b></td>
-      <td style='border:1px solid transparent;padding:4px 8px;'>{req.quantity}</td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{quantity}</td>
     </tr>
     <tr>
       <td style='border:1px solid transparent;padding:4px 8px;'><b>Ngày giao dự kiến</b></td>
       <td style='border:1px solid transparent;padding:4px 8px;'>{delivery}</td>
     </tr>
-  </table>
-
-  <h3>Thông tin báo giá</h3>
-  <table style='border-collapse:collapse;width:100%;margin-bottom:16px;'>
     <tr>
-      <td style='border:1px solid transparent;padding:4px 8px;width:30%;'><b>Tổng giá trị</b></td>
-      <td style='border:1px solid transparent;padding:4px 8px;'>{finalTotal:n0} VND</td>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Hình thức thiết kế</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{designType}</td>
     </tr>
     <tr>
-      <td style='border:1px solid transparent;padding:4px 8px;'><b>Tiền cọc (dự kiến thu)</b></td>
-      <td style='border:1px solid transparent;padding:4px 8px;'>{deposit:n0} VND</td>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Giấy sử dụng</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{paperName}</td>
+    </tr>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Công đoạn sản xuất</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{productionProcessText}</td>
+    </tr>
+  </table>
+
+  <h3>Chi tiết chi phí</h3>
+  <table style='border-collapse:collapse;width:100%;margin-bottom:16px;'>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;width:40%;'><b>Tiền nguyên vật liệu</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{VND(materialCost)}</td>
+    </tr>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Tiền công</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{VND(laborCost)}</td>
+    </tr>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Các phí khác</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{VND(otherFees)}</td>
+    </tr>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Phụ thu giao gấp</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{VND(rushAmount)}</td>
+    </tr>
+  </table>
+
+  <h3>Tổng quan báo giá</h3>
+  <table style='border-collapse:collapse;width:100%;margin-bottom:16px;'>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;width:40%;'><b>Giá tổng ban đầu</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>{VND(subtotal)}</td>
+    </tr>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Giảm giá</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'>
+        {discountPercent:N2}% &nbsp; ( - {VND(discountAmount)} )
+      </td>
+    </tr>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Giá sau giảm</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>{VND(finalTotal)}</b></td>
+    </tr>
+    <tr>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>Số tiền đặt cọc</b></td>
+      <td style='border:1px solid transparent;padding:4px 8px;'><b>{VND(deposit)}</b></td>
     </tr>
   </table>
 
   <p style='margin:16px 0'>
-    Vì bạn chọn phương án <b>Tự gửi file thiết kế</b>, vui lòng nhấn vào liên kết dưới đây để
-    xem chi tiết đơn hàng và tải lên/cập nhật file thiết kế:
+    Bạn có thể vào trang chi tiết đơn hàng để xem đầy đủ thông tin, gửi/ cập nhật file thiết kế
+    và thanh toán tiền cọc trực tiếp tại đó:
   </p>
 
   <p style='text-align:center;margin:18px 0'>
     <a href='{orderDetailUrl}'
        style='display:inline-block;padding:10px 18px;border-radius:6px;
               background:#2563eb;color:#ffffff;text-decoration:none;font-weight:600'>
-      Xem chi tiết đơn hàng &amp; gửi thiết kế
+      Xem chi tiết đơn hàng
     </a>
   </p>
 
-  <p style='margin:18px 0'>
-    Sau khi xem chi tiết và thống nhất, bạn có thể:
+  <div style='margin-top:18px;padding:12px 14px;border-radius:8px;background:#fef3c7;color:#92400e;font-size:13px;'>
+    <b>Lưu ý quan trọng:</b><br/>
+    Đơn báo giá chỉ có hiệu lực trong vòng <b>24 giờ</b> kể từ thời điểm gửi email
+    (đến khoảng <b>{expiredAtText}</b>). Sau thời gian này, các thông tin về giá có thể thay đổi
+    và email này sẽ không còn giá trị.
+  </div>
+
+  <p style='margin-top:18px;font-size:13px;color:#6b7280'>
+    Nếu bạn không thực hiện yêu cầu báo giá này, vui lòng bỏ qua email.
   </p>
-
-  <table style='border-collapse:collapse;width:100%;margin-bottom:8px;'>
-    <tr>
-      <td style='border:1px solid transparent;padding:4px 8px;width:30%;vertical-align:top;'><b>Đồng ý báo giá</b></td>
-      <td style='border:1px solid transparent;padding:4px 8px;'>
-        <a href='{acceptUrl}' style='color:#16a34a;font-weight:600;text-decoration:none;'>
-          Nhấn vào đây để đồng ý &amp; thanh toán tiền cọc
-        </a>
-      </td>
-    </tr>
-    <tr>
-      <td style='border:1px solid transparent;padding:4px 8px;vertical-align:top;'><b>Từ chối báo giá</b></td>
-      <td style='border:1px solid transparent;padding:4px 8px;'>
-        <a href='{rejectUrl}' style='color:#dc2626;text-decoration:none;'>
-          Nhấn vào đây để từ chối báo giá
-        </a>
-      </td>
-    </tr>
-  </table>
-
-  <p>Nếu bạn có bất kỳ thắc mắc nào, hãy phản hồi lại email này để được hỗ trợ.</p>
 
   <p>Trân trọng,<br/>Đội ngũ AMMS</p>
 </div>";
         }
 
         public static string AcceptCustomerEmail(
-            order_request req,
-            order order,
-            cost_estimate est,
-            string trackingUrl)
+    order_request req,
+    order order,
+    cost_estimate est,
+    string trackingUrl)
         {
             return $@"
 <div style='font-family:Arial,Helvetica,sans-serif;max-width:720px;margin:24px auto;line-height:1.6'>

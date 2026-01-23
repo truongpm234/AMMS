@@ -185,10 +185,10 @@ namespace AMMS.API.Controllers
 
 
         [HttpGet("payos/return")]
-        public async Task<IActionResult> PayOsReturn([FromQuery] int orderRequestId, [FromQuery] long orderCode, [FromServices] IPaymentRepository paymentRepo, CancellationToken ct)
+        public async Task<IActionResult> PayOsReturn([FromQuery] int request_id, [FromQuery] long order_code, [FromServices] IPaymentRepository paymentRepo, CancellationToken ct)
         {
             var info = await HttpContext.RequestServices.GetRequiredService<IPayOsService>()
-                    .GetPaymentLinkInformationAsync(orderCode, ct);
+                    .GetPaymentLinkInformationAsync(order_code, ct);
 
             var isPaid =
                 string.Equals(info?.status, "PAID", StringComparison.OrdinalIgnoreCase) ||
@@ -198,8 +198,8 @@ namespace AMMS.API.Controllers
             {
                 var amount = info?.amount ?? 0;
                 await ProcessPaidAsync(
-                    orderRequestId,
-                    orderCode,
+                    request_id,
+                    order_code,
                     amount,
                     info?.paymentLinkId,
                     info?.transactionId,
@@ -209,7 +209,7 @@ namespace AMMS.API.Controllers
             }
 
             var fe = "https://sep490-fe.vercel.app";
-            return Redirect($"{fe}/order-detail/{orderRequestId}");
+            return Redirect($"{fe}/request-detail/{request_id}");
         }
 
         [HttpGet("payos/cancel")]
@@ -284,15 +284,7 @@ namespace AMMS.API.Controllers
 
             return Ok(result);
         }
-        private async Task<(bool ok, string message)> ProcessPaidAsync(
-    int orderRequestId,
-    long orderCode,
-    long amount,
-    string? paymentLinkId,
-    string? transactionId,
-    string rawJson,
-    IPaymentRepository paymentRepo,
-    CancellationToken ct)
+        private async Task<(bool ok, string message)> ProcessPaidAsync(int orderRequestId, long orderCode, long amount, string? paymentLinkId, string? transactionId, string rawJson, IPaymentRepository paymentRepo, CancellationToken ct)
         {
             // FK check
             var existsOrderRequest = await _db.order_requests
@@ -301,6 +293,20 @@ namespace AMMS.API.Controllers
 
             if (!existsOrderRequest)
                 return (false, $"order_request_id={orderRequestId} not found");
+            var est = await _db.cost_estimates
+        .AsNoTracking()
+        .Where(x => x.order_request_id == orderRequestId)
+        .OrderByDescending(x => x.created_at)
+        .FirstOrDefaultAsync(ct);
+
+            if (est == null)
+                return (false, "Cost estimate not found for this request");
+
+            var expiredAt = est.created_at.AddHours(24);
+            if (DateTime.UtcNow > expiredAt.ToUniversalTime())
+            {
+                return (false, $"Quote expired at {expiredAt:o}, ignore payment.");
+            }
 
             var existedPaid = await _paymentService.GetPaidByProviderOrderCodeAsync("PAYOS", orderCode, ct);
             if (existedPaid != null)
@@ -340,7 +346,6 @@ namespace AMMS.API.Controllers
                 if (!convert.Success)
                     return (false, "ConvertToOrder failed: " + convert.Message);
 
-                // ✅ Auto schedule production
                 try
                 {
                     var item = await _db.order_items
@@ -390,5 +395,20 @@ namespace AMMS.API.Controllers
             catch { }
             return (true, "Processed paid OK");
         }
+
+        [HttpGet("payos-deposit/{request_id:int}")]
+        public async Task<IActionResult> GetPayOsDeposit(int request_id, CancellationToken ct)
+        {
+            try
+            {
+                var info = await _dealService.PrepareDepositPaymentAsync(request_id, ct);
+                return Ok(info);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+        }
+
     }
 }

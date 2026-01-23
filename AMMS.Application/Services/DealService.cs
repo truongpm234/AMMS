@@ -2,6 +2,7 @@
 using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
+using AMMS.Shared.DTOs.PayOS;
 using Microsoft.Extensions.Configuration;
 
 namespace AMMS.Application.Services
@@ -59,40 +60,13 @@ namespace AMMS.Application.Services
 
             req.quote_id = quote.quote_id;
             req.process_status = "Waiting";
+
             await _requestRepo.SaveChangesAsync();
 
-            var baseUrl = _config["Deal:BaseUrl"]!;
-            var token = Guid.NewGuid().ToString("N");
             var baseUrlFe = _config["Deal:BaseUrlFe"]!;
-
-            var acceptUrl = $"{baseUrl}/api/requests/accept-pay?orderRequestId={orderRequestId}&token={token}";
-            var rejectUrl = $"{baseUrl}/api/requests/reject-form?orderRequestId={orderRequestId}&token={token}";
-
             var orderDetailUrl = $"{baseUrlFe}/order-detail/{orderRequestId}";
-            var hasDesignFile = !string.IsNullOrWhiteSpace(req.design_file_path);
-            var customerWillSendDesign = (req.is_send_design ?? false) || !hasDesignFile;
 
-            string html;
-
-            if (customerWillSendDesign)
-            {
-                html = DealEmailTemplates.QuoteEmailNeedDesign(
-                    req,
-                    est,
-                    deposit,
-                    acceptUrl,
-                    rejectUrl,
-                    orderDetailUrl);
-            }
-            else
-            {
-                html = DealEmailTemplates.QuoteEmail(
-                    req,
-                    est,
-                    deposit,
-                    acceptUrl,
-                    rejectUrl);
-            }
+            var html = DealEmailTemplates.QuoteEmail(req, est, orderDetailUrl);
 
             await _emailService.SendAsync(req.customer_email, "Báo giá đơn hàng in ấn", html);
         }
@@ -112,12 +86,10 @@ namespace AMMS.Application.Services
 
             var description = $"AM{orderRequestId:D6}";
 
-            // orderCode unique (int)
             var orderCode = (req.quote_id ?? orderRequestId) * 100000 + orderRequestId;
 
             var baseUrl = _config["Deal:BaseUrl"]!;
 
-            // ✅ return/cancel về RequestsController (GET)
             var returnUrl = $"{baseUrl}/api/requests/payos/return?orderRequestId={orderRequestId}&orderCode={orderCode}";
             var cancelUrl = $"{baseUrl}/api/requests/payos/cancel?orderRequestId={orderRequestId}&orderCode={orderCode}";
 
@@ -135,6 +107,50 @@ namespace AMMS.Application.Services
             return checkoutUrl;
         }
 
+        public async Task<PayOsDepositInfoDto> PrepareDepositPaymentAsync(int orderRequestId, CancellationToken ct = default)
+        {
+            var req = await _requestRepo.GetByIdAsync(orderRequestId)
+                      ?? throw new InvalidOperationException("Order request not found");
+
+            var est = await _estimateRepo.GetByIdAsync(orderRequestId)
+                      ?? throw new InvalidOperationException("Cost estimate not found");
+
+            var expiredAt = est.created_at.AddHours(24);
+            if (DateTime.UtcNow > expiredAt.ToUniversalTime())
+            {
+                throw new InvalidOperationException("Báo giá đã hết hạn, không thể tạo link thanh toán.");
+            }
+
+            var deposit = est.deposit_amount;
+            if (deposit <= 0)
+                throw new InvalidOperationException("Deposit amount is zero, please check cost_estimate.deposit_amount.");
+
+            var orderCode = (long)orderRequestId;
+
+            var feBase = _config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app";
+            var returnUrl = $"{feBase}/request-detail/{orderRequestId}";
+            var cancelUrl = returnUrl;
+
+            var description = $"Đặt cọc đơn hàng AM{orderRequestId:D6}";
+
+            var checkoutUrl = await _payOs.CreatePaymentLinkAsync(
+                orderCode: (int)orderCode,
+                amount: (int)deposit/100,           //chia 100 de de dang test voi PayOS
+                description: description,
+                buyerName: req.customer_name ?? "",
+                buyerEmail: req.customer_email ?? "",
+                buyerPhone: req.customer_phone ?? "",
+                returnUrl: returnUrl,
+                cancelUrl: cancelUrl,
+                ct: ct);
+
+            return new PayOsDepositInfoDto
+            {
+                order_code = orderCode,
+                checkout_url = checkoutUrl,
+                expire_at = expiredAt
+            };
+        }
         public async Task RejectDealAsync(int orderRequestId, string reason)
         {
             var req = await _requestRepo.GetByIdAsync(orderRequestId)
