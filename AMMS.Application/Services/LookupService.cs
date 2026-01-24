@@ -8,20 +8,20 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using static AMMS.Shared.DTOs.Auth.Auth;
 
 namespace AMMS.Application.Services
 {
     public class LookupService : ILookupService
     {
         private readonly IRequestRepository _requestRepo;
-        private readonly IEmailService _emailService;
+        private readonly ISmsOtpService _smsOtpService;
 
         public LookupService(
-            IRequestRepository requestRepo,
-            IEmailService emailService)
+            IRequestRepository requestRepo, ISmsOtpService smsOtpService)
         {
             _requestRepo = requestRepo;
-            _emailService = emailService;
+            _smsOtpService = smsOtpService;
         }
 
         public async Task SendOtpForPhoneAsync(string phone, CancellationToken ct = default)
@@ -31,11 +31,11 @@ namespace AMMS.Application.Services
 
             phone = phone.Trim();
 
-            var email = await _requestRepo.GetEmailByPhoneAsync(phone, ct);
-            if (email == null)
-                throw new InvalidOperationException("Không tìm thấy email nào gắn với số điện thoại này.");
+            var sendReq = new SendOtpSmsRequest(phone);
+            var sendRes = await _smsOtpService.SendOtpAsync(sendReq, ct);
 
-            await _emailService.SendOtpAsync(email);
+            if (!sendRes.success)
+                throw new InvalidOperationException(sendRes.message ?? "Không gửi được OTP qua SMS.");
         }
 
         public async Task<PagedResultLite<OrderListDto>> GetOrdersByPhoneWithOtpAsync(
@@ -52,20 +52,21 @@ namespace AMMS.Application.Services
 
             phone = phone.Trim();
 
-            // 1) Lấy email theo phone
-            var email = await _requestRepo.GetEmailByPhoneAsync(phone, ct);
-            if (email == null)
-                throw new InvalidOperationException("Không tìm thấy email nào gắn với số điện thoại này.");
+            var verifyReq = new VerifyOtpSmsRequest(phone, otp);
+            var verifyRes = await _smsOtpService.VerifyOtpAsync(verifyReq, ct);
 
-            // 2) Verify OTP theo email
-            var ok = await _emailService.VerifyOtpAsync(email, otp);
-            if (!ok)
-                throw new InvalidOperationException("OTP không hợp lệ hoặc đã hết hạn.");
+            if (!verifyRes.success || !verifyRes.valid)
+                throw new InvalidOperationException(verifyRes.message ?? "OTP không hợp lệ hoặc đã hết hạn.");
 
-            // 3) Lấy lịch sử đơn hàng
             return await _requestRepo.GetOrdersByPhonePagedAsync(phone, page, pageSize, ct);
         }
-        public async Task<PagedResultLite<RequestSortedDto>> GetRequestsByPhoneWithOtpAsync(string phone, string otp, int page, int pageSize, CancellationToken ct = default)
+
+        public async Task<PagedResultLite<RequestSortedDto>> GetRequestsByPhoneWithOtpAsync(
+            string phone,
+            string otp,
+            int page,
+            int pageSize,
+            CancellationToken ct = default)
         {
             if (string.IsNullOrWhiteSpace(phone))
                 throw new ArgumentException("phone is required");
@@ -73,14 +74,11 @@ namespace AMMS.Application.Services
                 throw new ArgumentException("otp is required");
 
             phone = phone.Trim();
+            var verifyReq = new VerifyOtpSmsRequest(phone, otp);
+            var verifyRes = await _smsOtpService.VerifyOtpAsync(verifyReq, ct);
 
-            var email = await _requestRepo.GetEmailByPhoneAsync(phone, ct);
-            if (email == null)
-                throw new InvalidOperationException("Không tìm thấy email nào gắn với số điện thoại này.");
-
-            var ok = await _emailService.VerifyOtpAsync(email, otp);
-            if (!ok)
-                throw new InvalidOperationException("OTP không hợp lệ hoặc đã hết hạn.");
+            if (!verifyRes.success || !verifyRes.valid)
+                throw new InvalidOperationException(verifyRes.message ?? "OTP không hợp lệ hoặc đã hết hạn.");
 
             return await _requestRepo.GetRequestsByPhonePagedAsync(phone, page, pageSize, ct);
         }
