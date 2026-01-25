@@ -592,6 +592,7 @@ namespace AMMS.Infrastructure.Repositories
                     ProcessCost = cep
                 }
             )
+            .OrderByDescending(x => x.CostEstimate != null ? x.CostEstimate.estimate_id : 0)
             .ToListAsync(ct);
 
             if (!query.Any())
