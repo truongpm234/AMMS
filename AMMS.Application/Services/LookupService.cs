@@ -23,6 +23,22 @@ namespace AMMS.Application.Services
             _requestRepo = requestRepo;
             _smsOtpService = smsOtpService;
         }
+        private async Task VerifySmsOtpOrThrowAsync(string phone, string otp, CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(phone))
+                throw new ArgumentException("phone is required");
+            if (string.IsNullOrWhiteSpace(otp))
+                throw new ArgumentException("otp is required");
+
+            phone = phone.Trim();
+            otp = otp.Trim();
+
+            var verifyReq = new VerifyOtpSmsRequest(phone, otp);
+            var verifyRes = await _smsOtpService.VerifyOtpAsync(verifyReq, ct);
+
+            if (!verifyRes.success || !verifyRes.valid)
+                throw new InvalidOperationException(verifyRes.message ?? "OTP không hợp lệ hoặc đã hết hạn.");
+        }
 
         public async Task SendOtpForPhoneAsync(string phone, CancellationToken ct = default)
         {
@@ -38,49 +54,26 @@ namespace AMMS.Application.Services
                 throw new InvalidOperationException(sendRes.message ?? "Không gửi được OTP qua SMS.");
         }
 
-        public async Task<PagedResultLite<OrderListDto>> GetOrdersByPhoneWithOtpAsync(
-            string phone,
-            string otp,
-            int page,
-            int pageSize,
-            CancellationToken ct = default)
+        public async Task<PhoneHistoryWithOtpResult> GetHistoryByPhoneWithOtpAsync(
+    string phone,
+    string otp,
+    int page,
+    int pageSize,
+    CancellationToken ct = default)
         {
-            if (string.IsNullOrWhiteSpace(phone))
-                throw new ArgumentException("phone is required");
-            if (string.IsNullOrWhiteSpace(otp))
-                throw new ArgumentException("otp is required");
+            await VerifySmsOtpOrThrowAsync(phone, otp, ct);
 
             phone = phone.Trim();
 
-            var verifyReq = new VerifyOtpSmsRequest(phone, otp);
-            var verifyRes = await _smsOtpService.VerifyOtpAsync(verifyReq, ct);
+            var orders = await _requestRepo.GetOrdersByPhonePagedAsync(phone, page, pageSize, ct);
+            var requests = await _requestRepo.GetRequestsByPhonePagedAsync(phone, page, pageSize, ct);
 
-            if (!verifyRes.success || !verifyRes.valid)
-                throw new InvalidOperationException(verifyRes.message ?? "OTP không hợp lệ hoặc đã hết hạn.");
-
-            return await _requestRepo.GetOrdersByPhonePagedAsync(phone, page, pageSize, ct);
+            return new PhoneHistoryWithOtpResult
+            {
+                Orders = orders,
+                Requests = requests
+            };
         }
 
-        public async Task<PagedResultLite<RequestSortedDto>> GetRequestsByPhoneWithOtpAsync(
-            string phone,
-            string otp,
-            int page,
-            int pageSize,
-            CancellationToken ct = default)
-        {
-            if (string.IsNullOrWhiteSpace(phone))
-                throw new ArgumentException("phone is required");
-            if (string.IsNullOrWhiteSpace(otp))
-                throw new ArgumentException("otp is required");
-
-            phone = phone.Trim();
-            var verifyReq = new VerifyOtpSmsRequest(phone, otp);
-            var verifyRes = await _smsOtpService.VerifyOtpAsync(verifyReq, ct);
-
-            if (!verifyRes.success || !verifyRes.valid)
-                throw new InvalidOperationException(verifyRes.message ?? "OTP không hợp lệ hoặc đã hết hạn.");
-
-            return await _requestRepo.GetRequestsByPhonePagedAsync(phone, page, pageSize, ct);
-        }
     }
 }

@@ -17,9 +17,6 @@ namespace AMMS.API.Controllers
             _lookupService = lookupService;
         }
 
-        /// <summary>
-        /// Gửi OTP đến email của khách dựa trên số điện thoại dùng khi gửi yêu cầu in.
-        /// </summary>
         [HttpPost("send-otp")]
         public async Task<IActionResult> SendOtp([FromBody] OrderLookupSendOtpRequest req, CancellationToken ct)
         {
@@ -34,29 +31,12 @@ namespace AMMS.API.Controllers
             }
         }
 
-        /// <summary>
-        /// Verify OTP và trả về lịch sử đơn hàng (phân trang)
-        /// </summary>
-        [HttpPost("order-history")]
-        public async Task<IActionResult> GetHistory([FromBody] OrderLookupWithOtpRequest req, CancellationToken ct)
+        [HttpPost("history")]
+        public async Task<IActionResult> GetFullHistory([FromBody] RequestLookupWithOtpRequest req, CancellationToken ct)
         {
             try
             {
-                var result = await _lookupService.GetOrdersByPhoneWithOtpAsync(req.Phone, req.Otp, req.Page, req.PageSize, ct);
-                return Ok(result);
-            }
-            catch (Exception ex)
-            {
-                return BadRequest(new { message = ex.Message });
-            }
-        }
-
-        [HttpPost("request-history")]
-        public async Task<IActionResult> GetRequestHistory([FromBody] RequestLookupWithOtpRequest req, CancellationToken ct)
-        {
-            try
-            {
-                var result = await _lookupService.GetRequestsByPhoneWithOtpAsync(
+                var result = await _lookupService.GetHistoryByPhoneWithOtpAsync(
                     req.Phone,
                     req.Otp,
                     req.Page,
@@ -70,5 +50,6 @@ namespace AMMS.API.Controllers
                 return BadRequest(new { message = ex.Message });
             }
         }
+
     }
 }

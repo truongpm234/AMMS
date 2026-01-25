@@ -11,21 +11,9 @@ namespace AMMS.Application.Interfaces
 {
     public interface ILookupService
     {
-        /// <summary>
-        /// Gửi OTP tới email tương ứng với số điện thoại.
-        /// </summary>
         Task SendOtpForPhoneAsync(string phone, CancellationToken ct = default);
 
-        /// <summary>
-        /// Verify OTP và trả về lịch sử đơn hàng (có phân trang).
-        /// </summary>
-        Task<PagedResultLite<OrderListDto>> GetOrdersByPhoneWithOtpAsync(
-            string phone,
-            string otp,
-            int page,
-            int pageSize,
-            CancellationToken ct = default);
-        Task<PagedResultLite<RequestSortedDto>> GetRequestsByPhoneWithOtpAsync(
+        Task<PhoneHistoryWithOtpResult> GetHistoryByPhoneWithOtpAsync(
         string phone,
         string otp,
         int page,
