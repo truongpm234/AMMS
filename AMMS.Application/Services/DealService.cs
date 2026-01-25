@@ -64,7 +64,7 @@ namespace AMMS.Application.Services
             await _requestRepo.SaveChangesAsync();
 
             var baseUrlFe = _config["Deal:BaseUrlFe"]!;
-            var orderDetailUrl = $"{baseUrlFe}/order-detail/{orderRequestId}";
+            var orderDetailUrl = $"{baseUrlFe}/look-up/{orderRequestId}";
 
             var html = DealEmailTemplates.QuoteEmail(req, est, orderDetailUrl);
 
