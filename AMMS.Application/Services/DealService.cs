@@ -84,8 +84,9 @@ namespace AMMS.Application.Services
             var orderCode = (req.quote_id ?? orderRequestId) * 100000 + orderRequestId;
             var baseUrl = _config["Deal:BaseUrl"]!;
 
-            var returnUrl = $"{baseUrl}/api/requests/payos/return?orderRequestId={orderRequestId}&orderCode={orderCode}";
+            var returnUrl = $"{baseUrl}/api/requests/payos/return?request_id={orderRequestId}&order_code={orderCode}";
             var cancelUrl = $"{baseUrl}/api/requests/payos/cancel?orderRequestId={orderRequestId}&orderCode={orderCode}";
+
 
             var existingLink = await _payOs.GetPaymentLinkInformationAsync(orderCode);
             if (existingLink != null && existingLink.status != "CANCELLED")

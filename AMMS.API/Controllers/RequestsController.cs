@@ -255,7 +255,7 @@ namespace AMMS.API.Controllers
             if (!isPaid) return Ok(new { ok = true, ignored = true });
             if (orderCode <= 0) return Ok(new { ok = true, error = "orderCode missing/invalid" });
 
-            var orderRequestId = (int)(orderCode % 100000);
+            var orderRequestId = (int)(orderCode / 10);
 
             var (ok, message) = await ProcessPaidAsync(
                 orderRequestId,
@@ -400,66 +400,60 @@ namespace AMMS.API.Controllers
         }
 
         [HttpGet("payos-deposit/{request_id:int}")]
-        public async Task<IActionResult> GetPayOsDeposit(int request_id, [FromServices] IPayOsService payOsService, CancellationToken ct)
+        public async Task<IActionResult> GetPayOsDeposit(
+    int request_id,
+    [FromServices] IPayOsService payOsService,
+    CancellationToken ct)
         {
-            try
+            var req = await _service.GetByIdAsync(request_id);
+            if (req == null) return NotFound("Request not found");
+
+            var est = await _db.cost_estimates
+                .AsNoTracking()
+                .Where(x => x.order_request_id == request_id)
+                .OrderByDescending(x => x.created_at)
+                .FirstOrDefaultAsync(ct);
+
+            if (est == null) return BadRequest("Cost estimate not found");
+
+            var amount = (int)Math.Round(est.deposit_amount, 0)/100;
+            if (amount <= 0) return BadRequest("Deposit amount must be > 0");
+
+            int attempt = 1;
+            int orderCode = checked(request_id * 10 + attempt);
+
+            var backendUrl = _config["Deal:BaseUrl"]!;
+            var feBase = _config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app";
+
+            var returnUrl = $"{backendUrl}/api/requests/payos/return?request_id={request_id}&order_code={orderCode}";
+            var cancelUrl = $"{feBase}/reject-deal/{request_id}?status=cancel";
+
+            var description = $"AM{request_id:D6}";
+
+            var newLink = await payOsService.CreatePaymentLinkAsync(
+                orderCode: orderCode,
+                amount: amount,
+                description: description,
+                buyerName: req.customer_name ?? "Khach hang",
+                buyerEmail: req.customer_email ?? "",
+                buyerPhone: req.customer_phone ?? "",
+                returnUrl: returnUrl,
+                cancelUrl: cancelUrl,
+                ct: ct
+            );
+
+            return Ok(new
             {
-                var req = await _service.GetByIdAsync(request_id);
-                if (req == null) return NotFound("Request not found");
-
-                var est = await _db.cost_estimates
-                    .AsNoTracking()
-                    .Where(x => x.order_request_id == request_id)
-                    .OrderByDescending(x => x.created_at)
-                    .FirstOrDefaultAsync(ct);
-
-                if (est == null) return BadRequest("Cost estimate not found");
-
-                int amount = (int)est.deposit_amount / 100;
-                if (amount <= 0) return BadRequest("Deposit amount must be > 0");
-
-                long prefix = long.Parse(DateTime.UtcNow.ToString("yyMMddHHmm"));
-                long orderCode = prefix * 100000 + request_id;
-
-                var backendUrl = _config["Deal:BaseUrl"]!;
-                var feBase = "https://sep490-fe.vercel.app";
-
-                var returnUrl = $"{backendUrl}/api/Requests/payos/return?request_id={request_id}&order_code={orderCode}";
-
-                var cancelUrl = $"{feBase}/look-up/{request_id}?status=cancel";
-                var description = $"Dat coc don {request_id}";
-
-                var newLink = await payOsService.CreatePaymentLinkAsync(
-            orderCode: (int)orderCode,
-            amount: amount,
-            description: description,
-            buyerName: req.customer_name ?? "Khach hang",
-            buyerEmail: req.customer_email ?? "",
-            buyerPhone: req.customer_phone ?? "",
-            returnUrl: returnUrl,
-            cancelUrl: cancelUrl,
-            ct: ct
-        );
-
-                return Ok(new
-                {
-                    check_out_url = newLink.checkoutUrl,
-                    qr_code = newLink.qr_code,           
-                    account_number = newLink.account_number,
-                    account_name = newLink.account_name,
-                    bin = newLink.bin,
-                    amount = newLink.amount,
-                    description = newLink.description,
-                    status = "PENDING",
-                    order_code = orderCode
-                });
-            }
-            catch (Exception ex)
-            {
-                // Log lỗi để debug
-                Console.WriteLine(ex.ToString());
-                return BadRequest(new { message = ex.Message });
-            }
+                check_out_url = newLink.checkoutUrl,
+                qr_code = newLink.qr_code,
+                account_number = newLink.account_number,
+                account_name = newLink.account_name,
+                bin = newLink.bin,
+                amount = newLink.amount,
+                description = newLink.description,
+                status = "PENDING",
+                order_code = orderCode
+            });
         }
 
         [HttpGet("full-data-by-request_id/{request_id:int}")]
