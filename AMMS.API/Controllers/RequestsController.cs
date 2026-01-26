@@ -436,23 +436,21 @@ namespace AMMS.API.Controllers
                     ct: ct
                 );
 
-                // 4. Trả về kết quả đầy đủ
                 return Ok(new
                 {
-                    checkoutUrl = newLink.checkoutUrl,
-                    qrCode = newLink.qr_code,           
-                    accountNumber = newLink.account_number,
-                    accountName = newLink.account_name,
+                    check_out_url = newLink.checkoutUrl,
+                    qr_code = newLink.qr_code,           
+                    account_number = newLink.account_number,
+                    account_name = newLink.account_name,
                     bin = newLink.bin,
                     amount = newLink.amount,
                     description = newLink.description,
                     status = "PENDING",
-                    orderCode = orderCode
+                    order_code = orderCode
                 });
             }
             catch (Exception ex)
             {
-                // Log lỗi để debug
                 Console.WriteLine(ex.ToString());
                 return BadRequest(new { message = ex.Message });
             }
