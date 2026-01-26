@@ -87,14 +87,12 @@ namespace AMMS.Application.Services
             var returnUrl = $"{baseUrl}/api/requests/payos/return?request_id={orderRequestId}&order_code={orderCode}";
             var cancelUrl = $"{baseUrl}/api/requests/payos/cancel?orderRequestId={orderRequestId}&orderCode={orderCode}";
 
-
             var existingLink = await _payOs.GetPaymentLinkInformationAsync(orderCode);
             if (existingLink != null && existingLink.status != "CANCELLED")
             {
                 return existingLink.checkoutUrl ?? "";
             }
 
-            // 2. TẠO MỚI: Nếu chưa có hoặc đã huỷ
             var result = await _payOs.CreatePaymentLinkAsync(
                 orderCode: orderCode,
                 amount: amount,

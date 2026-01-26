@@ -213,7 +213,7 @@ namespace AMMS.API.Controllers
             }
 
             var fe = "https://sep490-fe.vercel.app";
-            return Redirect($"{fe}/look-up");
+            return Redirect($"{fe}/request-detail/{request_id}");
         }
 
         [HttpGet("payos/cancel")]
@@ -288,107 +288,80 @@ namespace AMMS.API.Controllers
 
             return Ok(result);
         }
-        private async Task<(bool ok, string message)> ProcessPaidAsync(int orderRequestId, long orderCode, long amount, string? paymentLinkId, string? transactionId, string rawJson, IPaymentRepository paymentRepo, CancellationToken ct)
+        private async Task<(bool ok, string message)> ProcessPaidAsync(
+    int orderRequestId, long orderCode, long amount,
+    string? paymentLinkId, string? transactionId, string rawJson,
+    IPaymentRepository paymentRepo, CancellationToken ct)
         {
-            var existsOrderRequest = await _db.order_requests
-                .AsNoTracking()
-                .AnyAsync(x => x.order_request_id == orderRequestId, ct);
+            var req = await _db.order_requests.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.order_request_id == orderRequestId, ct);
+            if (req == null) return (false, $"order_request_id={orderRequestId} not found");
 
-            if (!existsOrderRequest)
-                return (false, $"order_request_id={orderRequestId} not found");
-            var est = await _db.cost_estimates
-        .AsNoTracking()
-        .Where(x => x.order_request_id == orderRequestId)
-        .OrderByDescending(x => x.created_at)
-        .FirstOrDefaultAsync(ct);
-
-            if (est == null)
-                return (false, "Cost estimate not found for this request");
+            var est = await _db.cost_estimates.AsNoTracking()
+                .Where(x => x.order_request_id == orderRequestId)
+                .OrderByDescending(x => x.created_at)
+                .FirstOrDefaultAsync(ct);
+            if (est == null) return (false, "Cost estimate not found");
 
             var expiredAt = est.created_at.AddHours(24);
             if (DateTime.UtcNow > expiredAt.ToUniversalTime())
-            {
                 return (false, $"Quote expired at {expiredAt:o}, ignore payment.");
-            }
-
-            var existedPaid = await _paymentService.GetPaidByProviderOrderCodeAsync("PAYOS", orderCode, ct);
-            if (existedPaid != null)
-            {
-                await _dealService.MarkAcceptedAsync(orderRequestId);
-
-                var convert = await _service.ConvertToOrderAsync(orderRequestId);
-
-                return (true, $"Already processed. Convert: {convert.Message}");
-            }
 
             var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
-            await paymentRepo.AddAsync(new payment
+            var existedPaid = await _paymentService.GetPaidByProviderOrderCodeAsync("PAYOS", orderCode, ct);
+            if (existedPaid == null)
             {
-                order_request_id = orderRequestId,
-                provider = "PAYOS",
-                order_code = orderCode,
-                amount = (decimal)amount,
-                currency = "VND",
-                status = "PAID",
-                paid_at = now,
-                payos_payment_link_id = paymentLinkId,
-                payos_transaction_id = transactionId,
-                payos_raw = rawJson,
-                created_at = now,
-                updated_at = now
-            }, ct);
+                try
+                {
+                    await paymentRepo.AddAsync(new payment
+                    {
+                        order_request_id = orderRequestId,
+                        provider = "PAYOS",
+                        order_code = orderCode,
+                        amount = (decimal)amount,
+                        currency = "VND",
+                        status = "PAID",
+                        paid_at = now,
+                        payos_payment_link_id = paymentLinkId,
+                        payos_transaction_id = transactionId,
+                        payos_raw = rawJson,
+                        created_at = now,
+                        updated_at = now
+                    }, ct);
 
-            await paymentRepo.SaveChangesAsync(ct);
+                    await paymentRepo.SaveChangesAsync(ct);
+                }
+                catch (DbUpdateException ex) when (ex.InnerException is PostgresException pg && pg.SqlState == "23505")
+                {
+                    Console.WriteLine("⚠️ Duplicate payment detected, skipping insert.");
+                }
+            }
 
             await _dealService.MarkAcceptedAsync(orderRequestId);
 
-            try
-            {
-                var convert = await _service.ConvertToOrderAsync(orderRequestId);
-                if (!convert.Success)
-                    return (false, "ConvertToOrder failed: " + convert.Message);
+            // 3) Convert
+            var convert = await _service.ConvertToOrderAsync(orderRequestId);
+            if (!convert.Success || convert.OrderId == null)
+                return (false, "ConvertToOrder failed: " + convert.Message);
 
-                try
-                {
-                    var item = await _db.order_items
-                        .AsNoTracking()
-                        .FirstOrDefaultAsync(x => x.item_id == convert.OrderItemId, ct);
+            var productTypeId = await _db.product_types.AsNoTracking()
+                .Where(x => x.code == req.product_type)
+                .Select(x => x.product_type_id)
+                .FirstOrDefaultAsync(ct);
 
-                    var req = await _db.order_requests
-                        .AsNoTracking()
-                        .FirstOrDefaultAsync(x => x.order_request_id == orderRequestId, ct);
+            if (productTypeId <= 0)
+                return (false, "product_type invalid");
 
-                    int productTypeId = 0;
+            var item = await _db.order_items.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.item_id == convert.OrderItemId, ct);
 
-                    productTypeId = await _db.product_types.Where(x => x.code == req.product_type).Select(x => x.product_type_id).FirstAsync(ct);
-
-                    if (productTypeId <= 0)
-                        return (false, "Auto schedule failed: productTypeId missing/invalid");
-
-                    var prodId = await _schedulingService.ScheduleOrderAsync(
-                        orderId: convert.OrderId!.Value,
-                        productTypeId: productTypeId,
-                        productionProcessCsv: item?.production_process,
-                        managerId: 3
-                    );
-
-                    Console.WriteLine($"✅ Auto scheduled production: prod_id={prodId} for order_id={convert.OrderId}");
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine("❌ Auto schedule failed: " + ex);
-                    return (true, "Processed paid OK + converted, but schedule failed: " + ex.Message);
-                }
-
-                Console.WriteLine($"Convert result: success={convert.Success}, msg={convert.Message}, orderId={convert.OrderId}");
-
-                return (true, "Processed paid OK + converted");
-
-            }
-            catch (DbUpdateException dbEx) when (dbEx.InnerException is PostgresException pg && pg.SqlState == "23505")
-            {
-            }
+            var prodId = await _schedulingService.ScheduleOrderAsync(
+                orderId: convert.OrderId.Value,
+                productTypeId: productTypeId,
+                productionProcessCsv: item?.production_process,
+                managerId: 3
+            );
 
             try
             {
@@ -396,8 +369,10 @@ namespace AMMS.API.Controllers
                 await _dealService.NotifyCustomerPaidAsync(orderRequestId, (decimal)amount, now);
             }
             catch { }
-            return (true, "Processed paid OK");
+
+            return (true, $"Processed OK: order_id={convert.OrderId}, prod_id={prodId}");
         }
+
 
         [HttpGet("payos-deposit/{request_id:int}")]
         public async Task<IActionResult> GetPayOsDeposit(

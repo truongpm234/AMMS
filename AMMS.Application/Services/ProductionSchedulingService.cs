@@ -45,18 +45,39 @@ namespace AMMS.Application.Services
                 {
                     var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
-                    var prod = new production
-                    {
-                        code = $"PRD-{DateTime.UtcNow:yyyyMMddHHmmss}",
-                        order_id = orderId,
-                        manager_id = managerId,
-                        status = "Scheduled",
-                        product_type_id = productTypeId,
-                        start_date = now,
-                    };
+                    var prod = await _db.productions
+                .AsTracking()
+                .Where(p => p.order_id == orderId && p.end_date == null)
+                .OrderByDescending(p => p.prod_id)
+                .FirstOrDefaultAsync();
 
-                    await _prodRepo.AddAsync(prod);
-                    await _prodRepo.SaveChangesAsync();
+                    if (prod == null)
+                    {
+                        prod = new production
+                        {
+                            code = "TMP-PROD",
+                            order_id = orderId,
+                            manager_id = managerId,
+                            status = "Scheduled",
+                            product_type_id = productTypeId,
+                            start_date = now,
+                        };
+
+                        await _prodRepo.AddAsync(prod);
+                        await _prodRepo.SaveChangesAsync();
+
+                        prod.code = $"PROD-{prod.prod_id:00000}";
+                        _db.productions.Update(prod);
+                        await _db.SaveChangesAsync();
+                    }
+                    else
+                    {
+                        prod.manager_id ??= managerId;
+                        prod.product_type_id = productTypeId;
+                        prod.status = "Scheduled";
+                        prod.start_date ??= now;
+                        await _db.SaveChangesAsync();
+                    }
 
                     var steps = await _ptpRepo.GetActiveByProductTypeIdAsync(productTypeId);
                     if (steps == null || steps.Count == 0)
