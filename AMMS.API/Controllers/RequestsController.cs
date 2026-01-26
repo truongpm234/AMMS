@@ -74,13 +74,15 @@ namespace AMMS.API.Controllers
         }
 
         [HttpGet("{id:int}")]
-        public async Task<IActionResult> GetById(int id)
+        [ProducesResponseType(typeof(RequestWithCostDto), StatusCodes.Status200OK)]
+        public async Task<IActionResult> GetRequestById(int id)
         {
-            var order = await _service.GetByIdAsync(id);
-            if (order == null)
+            var requestDto = await _service.GetByIdWithCostAsync(id);
+
+            if (requestDto == null)
                 return NotFound(new { message = "Order request not found" });
 
-            return Ok(order);
+            return Ok(requestDto);
         }
 
         [HttpGet("paged")]

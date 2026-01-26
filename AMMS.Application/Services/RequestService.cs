@@ -157,6 +157,11 @@ namespace AMMS.Application.Services
 
         public Task<order_request?> GetByIdAsync(int id) => _requestRepo.GetByIdAsync(id);
 
+        public Task<RequestWithCostDto?> GetByIdWithCostAsync(int id)
+        {
+            return _requestRepo.GetByIdWithCostAsync(id);
+        }
+
         public async Task<PagedResultLite<RequestPagedDto>> GetPagedAsync(int page, int pageSize)
         {
             if (page <= 0) page = 1;
@@ -177,7 +182,6 @@ namespace AMMS.Application.Services
                 Data = data
             };
         }
-
 
         public async Task<ConvertRequestToOrderResponse> ConvertToOrderAsync(int requestId)
         {

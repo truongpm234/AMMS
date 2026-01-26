@@ -36,5 +36,6 @@ namespace AMMS.Infrastructure.Interfaces
         Task<PagedResultLite<RequestSortedDto>> GetRequestsByPhonePagedAsync(
     string phone, int page, int pageSize, CancellationToken ct = default);
         Task<RequestDetailDto?> GetInformationRequestById(int requestId, CancellationToken ct = default);
+        Task<RequestWithCostDto?> GetByIdWithCostAsync(int id);
     }
 }

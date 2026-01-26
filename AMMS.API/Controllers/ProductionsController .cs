@@ -55,7 +55,6 @@ namespace AMMS.API.Controllers
         [HttpGet("detail/{orderId:int}")]
         public async Task<IActionResult> GetProductionDetail(int orderId, CancellationToken ct)
         {
-            // gọi theo orderId
             var result = await _service.GetProductionDetailByOrderIdAsync(orderId, ct);
             if (result == null) return NotFound();
             return Ok(result);
