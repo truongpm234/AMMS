@@ -433,41 +433,10 @@ namespace AMMS.Application.Services
                     _orderRepo.Update(newOrder);
                     await _orderRepo.SaveChangesAsync();
 
-                    // ===== ✅ auto create production Scheduled =====
-                    var managerId = await _db.users
-    .AsNoTracking()
-    .Where(u => u.username == "manager")
-    .Select(u => (int?)u.user_id)
-    .FirstOrDefaultAsync();
-
-                    managerId ??= newOrder.consultant_id;
-
-                    var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-
-                    var prod = new production
-                    {
-                        code = "TMP-PROD",
-                        order_id = newOrder.order_id,
-                        status = "Scheduled",
-                        product_type_id = productTypeId,
-
-                        manager_id = managerId,
-                        start_date = now
-                    };
-
-                    await _db.productions.AddAsync(prod);
-                    await _db.SaveChangesAsync(); // lấy prod_id
-
-                    prod.code = $"PROD-{prod.prod_id:00000}"; // <= 20
-                    _db.productions.Update(prod);
-                    await _db.SaveChangesAsync();
-
-                    // Link order.production_id (entity order đã có field sẵn)
-                    newOrder.production_id = prod.prod_id;
                     _orderRepo.Update(newOrder);
                     await _orderRepo.SaveChangesAsync();
 
-                    // ===== link request -> order =====
+                    // link request -> order
                     req.order_id = newOrder.order_id;
                     await _requestRepo.UpdateAsync(req);
                     await _requestRepo.SaveChangesAsync();
