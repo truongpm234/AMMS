@@ -27,7 +27,6 @@ namespace AMMS.Infrastructure.Repositories
         {
             var query = from r in _db.order_requests.AsNoTracking()
                         where r.order_request_id == id
-                        // Join với cost_estimate để lấy giá
                         join ce in _db.cost_estimates.AsNoTracking()
                             on r.order_request_id equals ce.order_request_id into ceJoin
                         from ce in ceJoin.OrderBy(x => x.estimate_id).Take(1).DefaultIfEmpty()

@@ -282,11 +282,13 @@ namespace AMMS.Infrastructure.Repositories
 
         public async Task<ProductionDetailDto?> GetProductionDetailByOrderIdAsync(int orderId, CancellationToken ct = default)
         {
-            // 1) Header: production + order + customer + first item
             var header = await (
                 from pr in _db.productions.AsNoTracking()
                 join o in _db.orders.AsNoTracking() on pr.order_id equals o.order_id into oj
                 from o in oj.DefaultIfEmpty()
+
+                join r in _db.order_requests.AsNoTracking() on o.order_id equals r.order_id into rj
+                from r in rj.DefaultIfEmpty()
 
                 join q in _db.quotes.AsNoTracking() on o.quote_id equals q.quote_id into qj
                 from q in qj.DefaultIfEmpty()
@@ -300,10 +302,11 @@ namespace AMMS.Infrastructure.Repositories
                 {
                     pr,
                     o,
-                    customer_name =
-                        o.customer != null
-                            ? (o.customer.company_name ?? o.customer.contact_name ?? "")
-                            : (c != null ? (c.company_name ?? c.contact_name ?? "") : ""),
+                    customer_name = !string.IsNullOrWhiteSpace(r.customer_name)
+                ? r.customer_name
+                : (o.customer != null
+                    ? (o.customer.company_name ?? o.customer.contact_name ?? "")
+                    : (c != null ? (c.company_name ?? c.contact_name ?? "") : "")),
 
                     first_item = _db.order_items.AsNoTracking()
                         .Where(i => i.order_id == o.order_id)
@@ -334,7 +337,7 @@ namespace AMMS.Infrastructure.Repositories
                 order_id = header.o?.order_id,
                 order_code = header.o?.code,
                 delivery_date = header.o?.delivery_date,
-                customer_name = header.customer_name ?? "",
+                customer_name = header.customer_name ?? "Khách ẩn tên",
 
                 product_name = header.first_item?.product_name,
                 quantity = header.first_item?.quantity ?? 0,
@@ -414,6 +417,24 @@ namespace AMMS.Infrastructure.Repositories
                 })
                 .ToListAsync(ct);
 
+            var lastTask = tasks.OrderByDescending(t => t.seq_num ?? 0).FirstOrDefault();           
+            if (lastTask != null
+                && string.Equals(lastTask.status, "Finished", StringComparison.OrdinalIgnoreCase)
+                && lastTask.end_time != null
+                && !string.Equals(header.pr.status, "Finished", StringComparison.OrdinalIgnoreCase))
+            {
+                var prodToUpdate = new production { prod_id = prodId };
+                _db.productions.Attach(prodToUpdate);
+
+                prodToUpdate.status = "Finished";
+                prodToUpdate.end_date = lastTask.end_time;
+
+                await _db.SaveChangesAsync(ct);
+
+                dto.production_status = "Finished";
+                dto.end_date = lastTask.end_time;
+            }
+
             var taskIds = tasks.Select(x => x.task_id).ToList();
 
             var logs = await _db.task_logs.AsNoTracking()
@@ -459,8 +480,6 @@ namespace AMMS.Infrastructure.Repositories
 
             var stages = new List<ProductionStageDto>();
 
-            // output của công đoạn trước (đơn vị: tờ / sản phẩm bán thành phẩm)
-            // ban đầu: số lượng thành phẩm cuối cùng
             decimal previousOutputQty = dto.quantity;
 
             foreach (var s in steps)
@@ -483,7 +502,6 @@ namespace AMMS.Infrastructure.Repositories
                 var denom = qtyGood + qtyBad;
                 var wastePct = denom <= 0 ? 0m : Math.Round((qtyBad * 100m) / denom, 2);
 
-                // ⭐ Tính IO cho từng công đoạn
                 var io = BuildStageIO(
                     processCode: pcode,
                     processName: s.process_name ?? "",
@@ -522,7 +540,6 @@ namespace AMMS.Infrastructure.Repositories
 
                 stages.Add(stage);
 
-                // ⭐ số lượng dùng cho công đoạn tiếp theo
                 previousOutputQty = io.nextOutputQty;
             }
 
