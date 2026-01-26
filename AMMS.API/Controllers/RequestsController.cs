@@ -203,15 +203,15 @@ namespace AMMS.API.Controllers
                     request_id,
                     order_code,
                     amount,
-                    info?.paymentLinkId,
-                    info?.transactionId,
-                    info?.rawJson ?? "{}",
+                    info?.payment_link_id,
+                    info?.transaction_id,
+                    info?.raw_json ?? "{}",
                     paymentRepo,
                     ct);
             }
 
             var fe = "https://sep490-fe.vercel.app";
-            return Redirect($"{fe}/request-detail/{request_id}");
+            return Redirect($"{fe}/look-up");
         }
 
         [HttpGet("payos/cancel")]
@@ -288,7 +288,6 @@ namespace AMMS.API.Controllers
         }
         private async Task<(bool ok, string message)> ProcessPaidAsync(int orderRequestId, long orderCode, long amount, string? paymentLinkId, string? transactionId, string rawJson, IPaymentRepository paymentRepo, CancellationToken ct)
         {
-            // FK check
             var existsOrderRequest = await _db.order_requests
                 .AsNoTracking()
                 .AnyAsync(x => x.order_request_id == orderRequestId, ct);
@@ -399,15 +398,62 @@ namespace AMMS.API.Controllers
         }
 
         [HttpGet("payos-deposit/{request_id:int}")]
-        public async Task<IActionResult> GetPayOsDeposit(int request_id, CancellationToken ct)
+        public async Task<IActionResult> GetPayOsDeposit(int request_id, [FromServices] IPayOsService payOsService, CancellationToken ct)
         {
             try
             {
-                var info = await _dealService.PrepareDepositPaymentAsync(request_id, ct);
-                return Ok(info);
+                var req = await _service.GetByIdAsync(request_id);
+                if (req == null) return NotFound("Request not found");
+
+                var est = await _db.cost_estimates
+                    .AsNoTracking()
+                    .Where(x => x.order_request_id == request_id)
+                    .OrderByDescending(x => x.created_at)
+                    .FirstOrDefaultAsync(ct);
+
+                if (est == null) return BadRequest("Cost estimate not found");
+
+                int amount = (int)est.deposit_amount / 100;
+                if (amount <= 0) return BadRequest("Deposit amount must be > 0");
+
+                long prefix = long.Parse(DateTime.UtcNow.ToString("yyMMddHHmm"));
+                long orderCode = prefix * 100000 + request_id;
+
+                var baseUrl = "https://sep490-fe.vercel.app";
+                var desc = $"Dat coc don {request_id}";
+                desc = string.Concat(desc.Where(c => char.IsLetterOrDigit(c) || c == ' ')).Trim();
+                if (desc.Length > 25) desc = desc.Substring(0, 25);
+
+                var newLink = await payOsService.CreatePaymentLinkAsync(
+                    orderCode: (int)orderCode,
+                    amount: amount,
+                    description: desc,
+                    buyerName: req.customer_name ?? "Khach hang",
+                    buyerEmail: req.customer_email ?? "",
+                    buyerPhone: req.customer_phone ?? "",
+                    returnUrl: $"{baseUrl}/look-up",
+                    cancelUrl: $"{baseUrl}/reject-deal?status=cancel",
+                    ct: ct
+                );
+
+                // 4. Trả về kết quả đầy đủ
+                return Ok(new
+                {
+                    checkoutUrl = newLink.checkoutUrl,
+                    qrCode = newLink.qr_code,           
+                    accountNumber = newLink.account_number,
+                    accountName = newLink.account_name,
+                    bin = newLink.bin,
+                    amount = newLink.amount,
+                    description = newLink.description,
+                    status = "PENDING",
+                    orderCode = orderCode
+                });
             }
             catch (Exception ex)
             {
+                // Log lỗi để debug
+                Console.WriteLine(ex.ToString());
                 return BadRequest(new { message = ex.Message });
             }
         }

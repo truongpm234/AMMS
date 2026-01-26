@@ -73,27 +73,28 @@ namespace AMMS.Application.Services
 
         public async Task<string> AcceptAndCreatePayOsLinkAsync(int orderRequestId)
         {
-            var req = await _requestRepo.GetByIdAsync(orderRequestId)
-                ?? throw new Exception("Order request not found");
-
-            var est = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId)
-                ?? throw new Exception("Estimate not found");
+            var req = await _requestRepo.GetByIdAsync(orderRequestId) ?? throw new Exception("Order request not found");
+            var est = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId) ?? throw new Exception("Estimate not found");
 
             await SendConsultantStatusEmailAsync(req, est, statusText: "KHÁCH ĐỒNG Ý BÁO GIÁ");
 
             var deposit = est.deposit_amount;
             var amount = (int)Math.Round(deposit, 0);
-
             var description = $"AM{orderRequestId:D6}";
-
             var orderCode = (req.quote_id ?? orderRequestId) * 100000 + orderRequestId;
-
             var baseUrl = _config["Deal:BaseUrl"]!;
 
             var returnUrl = $"{baseUrl}/api/requests/payos/return?orderRequestId={orderRequestId}&orderCode={orderCode}";
             var cancelUrl = $"{baseUrl}/api/requests/payos/cancel?orderRequestId={orderRequestId}&orderCode={orderCode}";
 
-            var checkoutUrl = await _payOs.CreatePaymentLinkAsync(
+            var existingLink = await _payOs.GetPaymentLinkInformationAsync(orderCode);
+            if (existingLink != null && existingLink.status != "CANCELLED")
+            {
+                return existingLink.checkoutUrl ?? "";
+            }
+
+            // 2. TẠO MỚI: Nếu chưa có hoặc đã huỷ
+            var result = await _payOs.CreatePaymentLinkAsync(
                 orderCode: orderCode,
                 amount: amount,
                 description: description,
@@ -104,16 +105,13 @@ namespace AMMS.Application.Services
                 cancelUrl: cancelUrl
             );
 
-            return checkoutUrl;
+            return result.checkoutUrl ?? "";
         }
 
         public async Task<PayOsDepositInfoDto> PrepareDepositPaymentAsync(int orderRequestId, CancellationToken ct = default)
         {
-            var req = await _requestRepo.GetByIdAsync(orderRequestId)
-                      ?? throw new InvalidOperationException("Order request not found");
-
-            var est = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId)
-                      ?? throw new InvalidOperationException("Cost estimate not found");
+            var req = await _requestRepo.GetByIdAsync(orderRequestId) ?? throw new InvalidOperationException("Order request not found");
+            var est = await _estimateRepo.GetByOrderRequestIdAsync(orderRequestId) ?? throw new InvalidOperationException("Cost estimate not found");
 
             var expiredAt = est.created_at.AddHours(24);
             if (DateTime.UtcNow > expiredAt.ToUniversalTime())
@@ -122,35 +120,49 @@ namespace AMMS.Application.Services
             }
 
             var deposit = est.deposit_amount;
-            if (deposit <= 0)
-                throw new InvalidOperationException("Deposit amount is zero, please check cost_estimate.deposit_amount.");
+            if (deposit <= 0) throw new InvalidOperationException("Deposit amount is zero.");
 
-            var orderCode = (long)orderRequestId;
-
+            var orderCode = (long)orderRequestId; // Logic tạo mã đơn
             var feBase = _config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app";
             var returnUrl = $"{feBase}/request-detail/{orderRequestId}";
             var cancelUrl = returnUrl;
-
             var description = $"Đặt cọc đơn hàng AM{orderRequestId:D6}";
 
-            var checkoutUrl = await _payOs.CreatePaymentLinkAsync(
-                orderCode: (int)orderCode,
-                amount: (int)deposit/100,           //chia 100 de de dang test voi PayOS
-                description: description,
-                buyerName: req.customer_name ?? "",
-                buyerEmail: req.customer_email ?? "",
-                buyerPhone: req.customer_phone ?? "",
-                returnUrl: returnUrl,
-                cancelUrl: cancelUrl,
-                ct: ct);
+            PayOsResultDto result;
+
+            var existingLink = await _payOs.GetPaymentLinkInformationAsync(orderCode, ct);
+            if (existingLink != null && (existingLink.status == "PENDING" || existingLink.status == "PAID"))
+            {
+                // Dùng lại thông tin cũ
+                result = existingLink;
+            }
+            else
+            {
+                result = await _payOs.CreatePaymentLinkAsync(
+                    orderCode: (int)orderCode,
+                    amount: (int)deposit / 100, // Chia 100 dễ test
+                    description: description,
+                    buyerName: req.customer_name ?? "",
+                    buyerEmail: req.customer_email ?? "",
+                    buyerPhone: req.customer_phone ?? "",
+                    returnUrl: returnUrl,
+                    cancelUrl: cancelUrl,
+                    ct: ct);
+            }
 
             return new PayOsDepositInfoDto
             {
                 order_code = orderCode,
-                checkout_url = checkoutUrl,
-                expire_at = expiredAt
+                checkout_url = result.checkoutUrl,
+                deposit_amount = deposit,
+                expire_at = expiredAt,
+                qr_code = result.qr_code,
+                account_number = result.account_number,
+                account_name = result.account_name,
+                bin = result.bin
             };
         }
+
         public async Task RejectDealAsync(int orderRequestId, string reason)
         {
             var req = await _requestRepo.GetByIdAsync(orderRequestId)
