@@ -25,14 +25,15 @@ namespace AMMS.API.Controllers
         private readonly IProductionSchedulingService _schedulingService;
         private readonly AppDbContext _db;
         private readonly ISmsOtpService _smsOtp;
-
+        private readonly IConfiguration _config;
         public RequestsController(
             IRequestService service,
             IDealService dealService,
             IPaymentsService paymentService,
             AppDbContext db,
             IProductionSchedulingService schedulingService,
-            ISmsOtpService smsOtp)
+            ISmsOtpService smsOtp,
+            IConfiguration config)
         {
             _service = service;
             _dealService = dealService;
@@ -40,6 +41,7 @@ namespace AMMS.API.Controllers
             _db = db;
             _schedulingService = schedulingService;
             _smsOtp = smsOtp;
+            _config = config;
         }
         [HttpPost("create-request-by-consultant")]
         [ProducesResponseType(typeof(CreateRequestResponse), StatusCodes.Status201Created)]
@@ -419,22 +421,25 @@ namespace AMMS.API.Controllers
                 long prefix = long.Parse(DateTime.UtcNow.ToString("yyMMddHHmm"));
                 long orderCode = prefix * 100000 + request_id;
 
-                var baseUrl = "https://sep490-fe.vercel.app";
-                var desc = $"Dat coc don {request_id}";
-                desc = string.Concat(desc.Where(c => char.IsLetterOrDigit(c) || c == ' ')).Trim();
-                if (desc.Length > 25) desc = desc.Substring(0, 25);
+                var backendUrl = _config["Deal:BaseUrl"]!;
+                var feBase = "https://sep490-fe.vercel.app";
+
+                var returnUrl = $"{backendUrl}/api/Requests/payos/return?request_id={request_id}&order_code={orderCode}";
+
+                var cancelUrl = $"{feBase}/look-up/{request_id}?status=cancel";
+                var description = $"Dat coc don {request_id}";
 
                 var newLink = await payOsService.CreatePaymentLinkAsync(
-                    orderCode: (int)orderCode,
-                    amount: amount,
-                    description: desc,
-                    buyerName: req.customer_name ?? "Khach hang",
-                    buyerEmail: req.customer_email ?? "",
-                    buyerPhone: req.customer_phone ?? "",
-                    returnUrl: $"{baseUrl}/look-up",
-                    cancelUrl: $"{baseUrl}/reject-deal?status=cancel",
-                    ct: ct
-                );
+            orderCode: (int)orderCode,
+            amount: amount,
+            description: description,
+            buyerName: req.customer_name ?? "Khach hang",
+            buyerEmail: req.customer_email ?? "",
+            buyerPhone: req.customer_phone ?? "",
+            returnUrl: returnUrl,
+            cancelUrl: cancelUrl,
+            ct: ct
+        );
 
                 return Ok(new
                 {
@@ -451,6 +456,7 @@ namespace AMMS.API.Controllers
             }
             catch (Exception ex)
             {
+                // Log lỗi để debug
                 Console.WriteLine(ex.ToString());
                 return BadRequest(new { message = ex.Message });
             }

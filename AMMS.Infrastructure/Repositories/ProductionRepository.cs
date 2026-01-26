@@ -203,7 +203,6 @@ namespace AMMS.Infrastructure.Repositories
                     .Where(s => !string.IsNullOrWhiteSpace(s))
                     .ToList();
 
-                // current_seq lấy từ tasks
                 var currentSeq = GetCurrentSeq(tasks);
 
                 string? currentStage = null;
@@ -522,13 +521,11 @@ namespace AMMS.Infrastructure.Repositories
                     process_name = s.process_name ?? "",
                     process_code = s.process_code,
                     machine = s.machine,
-
                     task_id = task?.task_id,
                     task_name = task?.name,
                     status = task?.status,
                     start_time = task?.start_time,
                     end_time = task?.end_time,
-
                     qty_good = qtyGood,
                     qty_bad = qtyBad,
                     waste_percent = wastePct,
