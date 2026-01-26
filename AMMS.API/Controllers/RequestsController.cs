@@ -135,6 +135,39 @@ namespace AMMS.API.Controllers
             return Redirect(checkoutUrl);
         }
 
+        [HttpGet("payos/status-by-request-id")]
+        public async Task<IActionResult> GetPayOsStatusByRequest([FromQuery] int order_request_id, [FromServices] IPaymentRepository paymentRepo, CancellationToken ct)
+        {
+            if (order_request_id <= 0)
+                return BadRequest(new { message = "order_request_id is required" });
+
+            var latest = await paymentRepo.GetLatestByRequestIdAsync(order_request_id, ct);
+
+            if (latest == null)
+            {
+                return Ok(new
+                {
+                    paid = false,
+                    status = "PENDING",
+                    order_request_id,
+                    order_code = (long?)null,
+                    paid_at = (DateTime?)null
+                });
+            }
+
+            var isPaid = string.Equals(latest.status, "PAID", StringComparison.OrdinalIgnoreCase)
+                         || string.Equals(latest.status, "SUCCESS", StringComparison.OrdinalIgnoreCase);
+
+            return Ok(new
+            {
+                paid = isPaid,
+                status = latest.status,
+                order_request_id = latest.order_request_id,
+                order_code = latest.order_code,
+                paid_at = latest.paid_at
+            });
+        }
+
         [HttpGet("reject-form")]
         public async Task<IActionResult> RejectForm([FromQuery] int orderRequestId, [FromQuery] string token)
         {

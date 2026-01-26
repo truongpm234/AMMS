@@ -21,5 +21,9 @@ namespace AMMS.Application.Services
         {
             return _paymentRepository.GetPaidByProviderOrderCodeAsync(provider, orderCode, ct);
         }
+        public Task<payment?> GetLatestByRequestIdAsync(int orderRequestId, CancellationToken ct = default)
+        {
+            return _paymentRepository.GetLatestByRequestIdAsync(orderRequestId, ct);
+        }
     }
 }

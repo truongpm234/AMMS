@@ -23,5 +23,15 @@ namespace AMMS.Infrastructure.Repositories
 
         public Task<int> SaveChangesAsync(CancellationToken ct = default)
             => _db.SaveChangesAsync(ct);
+        public Task<payment?> GetLatestByRequestIdAsync(int orderRequestId, CancellationToken ct = default)
+        {
+            return _db.payments
+                .AsNoTracking()
+                .Where(p => p.order_request_id == orderRequestId && p.provider == "PAYOS")
+                .OrderByDescending(p => p.paid_at ?? DateTime.MinValue)
+                .ThenByDescending(p => p.payment_id)
+                .FirstOrDefaultAsync(ct);
+        }
+
     }
 }
