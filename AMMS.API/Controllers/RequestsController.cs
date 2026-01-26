@@ -10,6 +10,8 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using static AMMS.Shared.DTOs.Auth.Auth;
 
@@ -230,30 +232,39 @@ namespace AMMS.API.Controllers
     [FromServices] IPaymentRepository paymentRepo,
     CancellationToken ct)
         {
-            var node = raw.TryGetProperty("data", out var data) ? data : raw;
+            if (!raw.TryGetProperty("data", out var dataNode))
+                return Ok(new { ok = true, error = "missing data" });
+
+            var rootCode = raw.TryGetProperty("code", out var rc) ? (rc.GetString() ?? "") : "";
+            var rootSuccess = raw.TryGetProperty("success", out var rs) && rs.ValueKind == JsonValueKind.True;
+
+            var dataCode = dataNode.TryGetProperty("code", out var dc) ? (dc.GetString() ?? "") : "";
+
+            var isPaid = rootSuccess && rootCode == "00" && dataCode == "00";
+            if (!isPaid) return Ok(new { ok = true, ignored = true, rootCode, dataCode });
+
+            var checksumKey = _config["PayOS:ChecksumKey"];
+            if (!string.IsNullOrWhiteSpace(checksumKey))
+            {
+                var signature = raw.TryGetProperty("signature", out var sig) ? (sig.GetString() ?? "") : "";
+                if (!IsValidPayOsSignature(dataNode, signature, checksumKey))
+                    return Ok(new { ok = true, error = "invalid signature" });
+            }
 
             long orderCode =
-                node.TryGetProperty("orderCode", out var oc) && oc.ValueKind == JsonValueKind.Number
+                dataNode.TryGetProperty("orderCode", out var oc) && oc.ValueKind == JsonValueKind.Number
                     ? oc.GetInt64()
                     : 0;
 
-            var status =
-                node.TryGetProperty("status", out var st) ? (st.GetString() ?? "") : "";
-
             long amount =
-                node.TryGetProperty("amount", out var am) && am.ValueKind == JsonValueKind.Number
+                dataNode.TryGetProperty("amount", out var am) && am.ValueKind == JsonValueKind.Number
                     ? am.GetInt64()
                     : 0;
 
-            var paymentLinkId = node.TryGetProperty("paymentLinkId", out var pl) ? pl.GetString() : null;
-            var transactionId = node.TryGetProperty("transactionId", out var tx) ? tx.GetString() : null;
+            var paymentLinkId = dataNode.TryGetProperty("paymentLinkId", out var pl) ? pl.GetString() : null;
+            var transactionId = dataNode.TryGetProperty("reference", out var rf) ? rf.GetString() : null;
 
-            var isPaid =
-                string.Equals(status, "PAID", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(status, "SUCCESS", StringComparison.OrdinalIgnoreCase);
-
-            if (!isPaid) return Ok(new { ok = true, ignored = true });
-            if (orderCode <= 0) return Ok(new { ok = true, error = "orderCode missing/invalid" });
+            if (orderCode <= 0) return Ok(new { ok = true, error = "orderCode invalid" });
 
             var orderRequestId = (int)(orderCode / 10);
 
@@ -266,7 +277,37 @@ namespace AMMS.API.Controllers
                 raw.ToString(),
                 paymentRepo,
                 ct);
+
             return Ok(new { ok = true, processed = ok, message, orderRequestId, orderCode });
+        }
+
+        private static bool IsValidPayOsSignature(JsonElement dataNode, string signature, string checksumKey)
+        {
+            var dict = new SortedDictionary<string, string>(StringComparer.Ordinal);
+
+            foreach (var p in dataNode.EnumerateObject())
+            {
+                string val = p.Value.ValueKind switch
+                {
+                    JsonValueKind.Null => "",
+                    JsonValueKind.Undefined => "",
+                    JsonValueKind.String => p.Value.GetString() ?? "",
+                    JsonValueKind.Number => p.Value.GetRawText(),
+                    JsonValueKind.True => "true",
+                    JsonValueKind.False => "false",
+                    _ => p.Value.GetRawText()
+                };
+
+                if (val is "null" or "undefined") val = "";
+                dict[p.Name] = val;
+            }
+
+            var dataStr = string.Join("&", dict.Select(kv => $"{kv.Key}={kv.Value}"));
+            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(checksumKey));
+            var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(dataStr));
+            var hex = Convert.ToHexString(hash).ToLowerInvariant();
+
+            return string.Equals(hex, signature ?? "", StringComparison.OrdinalIgnoreCase);
         }
 
         [HttpGet("stats/email/accepted")]
@@ -375,60 +416,29 @@ namespace AMMS.API.Controllers
 
 
         [HttpGet("payos-deposit/{request_id:int}")]
-        public async Task<IActionResult> GetPayOsDeposit(
-    int request_id,
-    [FromServices] IPayOsService payOsService,
-    CancellationToken ct)
+        public async Task<IActionResult> GetPayOsDeposit(int request_id, CancellationToken ct)
         {
-            var req = await _service.GetByIdAsync(request_id);
-            if (req == null) return NotFound("Request not found");
-
-            var est = await _db.cost_estimates
-                .AsNoTracking()
-                .Where(x => x.order_request_id == request_id)
-                .OrderByDescending(x => x.created_at)
-                .FirstOrDefaultAsync(ct);
-
-            if (est == null) return BadRequest("Cost estimate not found");
-
-            var amount = (int)Math.Round(est.deposit_amount, 0)/100;
-            if (amount <= 0) return BadRequest("Deposit amount must be > 0");
-
-            int attempt = 1;
-            int orderCode = checked(request_id * 10 + attempt);
-
-            var backendUrl = _config["Deal:BaseUrl"]!;
-            var feBase = _config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app";
-
-            var returnUrl = $"{backendUrl}/api/requests/payos/return?request_id={request_id}&order_code={orderCode}";
-            var cancelUrl = $"{feBase}/reject-deal/{request_id}?status=cancel";
-
-            var description = $"AM{request_id:D6}";
-
-            var newLink = await payOsService.CreatePaymentLinkAsync(
-                orderCode: orderCode,
-                amount: amount,
-                description: description,
-                buyerName: req.customer_name ?? "Khach hang",
-                buyerEmail: req.customer_email ?? "",
-                buyerPhone: req.customer_phone ?? "",
-                returnUrl: returnUrl,
-                cancelUrl: cancelUrl,
-                ct: ct
-            );
-
-            return Ok(new
+            try
             {
-                check_out_url = newLink.checkoutUrl,
-                qr_code = newLink.qr_code,
-                account_number = newLink.account_number,
-                account_name = newLink.account_name,
-                bin = newLink.bin,
-                amount = newLink.amount,
-                description = newLink.description,
-                status = "PENDING",
-                order_code = orderCode
-            });
+                var link = await _dealService.CreateOrReuseDepositLinkAsync(request_id, ct);
+
+                return Ok(new
+                {
+                    check_out_url = link.checkoutUrl,
+                    qr_code = link.qr_code,
+                    account_number = link.account_number,
+                    account_name = link.account_name,
+                    bin = link.bin,
+                    amount = link.amount,
+                    description = link.description,
+                    status = link.status ?? "PENDING",
+                    order_code = link.order_code
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
         }
 
         [HttpGet("full-data-by-request_id/{request_id:int}")]

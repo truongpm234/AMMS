@@ -81,16 +81,19 @@ namespace AMMS.Application.Services
             var deposit = est.deposit_amount;
             var amount = (int)Math.Round(deposit, 0);
             var description = $"AM{orderRequestId:D6}";
-            var orderCode = (req.quote_id ?? orderRequestId) * 100000 + orderRequestId;
+            
+            var orderCode = await GetOrCreatePayOsOrderCodeAsync(orderRequestId);
             var baseUrl = _config["Deal:BaseUrl"]!;
 
             var returnUrl = $"{baseUrl}/api/requests/payos/return?request_id={orderRequestId}&order_code={orderCode}";
             var cancelUrl = $"{baseUrl}/api/requests/payos/cancel?orderRequestId={orderRequestId}&orderCode={orderCode}";
 
-            var existingLink = await _payOs.GetPaymentLinkInformationAsync(orderCode);
-            if (existingLink != null && existingLink.status != "CANCELLED")
+            var existing = await _payOs.GetPaymentLinkInformationAsync(orderCode);
+            if (existing != null)
             {
-                return existingLink.checkoutUrl ?? "";
+                var st = (existing.status ?? "").ToUpperInvariant();
+                if (st == "PENDING" || st == "PAID" || st == "SUCCESS" || st == "CANCELLED")
+                    return existing.checkoutUrl ?? "";
             }
 
             var result = await _payOs.CreatePaymentLinkAsync(
@@ -330,6 +333,71 @@ namespace AMMS.Application.Services
                 $"[AMMS] Thanh toán thành công - Đơn #{req.order_request_id}",
                 html
             );
+        }
+
+        public async Task<PayOsResultDto> CreateOrReuseDepositLinkAsync(int requestId, CancellationToken ct = default)
+        {
+            var req = await _requestRepo.GetByIdAsync(requestId) ?? throw new InvalidOperationException("Request not found");
+
+            var est = await _estimateRepo.GetByOrderRequestIdAsync(requestId)
+                      ?? throw new InvalidOperationException("Cost estimate not found");
+
+            int orderCode = await GetOrCreatePayOsOrderCodeAsync(requestId, ct);
+
+            var existing = await _payOs.GetPaymentLinkInformationAsync(orderCode, ct);
+            if (existing != null)
+            {
+                var st = (existing.status ?? "").ToUpperInvariant();
+                if (st == "PENDING" || st == "PAID" || st == "SUCCESS")
+                    return existing;
+            }
+
+            var backendUrl = _config["Deal:BaseUrl"]!;
+            var feBase = _config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app";
+
+            var returnUrl = $"{backendUrl}/api/requests/payos/return?request_id={requestId}&order_code={orderCode}";
+            var cancelUrl = $"{feBase}/reject-deal/{requestId}?status=cancel";
+
+            // ⚠️ Bạn đang chia /100 để test => nếu production thì bỏ chia
+            var amount = (int)Math.Round(est.deposit_amount, 0) / 100;
+
+            var description = $"AM{requestId:D6}";
+
+            return await _payOs.CreatePaymentLinkAsync(
+                orderCode: orderCode,
+                amount: amount,
+                description: description,
+                buyerName: req.customer_name ?? "Khach hang",
+                buyerEmail: req.customer_email ?? "",
+                buyerPhone: req.customer_phone ?? "",
+                returnUrl: returnUrl,
+                cancelUrl: cancelUrl,
+                ct: ct
+            );
+        }
+
+        private async Task<int> GetOrCreatePayOsOrderCodeAsync(
+    int orderRequestId,
+    CancellationToken ct = default,
+    int maxAttempt = 9)
+        {
+            for (int attempt = 1; attempt <= maxAttempt; attempt++)
+            {
+                int orderCode = checked(orderRequestId * 10 + attempt);
+
+                var info = await _payOs.GetPaymentLinkInformationAsync(orderCode, ct);
+
+                if (info == null) return orderCode;
+
+                var st = (info.status ?? "").ToUpperInvariant();
+                if (st == "PENDING" || st == "PAID" || st == "SUCCESS")
+                    return orderCode;
+
+                if (st == "CANCELLED" || st == "EXPIRED")
+                    continue;
+            }
+
+            throw new InvalidOperationException("Cannot allocate orderCode: attempts exhausted.");
         }
 
     }

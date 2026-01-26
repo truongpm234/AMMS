@@ -19,5 +19,6 @@ namespace AMMS.Shared.DTOs.PayOS
         public string? payment_link_id { get; set; }
         public string? transaction_id { get; set; }
         public string? raw_json { get; set; }
+        public string? order_code { get; set; }
     }
 }

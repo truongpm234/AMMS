@@ -18,6 +18,6 @@ namespace AMMS.Application.Interfaces
         Task NotifyCustomerPaidAsync(int orderRequestId, decimal paidAmount, DateTime paidAt);
         Task MarkAcceptedAsync(int orderRequestId);
         Task<PayOsDepositInfoDto> PrepareDepositPaymentAsync(int orderRequestId, CancellationToken ct = default);
-
+        Task<PayOsResultDto> CreateOrReuseDepositLinkAsync(int requestId, CancellationToken ct = default);
     }
 }
