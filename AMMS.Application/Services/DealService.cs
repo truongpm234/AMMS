@@ -55,7 +55,7 @@ namespace AMMS.Application.Services
                 order_request_id = orderRequestId,
                 total_amount = est.final_total_cost,
                 status = "Sent",
-                created_at = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified)
+                created_at = AppTime.UtcNowUnspecified()
             };
 
             await _quoteRepo.AddAsync(quote);
@@ -234,7 +234,6 @@ namespace AMMS.Application.Services
                 : "";
             string FormatVND(decimal amount) => string.Format("{0:N0} đ", amount);
 
-            // Xử lý phần hiển thị thanh toán nếu có
             string paymentInfoHtml = "";
             if (paidAmount.HasValue)
             {
@@ -471,10 +470,15 @@ namespace AMMS.Application.Services
             var req = await _requestRepo.GetByIdAsync(requestId)
                       ?? throw new InvalidOperationException("Request not found");
 
+            if (string.Equals(req.process_status, "Rejected", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Request has been Rejected. Cannot create payment link.");
+
+            if (string.Equals(req.process_status, "Accepted", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Request has been Accepted. Cannot create payment link.");
+
             var est = await _estimateRepo.GetByOrderRequestIdAsync(requestId)
                       ?? throw new InvalidOperationException("Cost estimate not found");
 
-            // ✅ 1) DB snapshot trước
             var pending = await _payment.GetLatestPendingByRequestIdAsync(requestId, ct);
             if (pending != null && !string.IsNullOrWhiteSpace(pending.payos_raw))
                 return PayOsRawMapper.FromPayment(pending);
@@ -482,11 +486,9 @@ namespace AMMS.Application.Services
             var backendUrl = _config["Deal:BaseUrl"]!;
             var feBase = _config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app";
 
-            // ⚠️ test /100 thì giữ, prod bỏ /100
             var amount = (int)Math.Round(est.deposit_amount, 0) / 100;
             var description = $"AM{requestId:D6}";
 
-            // ✅ 2) Retry orderCode nếu duplicate
             const int maxAttempt = 9;
             Exception? last = null;
 
@@ -510,8 +512,7 @@ namespace AMMS.Application.Services
                         cancelUrl: cancelUrl,
                         ct: ct);
 
-                    // ✅ 3) lưu snapshot PENDING
-                    var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+                    var now = AppTime.UtcNowUnspecified();
                     await _payment.UpsertPendingAsync(new payment
                     {
                         order_request_id = requestId,
@@ -531,7 +532,7 @@ namespace AMMS.Application.Services
                 }
                 catch (PayOsException ex) when (IsDuplicateOrderCode(ex.Message))
                 {
-                    last = ex; // thử attempt tiếp
+                    last = ex;
                     continue;
                 }
             }

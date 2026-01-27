@@ -172,41 +172,42 @@ namespace AMMS.API.Controllers
             });
         }
 
-        [HttpGet("reject-form")]
-        public async Task<IActionResult> RejectForm([FromQuery] int orderRequestId, [FromQuery] string token)
-        {
-            var fe = "https://sep490-fe.vercel.app";
+        //[HttpGet("reject-form")]
+        //public async Task<IActionResult> RejectForm([FromQuery] int orderRequestId, [FromQuery] string token)
+        //{
+        //    var fe = "https://sep490-fe.vercel.app";
 
-            var req = await _service.GetByIdAsync(orderRequestId);
-            if (req == null)
-            {
-                return Redirect($"{fe}/reject-deal?orderRequestId={orderRequestId}&token={token}&error=not_found");
-            }
+        //    var req = await _service.GetByIdAsync(orderRequestId);
+        //    if (req == null)
+        //    {
+        //        return Redirect($"{fe}/reject-deal?orderRequestId={orderRequestId}&token={token}&error=not_found");
+        //    }
 
-            if (string.Equals(req.process_status, "Accepted", StringComparison.OrdinalIgnoreCase))
-            {
-                return Redirect($"{fe}/reject-deal?orderRequestId={orderRequestId}&token={token}&error=accepted");
-            }
+        //    if (string.Equals(req.process_status, "Accepted", StringComparison.OrdinalIgnoreCase))
+        //    {
+        //        return Redirect($"{fe}/reject-deal?orderRequestId={orderRequestId}&token={token}&error=accepted");
+        //    }
 
-            return Redirect($"{fe}/reject-deal?orderRequestId={orderRequestId}&token={token}");
-        }
+        //    return Redirect($"{fe}/reject-deal?orderRequestId={orderRequestId}&token={token}");
+        //}
 
         [HttpPost("reject")]
         public async Task<IActionResult> RejectDeal([FromBody] RejectDealRequest dto, CancellationToken ct)
         {
-            // 1. Lấy order_request
+            // 1) Lấy order_request
             var req = await _service.GetByIdAsync(dto.order_request_id);
             if (req == null)
                 return NotFound(new { message = "Order request not found" });
 
+            // 2) Không cho reject nếu đã Accepted
             if (string.Equals(req.process_status, "Accepted", StringComparison.OrdinalIgnoreCase))
-            {
                 return BadRequest(new { message = "Order has already been accepted, cannot reject." });
-            }
 
+            // 3) Validate OTP
             if (string.IsNullOrWhiteSpace(dto.otp))
                 return BadRequest(new { message = "OTP is required to reject this deal." });
 
+            // 4) Xác định phone để verify OTP
             var phone = dto.phone;
             if (string.IsNullOrWhiteSpace(phone))
                 phone = req.customer_phone ?? "";
@@ -214,15 +215,16 @@ namespace AMMS.API.Controllers
             if (string.IsNullOrWhiteSpace(phone))
                 return BadRequest(new { message = "Customer phone is missing, cannot verify OTP." });
 
+            // 5) Verify OTP qua SMS service
             var verifyReq = new VerifyOtpSmsRequest(phone, dto.otp);
 
             var verifyRes = await _smsOtp.VerifyOtpAsync(verifyReq, ct);
             if (!verifyRes.success || !verifyRes.valid)
-            {
                 return BadRequest(new { message = verifyRes.message ?? "Invalid or expired OTP" });
-            }
 
+            // 6) Update status + gửi mail consultant
             await _dealService.RejectDealAsync(dto.order_request_id, dto.reason ?? "Customer rejected");
+
             return Ok(new { ok = true });
         }
 
@@ -495,7 +497,6 @@ namespace AMMS.API.Controllers
                 managerId: 3
             );
 
-            // 8) email: ✅ NON-FATAL (không throw)
             try
             {
                 await _dealService.NotifyConsultantPaidAsync(orderRequestId, (decimal)amount, now);
@@ -503,7 +504,6 @@ namespace AMMS.API.Controllers
             }
             catch
             {
-                // TODO: log
             }
 
             return (true, $"Processed OK: order_id={convert.OrderId}, prod_id={prodId}");
@@ -520,7 +520,6 @@ namespace AMMS.API.Controllers
         {
             var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
-            // ✅ idempotent by provider+order_code
             var existing = await _db.payments
                 .AsTracking()
                 .FirstOrDefaultAsync(p => p.provider == "PAYOS" && p.order_code == orderCode, ct);
@@ -573,6 +572,15 @@ namespace AMMS.API.Controllers
                 var req = await _service.GetByIdAsync(request_id);
                 if (req == null)
                     return NotFound(new { message = "Request not found" });
+
+                if (string.Equals(req.process_status, "Rejected", StringComparison.OrdinalIgnoreCase))
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden, new
+                    {
+                        message = "Request has been rejected. Payment link is not available.",
+                        request_id
+                    });
+                }
 
                 var est = await _db.cost_estimates
                     .AsNoTracking()
