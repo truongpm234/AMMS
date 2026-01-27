@@ -2,6 +2,7 @@
 using AMMS.Application.Services;
 using AMMS.Shared.DTOs.Google;
 using AMMS.Shared.DTOs.User;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AMMS.API.Controllers
@@ -66,6 +67,21 @@ namespace AMMS.API.Controllers
         public async Task<UserRegisterResponseDto> Register([FromBody] UserRegisterRequestDto request, string otp)
         {
             return await _userService.Register(request, otp);
+        }
+
+        //cmt for add again
+        [Authorize(Policy = "admin")]
+        [HttpPost("/admin-create-new-user")]
+        public async Task<IActionResult> AdminCreateNewUser([FromBody] UserUpdateCreateDto new_user)
+        {
+            return Ok(await _userService.AdminCreateUpdateNewUser(new_user, null));
+        }
+
+        [Authorize(Policy = "admin")]
+        [HttpPost("/admin-update-user/{user_id:int}")]
+        public async Task<IActionResult> AdminUpdateUser([FromBody] UserUpdateCreateDto update_user, [FromRoute] int user_id)
+        {
+            return Ok(await _userService.AdminCreateUpdateNewUser(update_user, user_id));
         }
     }
 }

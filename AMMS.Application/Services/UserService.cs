@@ -39,5 +39,10 @@ namespace AMMS.Application.Services
         {
             return await _userRepository.GetUserForGoogleAuth(email, name);
         }
+
+        public async Task<user?> AdminCreateUpdateNewUser(UserUpdateCreateDto new_user, int? user_id)
+        {
+            return await _userRepository.UpdateCreateUser(new_user, user_id);
+        }
     }
 }

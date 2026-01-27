@@ -81,5 +81,42 @@ namespace AMMS.Infrastructure.Repositories
             return exitUser;
         }
 
+        public async Task<user?> UpdateCreateUser(UserUpdateCreateDto new_user, int? user_id)
+        {
+            var updateUser = _db.users.SingleOrDefault(u => u.user_id == user_id);
+            try
+            {
+                if (updateUser != null)
+                {
+                    updateUser.email = new_user.user_email;
+                    updateUser.username = new_user.user_name;
+                    updateUser.password_hash = BCrypt.Net.BCrypt.HashPassword(new_user.user_password);
+                    updateUser.phone_number = new_user.user_phone;
+                    updateUser.full_name = new_user.full_name;
+                    updateUser.role_id = new_user.role_id;
+                    updateUser.is_active = new_user.is_active;
+                    _db.users.Update(updateUser);
+                    await _db.SaveChangesAsync();
+                    return updateUser;
+                }
+                else
+                {
+                    var newUser = new user();
+                    newUser.email = new_user.user_email;
+                    newUser.username = new_user.user_name;
+                    newUser.password_hash = BCrypt.Net.BCrypt.HashPassword(new_user.user_password);
+                    newUser.phone_number = new_user.user_phone;
+                    newUser.full_name = new_user.full_name;
+                    newUser.role_id = new_user.role_id;
+                    _db.users.Add(newUser);
+                    await _db.SaveChangesAsync();
+                    return newUser;
+                }
+            }
+            catch (Exception e)
+            {
+                throw new Exception("ERROR", e);
+            }
+        }
     }
 }
