@@ -70,7 +70,7 @@ namespace AMMS.Application.Services
             var orderDetailUrl = $"{baseUrlFe}/checkout/{orderRequestId}";
 
             var html = DealEmailTemplates.QuoteEmail(req, est, orderDetailUrl);
-
+            Console.WriteLine($"order_request_date = {req.order_request_date?.ToString("O") ?? "NULL"}");
             await _emailService.SendAsync(req.customer_email, "Báo giá đơn hàng in ấn", html);
         }
 
@@ -415,30 +415,6 @@ namespace AMMS.Application.Services
         {
             msg = (msg ?? "").ToLowerInvariant();
             return msg.Contains("ordercode") && (msg.Contains("exists") || msg.Contains("tồn tại") || msg.Contains("231"));
-        }
-
-
-        private async Task SnapshotPendingAsync(int requestId, int orderCode, PayOsResultDto dto, CancellationToken ct)
-        {
-            var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-
-            await _payment.UpsertPendingAsync(new payment
-            {
-                order_request_id = requestId,
-                provider = "PAYOS",
-                order_code = orderCode,
-                amount = (decimal)(dto.amount ?? 0),
-                currency = "VND",
-                status = "PENDING",
-                paid_at = null,
-                payos_payment_link_id = dto.payment_link_id,
-                payos_transaction_id = dto.transaction_id,
-                payos_raw = dto.raw_json,
-                created_at = now,
-                updated_at = now
-            }, ct);
-
-            await _payment.SaveChangesAsync(ct);
         }
 
         private async Task<int> GetOrCreatePayOsOrderCodeAsync(

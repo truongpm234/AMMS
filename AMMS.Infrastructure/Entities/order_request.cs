@@ -3,7 +3,6 @@
 namespace AMMS.Infrastructure.Entities;
 
 [Table("order_request", Schema = "AMMS_DB")]
-
 public partial class order_request
 {
     public int order_request_id { get; set; }

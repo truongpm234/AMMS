@@ -111,7 +111,6 @@ namespace AMMS.Application.Services
             entity.design_file_path = req.design_file_path ?? entity.design_file_path;
             entity.detail_address = req.detail_address ?? entity.detail_address;
             entity.delivery_date = ToUnspecified(req.delivery_date);
-            entity.order_request_date = ToUnspecified(req.order_request_date);
             entity.product_type = req.product_type ?? entity.product_type;
             entity.number_of_plates = req.number_of_plates ?? entity.number_of_plates;
             entity.paper_code = req.paper_code ?? entity.paper_code;
