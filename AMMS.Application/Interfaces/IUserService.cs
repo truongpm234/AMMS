@@ -10,5 +10,7 @@ namespace AMMS.Application.Interfaces
         Task<UserRegisterResponseDto> Register(UserRegisterRequestDto request, string otp);
 
         Task<user?> GetUserForGoogleAuth(string email, string name);
+
+        Task<user?> AdminCreateUpdateNewUser(UserUpdateCreateDto new_user, int? user_id);
     }
 }
