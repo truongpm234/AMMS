@@ -63,7 +63,6 @@ namespace AMMS.Infrastructure.Repositories
 
                 where pr.start_date != null
                       && pr.order_id != null
-                      && pr.end_date == null
                 orderby pr.start_date descending, pr.prod_id descending
                 select new BaseRow
                 {
