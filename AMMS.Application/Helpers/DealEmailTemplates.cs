@@ -46,9 +46,6 @@ namespace AMMS.Application.Helpers
             return string.Join(", ", codes.Select(MapProcessCode));
         }
 
-        /// <summary>
-        /// Email báo giá: dùng 1 form duy nhất.
-        /// </summary>
         public static string QuoteEmail(order_request req, cost_estimate est, string orderDetailUrl)
         {           
             var address = $"{req.detail_address}";

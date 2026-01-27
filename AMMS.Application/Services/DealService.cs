@@ -260,15 +260,16 @@ namespace AMMS.Application.Services
   {paidLine}
   {paidAtLine}
 
-  <p style='color:#64748b;font-size:12px'>AMMS System</p>
+  <p style='color:#64748b;font-size:12px'>MES System</p>
 </div>";
 
             await _emailService.SendAsync(
                 consultantEmail,
-                $"[AMMS] Trạng thái đơn #{req.order_request_id}: {statusText}",
+                $"[MES] Trạng thái đơn #{req.order_request_id}: {statusText}",
                 html
             );
         }
+
         public async Task NotifyConsultantPaidAsync(int orderRequestId, decimal paidAmount, DateTime paidAt)
         {
             var req = await _requestRepo.GetByIdAsync(orderRequestId)
@@ -293,6 +294,7 @@ namespace AMMS.Application.Services
         {
             var req = await _requestRepo.GetByIdAsync(orderRequestId)
                 ?? throw new Exception("Order request not found");
+            var fe = _config["Deal:BaseUrlFe"]!;
 
             if (string.IsNullOrWhiteSpace(req.customer_email))
                 return;
@@ -306,34 +308,101 @@ namespace AMMS.Application.Services
 
             var finalTotal = est?.final_total_cost ?? 0m;
             var deposit = est?.deposit_amount ?? 0m;
+            string FormatVND(decimal amount) => string.Format("{0:N0} đ", amount);
 
             var html = $@"
-<div style='font-family:Arial;max-width:720px;margin:24px auto'>
-  <h2>Thanh toán thành công</h2>
-  <p>Chúng tôi đã nhận được tiền cọc cho đơn hàng của bạn.</p>
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+    body {{ margin: 0; padding: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background-color: #f1f5f9; }}
+    .container {{ max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    td {{ vertical-align: top; }}
+    
+    /* Typography */
+    .header-text {{ color: #ffffff; font-size: 20px; font-weight: 700; }}
+    .label {{ color: #64748b; font-size: 13px; padding: 8px 0; }}
+    .value {{ color: #1e293b; font-weight: 600; font-size: 13px; text-align: right; padding: 8px 0; }}
+    .section-title {{ font-size: 14px; font-weight: 700; text-transform: uppercase; color: #334155; margin-bottom: 10px; border-bottom: 2px solid #e2e8f0; padding-bottom: 5px; display: inline-block; }}
+    
+    /* Success Box */
+    .success-box {{ background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; text-align: center; margin-bottom: 25px; }}
+    .paid-amount {{ color: #15803d; font-size: 24px; font-weight: 800; margin: 5px 0; }}
+    .success-badge {{ display: inline-block; background: #16a34a; color: white; padding: 4px 12px; border-radius: 50px; font-size: 12px; font-weight: bold; margin-bottom: 8px; }}
+</style>
+</head>
+<body style='padding: 30px 0;'>
 
-  <h3>Thông tin đơn hàng</h3>
-  <ul>
-    <li><b>Request ID:</b> {req.order_request_id}</li>
-    <li><b>Sản phẩm:</b> {req.product_name}</li>
-    <li><b>Số lượng:</b> {req.quantity}</li>
-    <li><b>Tổng giá trị:</b> {finalTotal:n0} VND</li>
-    <li><b>Tiền cọc:</b> {deposit:n0} VND</li>
-  </ul>
+  <div class='container'>
+    
+    <div style='background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); padding: 25px 30px; text-align: center;'>
+       <div class='header-text'>XÁC NHẬN THANH TOÁN</div>
+       <div style='color: #bfdbfe; font-size: 13px; margin-top: 5px;'>Cảm ơn bạn đã thanh toán tiền cọc</div>
+    </div>
 
-  <h3>Thông tin thanh toán</h3>
-  <ul>
-    <li><b>Số tiền đã thanh toán:</b> {paidAmount:n0} VND</li>
-    <li><b>Thời gian:</b> {paidAt:dd/MM/yyyy HH:mm:ss}</li>
-    <li><b>Trạng thái:</b> PAID</li>
-  </ul>
+    <div style='padding: 30px;'>
+      
+      <p style='margin: 0 0 20px 0; color: #334155; font-size: 15px;'>
+        Chào <b>{req.customer_name}</b>,<br>
+        Hệ thống MES đã nhận được khoản thanh toán của bạn cho đơn hàng <b>AM{req.order_request_id:D6}</b>.
+      </p>
 
-  <p style='color:#64748b;font-size:12px'>AMMS System</p>
-</div>";
+      <div class='success-box'>
+         <div class='success-badge'>THANH TOÁN THÀNH CÔNG</div>
+         <div style='color: #86efac; font-size: 40px; line-height: 1;'>&#10003;</div>
+         <div style='color: #64748b; font-size: 13px; margin-top: 10px;'>Số tiền đã nhận</div>
+         <div class='paid-amount'>{FormatVND(paidAmount)}</div>
+         <div style='color: #94a3b8; font-size: 12px;'>Thời gian: {paidAt:dd/MM/yyyy HH:mm:ss}</div>
+      </div>
+
+      <table border='0' cellpadding='0' cellspacing='0'>
+        <tr>
+           <td width='48%' style='padding-right: 15px;'>
+              <div class='section-title' style='border-color: #3b82f6; color: #2563eb;'>Thông tin đơn hàng</div>
+              <table width='100%'>
+                 <tr><td class='label'>Mã đơn</td><td class='value'>AM{req.order_request_id:D6}</td></tr>
+                 <tr><td class='label'>Sản phẩm</td><td class='value'>{req.product_name}</td></tr>
+                 <tr><td class='label'>Số lượng</td><td class='value'>{req.quantity:N0}</td></tr>
+              </table>
+           </td>
+           
+           <td width='4%'></td>
+
+           <td width='48%' style='padding-left: 15px;'>
+              <div class='section-title' style='border-color: #f59e0b; color: #d97706;'>Chi tiết tài chính</div>
+              <table width='100%'>
+                 <tr><td class='label'>Tổng giá trị</td><td class='value'>{FormatVND(finalTotal)}</td></tr>
+                 <tr><td class='label'>Yêu cầu cọc</td><td class='value'>{FormatVND(deposit)}</td></tr>
+                 <tr>
+                    <td class='label' style='border-top: 1px dashed #cbd5e1; color: #059669; font-weight: 700;'>Đã thanh toán</td>
+                    <td class='value' style='border-top: 1px dashed #cbd5e1; color: #059669; font-weight: 800;'>{FormatVND(paidAmount)}</td>
+                 </tr>
+              </table>
+           </td>
+        </tr>
+      </table>
+
+      <div style='margin-top: 30px; border-top: 1px solid #f1f5f9; padding-top: 20px; text-align: center;'>
+         <p style='color: #64748b; font-size: 13px; line-height: 1.5; margin: 0;'>
+            Đơn hàng của bạn đang được xử lý. <br>
+            Bạn có thể tra cứu tiến trình đơn hàng thông qua <a href='{fe}/look-up' style='color: #2563eb; text-decoration: none; font-weight: 600;'>Link</a>.
+         </p>
+      </div>
+
+    </div>
+    
+    <div style='background-color: #f8fafc; padding: 15px; text-align: center; color: #94a3b8; font-size: 12px;'>
+      &copy; {DateTime.Now.Year} MES Printing System
+    </div>
+
+  </div>
+</body>
+</html>";
 
             await _emailService.SendAsync(
                 req.customer_email,
-                $"[AMMS] Thanh toán thành công - Đơn #{req.order_request_id}",
+                $"[MES] Xác nhận thanh toán thành công - Đơn #AM{req.order_request_id:D6}",
                 html
             );
         }
