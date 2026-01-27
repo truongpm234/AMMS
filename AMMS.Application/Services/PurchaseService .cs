@@ -236,7 +236,7 @@ namespace AMMS.Application.Services
 
                 return new PurchaseOrderListItemDto(
                     first.PurchaseId,
-                    $"BATCH({createdPurchases.Count}): {codes}", // chỉ để trả response
+                    $"BATCH({createdPurchases.Count}): {codes}",
                     "MIXED",
                     createdAt,
                     createdByName,

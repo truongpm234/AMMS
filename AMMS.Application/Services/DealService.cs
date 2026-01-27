@@ -127,7 +127,7 @@ namespace AMMS.Application.Services
             var deposit = est.deposit_amount;
             if (deposit <= 0) throw new InvalidOperationException("Deposit amount is zero.");
 
-            var orderCode = (long)orderRequestId; // Logic tạo mã đơn
+            var orderCode = (long)orderRequestId;
             var feBase = _config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app";
             var returnUrl = $"{feBase}/request-detail/{orderRequestId}";
             var cancelUrl = returnUrl;
@@ -138,14 +138,13 @@ namespace AMMS.Application.Services
             var existingLink = await _payOs.GetPaymentLinkInformationAsync(orderCode, ct);
             if (existingLink != null && (existingLink.status == "PENDING" || existingLink.status == "PAID"))
             {
-                // Dùng lại thông tin cũ
                 result = existingLink;
             }
             else
             {
                 result = await _payOs.CreatePaymentLinkAsync(
                     orderCode: (int)orderCode,
-                    amount: (int)deposit / 100, // Chia 100 dễ test
+                    amount: (int)deposit / 100,
                     description: description,
                     buyerName: req.customer_name ?? "",
                     buyerEmail: req.customer_email ?? "",
