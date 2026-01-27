@@ -143,7 +143,10 @@ builder.Services.Configure<CloudinaryOptions>(
 builder.Services.Configure<SendGridSettings>(
     builder.Configuration.GetSection("SendGrid"));
 builder.Services.Configure<PayOsOptions>(builder.Configuration.GetSection("PayOS"));
-
+builder.Services.AddControllers().AddJsonOptions(o =>
+{
+    o.JsonSerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.Never;
+});
 
 // Services
 builder.Services.AddScoped<IUploadFileService, UploadFileService>();
@@ -169,7 +172,7 @@ builder.Services.AddScoped<ISupplierRepository, SupplierRepository>();
 builder.Services.AddScoped<ISupplierService, SupplierService>();
 builder.Services.AddScoped<IPurchaseRepository, PurchaseRepository>();
 builder.Services.AddScoped<IPurchaseService, PurchaseService>();
-builder.Services.AddScoped<IOrderLookupService, OrderLookupService>();
+builder.Services.AddScoped<ILookupService, LookupService>();
 builder.Services.AddScoped<IProductTypeProcessRepository, ProductTypeProcessRepository>();
 builder.Services.AddScoped<ITaskRepository, TaskRepository>();
 builder.Services.AddScoped<ITaskLogRepository, TaskLogRepository>();

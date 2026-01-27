@@ -1,4 +1,5 @@
 ﻿using AMMS.Application.Interfaces;
+using AMMS.Shared.DTOs.Exceptions.AMMS.Application.Exceptions;
 using AMMS.Shared.DTOs.PayOS;
 using Microsoft.Extensions.Options;
 using System.Net.Http.Json;
@@ -19,20 +20,18 @@ namespace AMMS.Application.Services
             _opt = opt.Value;
         }
 
-        public async Task<string> CreatePaymentLinkAsync(
-            int orderCode,
-            int amount,
-            string description,
-            string buyerName,
-            string buyerEmail,
-            string buyerPhone,
-            string returnUrl,
-            string cancelUrl,
-            CancellationToken ct = default)
+        public async Task<PayOsResultDto> CreatePaymentLinkAsync(
+    int orderCode,
+    int amount,
+    string description,
+    string buyerName,
+    string buyerEmail,
+    string buyerPhone,
+    string returnUrl,
+    string cancelUrl,
+    CancellationToken ct = default)
         {
-            var dataToSign =
-                $"amount={amount}&cancelUrl={cancelUrl}&description={description}&orderCode={orderCode}&returnUrl={returnUrl}";
-
+            var dataToSign = $"amount={amount}&cancelUrl={cancelUrl}&description={description}&orderCode={orderCode}&returnUrl={returnUrl}";
             var signature = HmacSha256Hex(_opt.ChecksumKey, dataToSign);
 
             var req = new
@@ -54,43 +53,121 @@ namespace AMMS.Application.Services
             msg.Content = JsonContent.Create(req);
 
             var res = await _http.SendAsync(msg, ct);
-            res.EnsureSuccessStatusCode();
+            var rawResponse = await res.Content.ReadAsStringAsync(ct);
 
-            var json = await res.Content.ReadFromJsonAsync<PayOsCreateResponse>(cancellationToken: ct);
-            if (json?.data?.checkoutUrl == null)
-                throw new Exception("PayOS response missing checkoutUrl");
+            // ✅ PayOS có thể trả 200 nhưng success=false; hoặc trả lỗi nhưng vẫn có data
+            using var doc = JsonDocument.Parse(rawResponse);
 
-            return json.data.checkoutUrl;
+            var root = doc.RootElement;
+            var code = root.TryGetProperty("code", out var c) ? (c.GetString() ?? "") : "";
+            var hasData = root.TryGetProperty("data", out var data);
+
+            // ✅ Case "code=00" có data => coi như OK
+            if (code == "00" && hasData)
+                return MapPayOsDataToDto(data, orderCode, description, amount, rawResponse);
+
+            // Nếu HTTP fail mà vẫn có data thì vẫn map (tuỳ bạn muốn strict hay not)
+            if (hasData && !string.Equals(code, "", StringComparison.Ordinal))
+            {
+                // Một số case PayOS vẫn kèm data, ưu tiên trả dto để FE có link
+                return MapPayOsDataToDto(data, orderCode, description, amount, rawResponse);
+            }
+
+            // ❌ Không có data => throw
+            throw new PayOsException($"PayOS Error: {rawResponse}");
         }
 
-        public async Task<PayOsPaymentInfo?> GetPaymentLinkInformationAsync(long orderCode, CancellationToken ct = default)
+        private static PayOsResultDto MapPayOsDataToDto(JsonElement data, int orderCode, string description, int amount, string raw)
+        {
+            string? GetString(string name) =>
+                data.TryGetProperty(name, out var p) ? p.GetString() : null;
+
+            int? GetInt(string name)
+            {
+                if (!data.TryGetProperty(name, out var p)) return null;
+                if (p.ValueKind == JsonValueKind.Number && p.TryGetInt32(out var v)) return v;
+                if (p.ValueKind == JsonValueKind.String && int.TryParse(p.GetString(), out var s)) return s;
+                return null;
+            }
+
+            long? GetLong(string name)
+            {
+                if (!data.TryGetProperty(name, out var p)) return null;
+                if (p.ValueKind == JsonValueKind.Number && p.TryGetInt64(out var v)) return v;
+                if (p.ValueKind == JsonValueKind.String && long.TryParse(p.GetString(), out var s)) return s;
+                return null;
+            }
+
+            var dto = new PayOsResultDto
+            {
+                order_code = GetLong("orderCode") ?? orderCode,
+                check_out_url = GetString("checkoutUrl"),
+                qr_code = GetString("qrCode"),
+                account_number = GetString("accountNumber"),
+                account_name = GetString("accountName"),
+                bin = GetString("bin"),
+                amount = GetInt("amount") ?? amount,
+                status = GetString("status") ?? "PENDING",
+                description = GetString("description") ?? description,
+                payment_link_id = GetString("paymentLinkId"),
+                transaction_id = GetString("transactionId") ?? GetString("reference"),
+                raw_json = raw
+            };
+
+            if (string.IsNullOrWhiteSpace(dto.check_out_url))
+                throw new PayOsException("PayOS response missing checkoutUrl");
+
+            return dto;
+        }
+
+        private static int? TryGetInt32Flexible(JsonElement obj, string propName)
+        {
+            if (!obj.TryGetProperty(propName, out var p)) return null;
+
+            return p.ValueKind switch
+            {
+                JsonValueKind.Number => p.TryGetInt32(out var n) ? n : null,
+                JsonValueKind.String => int.TryParse(p.GetString(), out var s) ? s : null,
+                _ => null
+            };
+        }
+        public async Task<PayOsResultDto?> GetPaymentLinkInformationAsync(long orderCode, CancellationToken ct = default)
         {
             using var msg = new HttpRequestMessage(HttpMethod.Get, $"{_opt.BaseUrl}/v2/payment-requests/{orderCode}");
             msg.Headers.Add("x-client-id", _opt.ClientId);
             msg.Headers.Add("x-api-key", _opt.ApiKey);
 
             var res = await _http.SendAsync(msg, ct);
-            if (!res.IsSuccessStatusCode) return null;
-
             var raw = await res.Content.ReadAsStringAsync(ct);
+
             using var doc = JsonDocument.Parse(raw);
+            var root = doc.RootElement;
 
-            if (!doc.RootElement.TryGetProperty("data", out var data))
-                return new PayOsPaymentInfo { rawJson = raw };
+            if (!root.TryGetProperty("data", out var data))
+                return null;
 
-            string? status = data.TryGetProperty("status", out var st) ? st.GetString() : null;
-            long? amount = data.TryGetProperty("amount", out var am) && am.ValueKind == JsonValueKind.Number ? am.GetInt64() : null;
-            string? paymentLinkId = data.TryGetProperty("paymentLinkId", out var pl) ? pl.GetString() : null;
-            string? transactionId = data.TryGetProperty("transactionId", out var tx) ? tx.GetString() : null;
-
-            return new PayOsPaymentInfo
+            return new PayOsResultDto
             {
-                status = status,
-                amount = amount,
-                paymentLinkId = paymentLinkId,
-                transactionId = transactionId,
-                rawJson = raw
+                order_code = orderCode,
+                raw_json = raw,
+
+                status = GetString(data, "status"),
+                amount = TryGetInt32Flexible(data, "amount"),
+
+                check_out_url = GetString(data, "checkoutUrl"),
+                qr_code = GetString(data, "qrCode"),
+                account_number = GetString(data, "accountNumber"),
+                account_name = GetString(data, "accountName"),
+                bin = GetString(data, "bin"),
+                description = GetString(data, "description"),
+                payment_link_id = GetString(data, "paymentLinkId"),
+                transaction_id = GetString(data, "transactionId") ?? GetString(data, "reference"),
             };
+        }
+
+        private string? GetString(JsonElement element, string propName)
+        {
+            return element.TryGetProperty(propName, out var prop) ? prop.GetString() : null;
         }
 
         private static string HmacSha256Hex(string key, string data)

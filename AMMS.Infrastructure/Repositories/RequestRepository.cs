@@ -23,6 +23,53 @@ namespace AMMS.Infrastructure.Repositories
             return await _db.order_requests
                 .FirstOrDefaultAsync(x => x.order_request_id == id);
         }
+        public async Task<RequestWithCostDto?> GetByIdWithCostAsync(int id)
+        {
+            var query = from r in _db.order_requests.AsNoTracking()
+                        where r.order_request_id == id
+                        join ce in _db.cost_estimates.AsNoTracking()
+                            on r.order_request_id equals ce.order_request_id into ceJoin
+                        from ce in ceJoin.OrderBy(x => x.estimate_id).Take(1).DefaultIfEmpty()
+
+                        select new RequestWithCostDto
+                        {
+                            order_request_id = r.order_request_id,
+                            customer_name = r.customer_name,
+                            customer_phone = r.customer_phone,
+                            customer_email = r.customer_email,
+                            delivery_date = r.delivery_date,
+                            product_name = r.product_name,
+                            quantity = r.quantity,
+                            description = r.description,
+                            design_file_path = r.design_file_path,
+                            order_request_date = r.order_request_date,
+                            detail_address = r.detail_address,
+                            process_status = r.process_status,
+                            product_type = r.product_type,
+                            number_of_plates = r.number_of_plates,
+                            production_processes = r.production_processes,
+                            coating_type = r.coating_type,
+                            paper_code = r.paper_code,
+                            paper_name = r.paper_name,
+                            wave_type = r.wave_type,
+                            order_id = r.order_id,
+                            quote_id = r.quote_id,
+                            product_length_mm = r.product_length_mm,
+                            product_width_mm = r.product_width_mm,
+                            product_height_mm = r.product_height_mm,
+                            glue_tab_mm = r.glue_tab_mm,
+                            bleed_mm = r.bleed_mm,
+                            is_one_side_box = r.is_one_side_box,
+                            print_width_mm = r.print_width_mm,
+                            print_height_mm = r.print_height_mm,
+                            is_send_design = r.is_send_design,
+                            reason = r.reason,
+                            final_total_cost = ce != null ? ce.final_total_cost : null,
+                            deposit_amount = ce != null ? ce.deposit_amount : null
+                        };
+
+            return await query.FirstOrDefaultAsync();
+        }
 
         public Task UpdateAsync(order_request entity)
         {
@@ -255,8 +302,7 @@ namespace AMMS.Infrastructure.Repositories
             };
         }
 
-        public async Task<PagedResultLite<RequestEmailStatsDto>>
-    GetEmailsByAcceptedCountPagedAsync(int page, int pageSize, CancellationToken ct = default)
+        public async Task<PagedResultLite<RequestEmailStatsDto>> GetEmailsByAcceptedCountPagedAsync(int page, int pageSize, CancellationToken ct = default)
         {
             if (page <= 0) page = 1;
             if (pageSize <= 0) pageSize = 10;
@@ -530,6 +576,124 @@ namespace AMMS.Infrastructure.Repositories
                 .Where(x => x.order_request_id == orderRequestId)
                 .Select(x => x.design_file_path)
                 .FirstOrDefaultAsync(ct);
+        }
+        public async Task<PagedResultLite<RequestSortedDto>> GetRequestsByPhonePagedAsync(
+    string phone, int page, int pageSize, CancellationToken ct = default)
+        {
+            if (page <= 0) page = 1;
+            if (pageSize <= 0) pageSize = 10;
+
+            var skip = (page - 1) * pageSize;
+            phone = phone.Trim();
+
+            var query = _db.order_requests
+                .AsNoTracking()
+                .Where(r => r.customer_phone == phone)
+                .OrderByDescending(r => r.order_request_date)   
+                .ThenByDescending(r => r.order_request_id);
+
+            var list = await query
+                .Skip(skip)
+                .Take(pageSize + 1)
+                .Select(o => new RequestSortedDto(
+                    o.order_request_id,
+                    o.customer_name ?? "",
+                    o.customer_phone ?? "",
+                    o.customer_email,
+                    o.delivery_date,
+                    o.product_name ?? "",
+                    o.quantity ?? 0,
+                    o.process_status,
+                    o.order_request_date
+                ))
+                .ToListAsync(ct);
+
+            var hasNext = list.Count > pageSize;
+            if (hasNext) list = list.Take(pageSize).ToList();
+
+            return new PagedResultLite<RequestSortedDto>
+            {
+                Page = page,
+                PageSize = pageSize,
+                HasNext = hasNext,
+                Data = list
+            };
+        }
+
+        public async Task<RequestDetailDto?> GetInformationRequestById(int requestId, CancellationToken ct = default)
+        {
+            var query = await (
+                from r in _db.order_requests.AsNoTracking()
+                where r.order_request_id == requestId
+                join ce in _db.cost_estimates.AsNoTracking()
+                    on r.order_request_id equals ce.order_request_id into ceJoin
+                from ce in ceJoin.DefaultIfEmpty()
+                join cep in _db.cost_estimate_processes.AsNoTracking()
+                    on ce.estimate_id equals cep.estimate_id into cepJoin
+                from cep in cepJoin.DefaultIfEmpty()
+                select new
+                {
+                    Request = r,
+                    CostEstimate = ce,
+                    ProcessCost = cep
+                }
+            )
+            .OrderByDescending(x => x.CostEstimate != null ? x.CostEstimate.estimate_id : 0)
+            .ToListAsync(ct);
+
+            if (!query.Any())
+                return null;
+
+            var firstItem = query.First();
+            return new RequestDetailDto
+            {
+                request_id = firstItem.Request.order_request_id,
+                customer_name = firstItem.Request.customer_name ?? "",
+                customer_phone = firstItem.Request.customer_phone ?? "",
+                email = firstItem.Request.customer_email,
+                delevery_date = firstItem.Request.delivery_date,
+                product_name = firstItem.Request.product_name ?? "",
+                quantity = firstItem.Request.quantity ?? 0,
+                process_status = firstItem.Request.process_status,
+                request_date = firstItem.Request.order_request_date,
+                description = firstItem.Request.description,
+                design_file_path = firstItem.Request.design_file_path,
+                detail_address = firstItem.Request.detail_address,
+                product_type = firstItem.Request.product_type,
+                number_of_plates = firstItem.Request.number_of_plates,
+                production_processes = firstItem.Request.production_processes,
+                coating_type = firstItem.Request.coating_type,
+                paper_code = firstItem.Request.paper_code,
+                paper_name = firstItem.Request.paper_name,
+                wave_type = firstItem.Request.wave_type,
+                product_length_mm = firstItem.Request.product_length_mm,
+                product_width_mm = firstItem.Request.product_width_mm,
+                product_height_mm = firstItem.Request.product_height_mm,
+                glue_tab_mm = firstItem.Request.glue_tab_mm,
+                bleed_mm = firstItem.Request.bleed_mm,
+                is_one_side_box = firstItem.Request.is_one_side_box,
+                print_width_mm = firstItem.Request.print_width_mm,
+                print_height_mm = firstItem.Request.print_height_mm,
+                reason = firstItem.Request.reason,
+                cost_estimate = query
+                    .GroupBy(x => x.CostEstimate?.estimate_id)
+                    .Select(g => new CostEstimateDetailDto
+                    {
+                        estimate_id = g.Key ?? 0,
+                        final_total_cost = g.First().CostEstimate?.final_total_cost,
+                        deposit_amount = g.First().CostEstimate?.deposit_amount,
+                        process_cost = g
+                            .Where(x => x.ProcessCost != null)
+                            .Select(x => new ProcessCostDetailDto
+                            {
+                                process_cost_id = x.ProcessCost.process_cost_id,
+                                process_code = x.ProcessCost.process_code,
+                                cost = x.ProcessCost.total_cost
+                            })
+                            .ToList()
+                    })
+                    .ToList()
+            };
         }
     }
 }

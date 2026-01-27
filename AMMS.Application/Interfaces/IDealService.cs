@@ -1,4 +1,5 @@
 ﻿using AMMS.Infrastructure.Entities;
+using AMMS.Shared.DTOs.PayOS;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -16,5 +17,7 @@ namespace AMMS.Application.Interfaces
         Task NotifyConsultantPaidAsync(int orderRequestId, decimal paidAmount, DateTime paidAt);
         Task NotifyCustomerPaidAsync(int orderRequestId, decimal paidAmount, DateTime paidAt);
         Task MarkAcceptedAsync(int orderRequestId);
+        Task<PayOsDepositInfoDto> PrepareDepositPaymentAsync(int orderRequestId, CancellationToken ct = default);
+        Task<PayOsResultDto> CreateOrReuseDepositLinkAsync(int requestId, CancellationToken ct = default);
     }
 }

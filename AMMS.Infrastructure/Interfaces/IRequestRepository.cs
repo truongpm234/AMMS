@@ -13,7 +13,6 @@ namespace AMMS.Infrastructure.Interfaces
         Task<int> SaveChangesAsync();
         Task<int> CountAsync();
         Task<List<RequestPagedDto>> GetPagedAsync(int skip, int take);
-
         Task<bool> AnyOrderLinkedAsync(int requestId);
         Task<bool> HasEnoughStockForRequestAsync(int requestId, CancellationToken ct = default);
         Task<PagedResultLite<RequestSortedDto>> GetSortedByQuantityPagedAsync(
@@ -34,6 +33,9 @@ namespace AMMS.Infrastructure.Interfaces
         Task<PagedResultLite<OrderListDto>> GetOrdersByPhonePagedAsync(
             string phone, int page, int pageSize, CancellationToken ct = default);
         Task<string?> GetDesignFilePathAsync(int orderRequestId, CancellationToken ct = default);
-
+        Task<PagedResultLite<RequestSortedDto>> GetRequestsByPhonePagedAsync(
+    string phone, int page, int pageSize, CancellationToken ct = default);
+        Task<RequestDetailDto?> GetInformationRequestById(int requestId, CancellationToken ct = default);
+        Task<RequestWithCostDto?> GetByIdWithCostAsync(int id);
     }
 }

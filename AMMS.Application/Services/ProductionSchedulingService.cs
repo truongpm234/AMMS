@@ -32,97 +32,110 @@ namespace AMMS.Application.Services
             _taskRepo = taskRepo;
         }
 
-        public async Task<int> ScheduleOrderAsync(int orderId, int productTypeId, string? productionProcessCsv, int? managerId = 3)
+        public async Task<int> ScheduleOrderAsync(
+    int orderId,
+    int productTypeId,
+    string? productionProcessCsv,
+    int? managerId = 3)
         {
             var selected = ParseProcessCsv(productionProcessCsv);
-            var strategy = _db.Database.CreateExecutionStrategy();
 
+            var strategy = _db.Database.CreateExecutionStrategy();
             return await strategy.ExecuteAsync(async () =>
             {
                 await using var tx = await _db.Database.BeginTransactionAsync();
 
-                try
-                {
-                    var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+                var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
-                    var prod = new production
+                var order = await _db.orders
+                    .AsTracking()
+                    .FirstOrDefaultAsync(o => o.order_id == orderId);
+
+                if (order == null)
+                    throw new Exception($"Order {orderId} not found");
+
+                production? prod = null;
+
+                if (order.production_id.HasValue)
+                {
+                    prod = await _db.productions
+                        .AsTracking()
+                        .FirstOrDefaultAsync(p =>
+                            p.prod_id == order.production_id.Value &&
+                            p.end_date == null);
+                }
+
+                if (prod == null)
+                {
+                    prod = await _db.productions
+                        .AsTracking()
+                        .Where(p => p.order_id == orderId && p.end_date == null)
+                        .OrderByDescending(p => p.prod_id)
+                        .FirstOrDefaultAsync();
+                }
+
+                if (prod == null)
+                {
+                    prod = new production
                     {
-                        code = $"PRD-{DateTime.UtcNow:yyyyMMddHHmmss}",
+                        code = "TMP-PROD",
                         order_id = orderId,
                         manager_id = managerId,
                         status = "Scheduled",
                         product_type_id = productTypeId,
-                        start_date = now,
+                        start_date = now
                     };
 
-                    await _prodRepo.AddAsync(prod);
-                    await _prodRepo.SaveChangesAsync();
+                    await _db.productions.AddAsync(prod);
+                    await _db.SaveChangesAsync();
 
-                    var steps = await _ptpRepo.GetActiveByProductTypeIdAsync(productTypeId);
-                    if (steps == null || steps.Count == 0)
-                        throw new Exception("No routing (product_type_process) found. Seed first.");
+                    prod.code = $"PROD-{prod.prod_id:00000}";
+                    await _db.SaveChangesAsync();
+                }
 
-                    if (selected.Count > 0)
-                    {
-                        steps = steps
-                            .Where(s => !string.IsNullOrWhiteSpace(s.process_code) && selected.Contains(s.process_code!))
-                            .OrderBy(s => s.seq_num)
-                            .ToList();
+                if (order.production_id != prod.prod_id)
+                {
+                    order.production_id = prod.prod_id;
+                    await _db.SaveChangesAsync();
+                }
 
-                        if (steps.Count == 0)
-                            throw new Exception("Selected production_process does not match any product_type_process.process_code");
-                    }
+                // NẾU ĐÃ CÓ TASK → KHÔNG TẠO LẠI
+                var hasTask = await _db.tasks
+                    .AsNoTracking()
+                    .AnyAsync(t => t.prod_id == prod.prod_id);
 
-                    var tasks = new List<task>();
-                    var firstSeq = steps.Min(x => x.seq_num);
-
-                    foreach (var s in steps.OrderBy(x => x.seq_num))
-                    {
-                        machine? m = null;
-
-                        if (!string.IsNullOrWhiteSpace(s.machine))
-                        {
-                            m = await _machineRepo.GetByMachineCodeAsync(s.machine);
-                            if (m == null)
-                                m = await _machineRepo.FindMachineByProcess(s.machine);
-                        }
-
-                        var manual = IsManual(m, s.machine);
-
-                        var status = s.seq_num == firstSeq ? "Ready" : "Unassigned";
-
-                        var taskMachine = manual ? null : m!.machine_code;
-
-                        tasks.Add(new task
-                        {
-                            prod_id = prod.prod_id,
-                            process_id = s.process_id,
-                            seq_num = s.seq_num,
-                            name = s.process_name,
-                            status = status,
-                            machine = taskMachine,
-                            start_time = status == "Ready" ? now : null,
-                            end_time = null
-                        });
-                    }
-
-                    await _taskRepo.AddRangeAsync(tasks);
-                    await _taskRepo.SaveChangesAsync();
-
-                    var firstTask = tasks.FirstOrDefault(x => x.status == "Ready" && !string.IsNullOrWhiteSpace(x.machine));
-                    if (firstTask != null)
-                    {
-                        await _machineRepo.AllocateAsync(firstTask.machine!, need: 1);
-                    }
-
+                if (hasTask)
+                {
                     await tx.CommitAsync();
                     return prod.prod_id;
                 }
-                catch
+
+                // 🔹 6. TẠO TASK (như code hiện tại của bạn)
+                var steps = await _ptpRepo.GetActiveByProductTypeIdAsync(productTypeId);
+                if (steps == null || steps.Count == 0)
+                    throw new Exception("No routing found");
+
+                var firstSeq = steps.Min(x => x.seq_num);
+                var tasks = new List<task>();
+
+                foreach (var s in steps.OrderBy(x => x.seq_num))
                 {
-                    await tx.RollbackAsync();
-                    throw;
+                    tasks.Add(new task
+                    {
+                        prod_id = prod.prod_id,
+                        process_id = s.process_id,
+                        seq_num = s.seq_num,
+                        name = s.process_name,
+                        status = s.seq_num == firstSeq ? "Ready" : "Unassigned",
+                        start_time = s.seq_num == firstSeq ? now : null
+                    });
                 }
+
+                await _taskRepo.AddRangeAsync(tasks);
+                await _taskRepo.SaveChangesAsync();
+
+                await tx.CommitAsync();
+                return prod.prod_id;
             });
         }
 

@@ -31,5 +31,7 @@ namespace AMMS.Application.Interfaces
         Task<OrderRequestDesignFileResponse?> GetDesignFileAsync(int orderRequestId, CancellationToken ct = default);
         Task UpdateDesignFilePathAsync(int orderRequestId, string designFilePath, CancellationToken ct = default);
         Task<CreateRequestResponse> CreateRequestByConsultantAsync(CreateResquestConsultant req);
+        Task<RequestDetailDto?> GetInformationRequestById(int requestId, CancellationToken ct = default);
+        Task<RequestWithCostDto?> GetByIdWithCostAsync(int id);
     }
 }

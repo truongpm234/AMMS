@@ -58,7 +58,7 @@ namespace AMMS.Application.Services
                 quantity = req.quantity,
                 description = req.description,
                 design_file_path = req.design_file_path,
-                order_request_date = ToUnspecified(req.order_request_date),
+                order_request_date = ToUnspecified(DateTime.Now),
                 detail_address = req.detail_address,
                 process_status = "Pending",
                 is_send_design = req.is_send_design
@@ -111,7 +111,6 @@ namespace AMMS.Application.Services
             entity.design_file_path = req.design_file_path ?? entity.design_file_path;
             entity.detail_address = req.detail_address ?? entity.detail_address;
             entity.delivery_date = ToUnspecified(req.delivery_date);
-            entity.order_request_date = ToUnspecified(req.order_request_date);
             entity.product_type = req.product_type ?? entity.product_type;
             entity.number_of_plates = req.number_of_plates ?? entity.number_of_plates;
             entity.paper_code = req.paper_code ?? entity.paper_code;
@@ -157,6 +156,11 @@ namespace AMMS.Application.Services
 
         public Task<order_request?> GetByIdAsync(int id) => _requestRepo.GetByIdAsync(id);
 
+        public Task<RequestWithCostDto?> GetByIdWithCostAsync(int id)
+        {
+            return _requestRepo.GetByIdWithCostAsync(id);
+        }
+
         public async Task<PagedResultLite<RequestPagedDto>> GetPagedAsync(int page, int pageSize)
         {
             if (page <= 0) page = 1;
@@ -177,7 +181,6 @@ namespace AMMS.Application.Services
                 Data = data
             };
         }
-
 
         public async Task<ConvertRequestToOrderResponse> ConvertToOrderAsync(int requestId)
         {
@@ -429,41 +432,10 @@ namespace AMMS.Application.Services
                     _orderRepo.Update(newOrder);
                     await _orderRepo.SaveChangesAsync();
 
-                    // ===== ✅ auto create production Scheduled =====
-                    var managerId = await _db.users
-    .AsNoTracking()
-    .Where(u => u.username == "manager")
-    .Select(u => (int?)u.user_id)
-    .FirstOrDefaultAsync();
-
-                    managerId ??= newOrder.consultant_id;
-
-                    var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-
-                    var prod = new production
-                    {
-                        code = "TMP-PROD",
-                        order_id = newOrder.order_id,
-                        status = "Scheduled",
-                        product_type_id = productTypeId,
-
-                        manager_id = managerId,
-                        start_date = now
-                    };
-
-                    await _db.productions.AddAsync(prod);
-                    await _db.SaveChangesAsync(); // lấy prod_id
-
-                    prod.code = $"PROD-{prod.prod_id:00000}"; // <= 20
-                    _db.productions.Update(prod);
-                    await _db.SaveChangesAsync();
-
-                    // Link order.production_id (entity order đã có field sẵn)
-                    newOrder.production_id = prod.prod_id;
                     _orderRepo.Update(newOrder);
                     await _orderRepo.SaveChangesAsync();
 
-                    // ===== link request -> order =====
+                    // link request -> order
                     req.order_id = newOrder.order_id;
                     await _requestRepo.UpdateAsync(req);
                     await _requestRepo.SaveChangesAsync();
@@ -487,9 +459,10 @@ namespace AMMS.Application.Services
                 }
             });
         }
-
-
-
+        public async Task<RequestDetailDto?> GetInformationRequestById(int requestId, CancellationToken ct = default)
+        {
+            return await _requestRepo.GetInformationRequestById(requestId, ct);
+        }
 
         public Task<PagedResultLite<RequestSortedDto>> GetSortedByQuantityPagedAsync(
             bool ascending, int page, int pageSize, CancellationToken ct = default)
