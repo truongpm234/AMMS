@@ -74,203 +74,162 @@ namespace AMMS.Application.Helpers
             var productionProcessText = BuildProductionProcessText(req, est);
             var expiredAt = est.created_at.AddHours(24);
             var expiredAtText = expiredAt.ToString("dd/MM/yyyy HH:mm");
-
+            string FormatVND(decimal? amount) => string.Format("{0:N0} đ", amount ?? 0);
             return $@"
-<div style='background:#f3f4f6;padding:24px 0;margin:0'>
-  <div style='max-width:720px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;color:#0f172a;line-height:1.6'>
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+    body {{ margin: 0; padding: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #333; }}
+    .container {{ max-width: 700px; margin: 0 auto; background: #fff; }}
+    table {{ border-collapse: collapse; width: 100%; }}
+    td {{ vertical-align: top; }}
+    
+    /* Typography */
+    .header-title {{ font-size: 14px; font-weight: 700; text-transform: uppercase; padding-bottom: 8px; margin-bottom: 12px; letter-spacing: 0.5px; }}
+    .label {{ color: #718096; font-size: 13px; padding: 8px 0; border-bottom: 1px solid #edf2f7; }}
+    .value {{ color: #2d3748; font-weight: 600; font-size: 13px; text-align: right; padding: 8px 0; border-bottom: 1px solid #edf2f7; }}
+    
+    /* Màu sắc các line tiêu đề */
+    .line-blue {{ border-bottom: 2px solid #3182ce; color: #3182ce; }}
+    .line-orange {{ border-bottom: 2px solid #dd6b20; color: #dd6b20; }}
+    .line-green {{ border-bottom: 2px solid #38a169; color: #38a169; }}
 
-    <!-- Header -->
-    <div style='background:linear-gradient(135deg,#2563eb,#1d4ed8);border-radius:14px;padding:18px 20px;box-shadow:0 10px 24px rgba(2,6,23,.15)'>
-      <div style='display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap'>
-        <div>
-          <div style='font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#dbeafe;font-weight:700'>
-            AMMS • Báo giá đơn hàng in ấn
-          </div>
-          <div style='font-size:22px;font-weight:800;color:#ffffff;margin-top:4px'>
-            BÁO GIÁ ĐƠN HÀNG IN ẤN
-          </div>
-        </div>
+    /* Box style cho bảng giá */
+    .cost-box {{ background-color: #fffaf0; border-radius: 6px; padding: 15px; }}
+    .total-row td {{ border-bottom: none; padding-top: 12px; font-size: 15px; }}
+    .final-price {{ color: #2b6cb0; font-size: 18px; font-weight: 800; }}
+</style>
+</head>
+<body style='background-color: #f7fafc; padding: 30px 0;'>
 
-        <div style='background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.18);padding:10px 12px;border-radius:12px'>
-          <div style='font-size:12px;color:#e0f2fe;font-weight:700'>Mã yêu cầu</div>
-          <div style='font-size:18px;color:#ffffff;font-weight:800;letter-spacing:.04em'>AM{req.order_request_id:D6}</div>
-        </div>
-      </div>
+  <div class='container' style='border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);'>
+    
+    <div style='background: linear-gradient(90deg, #2b6cb0 0%, #2c5282 100%); padding: 25px 30px;'>
+      <table border='0' cellpadding='0' cellspacing='0'>
+        <tr>
+          <td>
+            <div style='color: #bee3f8; font-size: 11px; font-weight: bold; letter-spacing: 1px;'>MES SYSTEM</div>
+            <div style='color: #fff; font-size: 22px; font-weight: 800; margin-top: 5px;'>BÁO GIÁ ĐƠN HÀNG</div>
+          </td>
+          <td align='right'>
+            <span style='background: rgba(255,255,255,0.15); color: #fff; padding: 6px 12px; border-radius: 4px; font-size: 14px; font-weight: bold;'>
+              AM{req.order_request_id:D6}
+            </span>
+          </td>
+        </tr>
+      </table>
     </div>
 
-    <!-- Body card -->
-    <div style='background:#ffffff;border-radius:14px;margin-top:14px;box-shadow:0 10px 26px rgba(2,6,23,.08);overflow:hidden'>
+    <div style='padding: 30px;'>
       
-      <!-- Greeting -->
-      <div style='padding:18px 20px;border-bottom:1px solid #e5e7eb;background:#ffffff'>
-        <p style='margin:0;font-size:15px'>Chào <b>{req.customer_name}</b>,</p>
-        <p style='margin:8px 0 0 0;color:#334155'>
-          Chúng tôi gửi đến bạn báo giá cho đơn hàng <b>{productName}</b> với các thông tin như sau:
-        </p>
+      <div style='margin-bottom: 30px;'>
+        <p style='margin: 0; font-size: 15px;'>Chào <b>{req.customer_name}</b>,</p>
+        <p style='margin: 5px 0 0; color: #718096; font-size: 14px;'>Dưới đây là chi tiết báo giá cho yêu cầu in ấn của bạn:</p>
       </div>
 
-      <!-- Section: Thông tin yêu cầu -->
-      <div style='padding:20px 22px'>
-        <div style='display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px'>
-          <div style='font-size:16px;font-weight:800;color:#0f172a'>Thông tin yêu cầu</div>
-          <div style='font-size:12px;font-weight:700;color:#1d4ed8;background:#eff6ff;border:1px solid #dbeafe;padding:6px 10px;border-radius:999px'>
-            Ngày yêu cầu: {requestDateText}
+      <table border='0' cellpadding='0' cellspacing='0'>
+        
+        <tr>
+          <td width='48%' style='padding-right: 20px;'>
+            <div class='header-title line-blue'>Thông tin đơn hàng</div>
+            <table width='100%'>
+              <tr><td class='label'>Ngày yêu cầu</td><td class='value'>{requestDateText}</td></tr>
+              <tr><td class='label'>Người yêu cầu</td><td class='value' style='text-transform:uppercase'>{req.customer_name}</td></tr>
+              <tr><td class='label'>Số điện thoại</td><td class='value'>{req.customer_phone}</td></tr>
+              <tr><td class='label'>Email</td><td class='value' style='color:#3182ce'>{req.customer_email}</td></tr>
+            </table>
+          </td>
 
-          </div>
-        </div>
+          <td width='48%' style='padding-left: 20px;'>
+             <div class='header-title line-orange'>Bảng kê chi phí</div>
+             <div class='cost-box'>
+                <table width='100%'>
+                  <tr>
+                    <td style='padding:6px 0; color:#4a5568; font-size:13px;'>Nguyên vật liệu</td>
+                    <td style='padding:6px 0; text-align:right; font-weight:700; color:#2d3748; font-size:13px;'>{FormatVND(materialCost)}</td>
+                  </tr>
+                  <tr>
+                    <td style='padding:6px 0; color:#4a5568; font-size:13px;'>Chi phí nhân công</td>
+                    <td style='padding:6px 0; text-align:right; font-weight:700; color:#2d3748; font-size:13px;'>{FormatVND(laborCost)}</td>
+                  </tr>
+                  <tr>
+                    <td style='padding:6px 0; color:#4a5568; font-size:13px;'>Chi phí khác</td>
+                    <td style='padding:6px 0; text-align:right; font-weight:700; color:#2d3748; font-size:13px;'>{FormatVND(otherFees)}</td>
+                  </tr>
+                   <tr>
+                    <td style='padding:6px 0; color:#4a5568; font-size:13px;'>Phụ thu giao gấp</td>
+                    <td style='padding:6px 0; text-align:right; font-weight:700; color:#2d3748; font-size:13px;'>{FormatVND(rushAmount)}</td>
+                  </tr>
+                </table>
+             </div>
+          </td>
+        </tr>
 
-        <table style='width:100%;border-collapse:separate;border-spacing:0;overflow:hidden;border:1px solid #e5e7eb;border-radius:12px'>
-          <tr style='background:#f8fafc'>
-            <td style='padding:10px 12px;width:32%;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>Mã yêu cầu</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:800'>AM{req.order_request_id:D6}</td>
-          </tr>
-          <tr>
-            <td style='padding:10px 12px;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>Người yêu cầu</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb'>{req.customer_name}</td>
-          </tr>
-          <tr style='background:#f8fafc'>
-            <td style='padding:10px 12px;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>SĐT</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb'>{req.customer_phone}</td>
-          </tr>
-          <tr>
-            <td style='padding:10px 12px;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>Email</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb'>{req.customer_email}</td>
-          </tr>
-          <tr style='background:#f8fafc'>
-            <td style='padding:10px 12px;font-weight:700;color:#334155'>Địa chỉ</td>
-            <td style='padding:10px 12px'>{address}</td>
-          </tr>
-        </table>
-      </div>
+        <tr>
+            <td colspan='2' style='height: 40px;'></td>
+        </tr>
 
-      <!-- Section: Thông tin đơn hàng -->
-      <div style='padding:0 20px 18px 20px'>
-        <div style='font-size:16px;font-weight:800;color:#0f172a;margin-bottom:10px'>Thông tin đơn hàng</div>
+        <tr>
+          <td width='48%' style='padding-right: 20px;'>
+            <div class='header-title line-blue'>Chi tiết sản phẩm</div>
+            <table width='100%'>
+              <tr><td class='label'>Sản phẩm</td><td class='value'>{productName}</td></tr>
+              <tr><td class='label'>Số lượng</td><td class='value'>{quantity:N0}</td></tr>
+              <tr><td class='label'>Loại giấy</td><td class='value'>{paperName}</td></tr>
+              <tr><td class='label'>Thiết kế</td><td class='value'>{designType}</td></tr>
+              <tr><td class='label'>Giao dự kiến</td><td class='value'>{delivery}</td></tr>
+            </table>
+          </td>
 
-        <table style='width:100%;border-collapse:separate;border-spacing:0;overflow:hidden;border:1px solid #e5e7eb;border-radius:12px'>
-          <tr style='background:#f8fafc'>
-            <td style='padding:10px 12px;width:32%;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>Sản phẩm</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:700'>{productName}</td>
-          </tr>
-          <tr>
-            <td style='padding:10px 12px;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>Số lượng</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb'>{quantity}</td>
-          </tr>
-          <tr style='background:#f8fafc'>
-            <td style='padding:10px 12px;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>Ngày giao dự kiến</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb'>{delivery}</td>
-          </tr>
-          <tr>
-            <td style='padding:10px 12px;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>Hình thức thiết kế</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb'>{designType}</td>
-          </tr>
-          <tr style='background:#f8fafc'>
-            <td style='padding:10px 12px;font-weight:700;color:#334155'>Giấy sử dụng</td>
-            <td style='padding:10px 12px'>{paperName}</td>
-          </tr>
-        </table>
-      </div>
+          <td width='48%' style='padding-left: 20px;'>
+            <div class='header-title line-green'>Tổng thanh toán</div>
+            <table width='100%'>
+              <tr>
+                <td class='label' style='border:none; padding-bottom:4px'>Tạm tính</td>
+                <td class='value' style='border:none; padding-bottom:4px'>{FormatVND(subtotal)}</td>
+              </tr>
+              <tr>
+                <td class='label' style='border-bottom:1px dashed #cbd5e1'>Giảm giá ({discountPercent:0.#}%)</td>
+                <td class='value' style='border-bottom:1px dashed #cbd5e1; color:#e53e3e'>- {FormatVND(discountAmount)}</td>
+              </tr>
+              <tr class='total-row'>
+                <td style='font-weight:700; color:#2d3748;'>THÀNH TIỀN</td>
+                <td align='right' class='final-price'>{FormatVND(finalTotal)}</td>
+              </tr>
+            </table>
 
-      <!-- Section: Chi tiết chi phí -->
-      <div style='padding:0 20px 18px 20px'>
-        <div style='font-size:16px;font-weight:800;color:#0f172a;margin-bottom:10px'>Chi tiết chi phí</div>
+            <div style='margin-top: 20px; background: #f0fff4; border: 1px solid #9ae6b4; border-radius: 6px; padding: 12px;'>
+                <table width='100%'>
+                    <tr>
+                        <td style='color: #276749; font-weight: 700; font-size: 13px;'>Cần đặt cọc trước:</td>
+                        <td align='right' style='color: #2f855a; font-weight: 800; font-size: 16px;'>{FormatVND(deposit)}</td>
+                    </tr>
+                </table>
+            </div>
+          </td>
+        </tr>
 
-        <table style='width:100%;border-collapse:separate;border-spacing:0;overflow:hidden;border:1px solid #e5e7eb;border-radius:12px'>
-          <tr style='background:#f8fafc'>
-            <td style='padding:10px 12px;width:40%;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>Tiền nguyên vật liệu</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:700'>{VND(materialCost)}</td>
-          </tr>
-          <tr>
-            <td style='padding:10px 12px;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>Tiền công</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:700'>{VND(laborCost)}</td>
-          </tr>
-          <tr style='background:#f8fafc'>
-            <td style='padding:10px 12px;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>Các phí khác</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:700'>{VND(otherFees)}</td>
-          </tr>
-          <tr>
-            <td style='padding:10px 12px;font-weight:700;color:#334155'>Phụ thu giao gấp</td>
-            <td style='padding:10px 12px;color:#0f172a;font-weight:700'>{VND(rushAmount)}</td>
-          </tr>
-        </table>
-      </div>
+      </table>
 
-      <!-- Section: Tổng quan báo giá -->
-      <div style='padding:0 20px 18px 20px'>
-        <div style='display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px'>
-          <div style='font-size:16px;font-weight:800;color:#0f172a'>Tổng quan báo giá</div>
-          <div style='font-size:12px;font-weight:700;color:#0f766e;background:#ecfdf5;border:1px solid #a7f3d0;padding:6px 12px;border-radius:999px'>
-            Hiệu lực đến: {expiredAtText}
-          </div>
-        </div>
-
-        <table style='width:100%;border-collapse:separate;border-spacing:0;overflow:hidden;border:1px solid #e5e7eb;border-radius:12px'>
-          <tr style='background:#f8fafc'>
-            <td style='padding:10px 12px;width:40%;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>Giá tổng ban đầu</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:700'>{VND(subtotal)}</td>
-          </tr>
-          <tr>
-            <td style='padding:10px 12px;font-weight:700;color:#334155;border-bottom:1px solid #e5e7eb'>Giảm giá</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:700'>
-              {discountPercent:N2}% &nbsp; ( - {VND(discountAmount)} )
-            </td>
-          </tr>
-          <tr style='background:#f8fafc'>
-            <td style='padding:10px 12px;font-weight:800;color:#0f172a;border-bottom:1px solid #e5e7eb'>Giá sau giảm</td>
-            <td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:900;color:#1d4ed8;font-size:16px'>
-              {VND(finalTotal)}
-            </td>
-          </tr>
-          <tr>
-            <td style='padding:10px 12px;font-weight:800;color:#0f172a'>Số tiền đặt cọc</td>
-            <td style='padding:10px 12px;font-weight:900;color:#b45309;font-size:16px'>
-              {VND(deposit)}
-            </td>
-          </tr>
-        </table>
-      </div>
-
-      <!-- CTA -->
-      <div style='padding:18px 20px;background:#f8fafc;border-top:1px solid #e5e7eb'>
-        <p style='margin:0 0 12px 0;color:#334155'>
-          Bạn có thể vào trang chi tiết đơn hàng để xem đầy đủ thông tin, gửi/ cập nhật file thiết kế
-          và thanh toán tiền cọc trực tiếp tại đó:
-        </p>
-
-        <div style='text-align:center;margin:14px 0'>
-          <a href='{orderDetailUrl}'
-             style='display:inline-block;padding:12px 18px;border-radius:10px;
-                    background:#2563eb;color:#ffffff;text-decoration:none;font-weight:800;
-                    box-shadow:0 10px 20px rgba(37,99,235,.25)'>
-            Xem chi tiết đơn hàng
-          </a>
-        </div>
-
-        <div style='margin-top:12px;padding:14px 14px;border-radius:12px;background:#fffbeb;border:1px solid #fde68a;color:#92400e;font-size:13px'>
-          <div style='font-weight:900;margin-bottom:6px'>Lưu ý quan trọng:</div>
-          <div>
-            Đơn báo giá chỉ có hiệu lực trong vòng <b>24 giờ</b> kể từ thời điểm gửi email
-            (đến khoảng <b>{expiredAtText}</b>). Sau thời gian này, các thông tin về giá có thể thay đổi
-            và email này sẽ không còn giá trị.
-          </div>
-        </div>
-
-        <p style='margin:14px 0 0 0;font-size:13px;color:#64748b'>
-          Nếu bạn không thực hiện yêu cầu báo giá này, vui lòng bỏ qua email.
-        </p>
-      </div>
-
-      <!-- Footer -->
-      <div style='padding:14px 20px;background:#ffffff;border-top:1px solid #e5e7eb'>
-        <p style='margin:0'>Trân trọng,<br/><b>Đội ngũ AMMS</b></p>
-        <p style='margin:8px 0 0 0;font-size:12px;color:#94a3b8'>
-          Email này được gửi tự động từ hệ thống AMMS. Vui lòng không trả lời trực tiếp email này.
-        </p>
+      <div style='text-align: center; margin-top: 40px; padding-top: 30px; border-top: 1px solid #edf2f7;'>
+         <a href='{orderDetailUrl}' style='background-color: #3182ce; color: white; padding: 12px 30px; text-decoration: none; font-weight: bold; border-radius: 50px; display: inline-block; box-shadow: 0 4px 6px rgba(49, 130, 206, 0.3);'>
+            Xem chi tiết & Thanh toán
+         </a>
+         <p style='margin-top: 20px; font-size: 12px; color: #a0aec0;'>
+            Báo giá có hiệu lực đến {expiredAtText}
+         </p>
       </div>
 
     </div>
+    
+    <div style='background-color: #edf2f7; padding: 15px; text-align: center; font-size: 12px; color: #718096;'>
+        Email này được gửi tự động từ hệ thống MES.
+    </div>
+
   </div>
-</div>";
+</body>
+</html>";
         }
 
         public static string AcceptCustomerEmail(
@@ -316,7 +275,7 @@ namespace AMMS.Application.Helpers
     Vui lòng lưu lại <b>mã đơn hàng</b> để tra cứu sau này.
   </p>
 
-  <p>AMMS trân trọng!</p>
+  <p>MES trân trọng!</p>
 </div>";
         }
 
