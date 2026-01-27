@@ -69,6 +69,7 @@ namespace AMMS.API.Controllers
             return await _userService.Register(request, otp);
         }
 
+        //cmt for add again
         [Authorize(Policy = "admin")]
         [HttpPost("/admin-create-new-user")]
         public async Task<IActionResult> AdminCreateNewUser([FromBody] UserUpdateCreateDto new_user)
