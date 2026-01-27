@@ -58,7 +58,7 @@ namespace AMMS.Application.Services
                 quantity = req.quantity,
                 description = req.description,
                 design_file_path = req.design_file_path,
-                order_request_date = ToUnspecified(req.order_request_date),
+                order_request_date = ToUnspecified(DateTime.Now),
                 detail_address = req.detail_address,
                 process_status = "Pending",
                 is_send_design = req.is_send_design

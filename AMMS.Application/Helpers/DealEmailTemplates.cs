@@ -131,11 +131,7 @@ namespace AMMS.Application.Helpers
     <tr>
       <td style='border:1px solid transparent;padding:4px 8px;'><b>Giấy sử dụng</b></td>
       <td style='border:1px solid transparent;padding:4px 8px;'>{paperName}</td>
-    </tr>
-    <tr>
-      <td style='border:1px solid transparent;padding:4px 8px;'><b>Công đoạn sản xuất</b></td>
-      <td style='border:1px solid transparent;padding:4px 8px;'>{productionProcessText}</td>
-    </tr>
+    </tr>   
   </table>
 
   <h3>Chi tiết chi phí</h3>

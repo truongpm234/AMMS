@@ -1,4 +1,5 @@
-﻿using AMMS.Application.Interfaces;
+﻿using AMMS.Application.Helpers;
+using AMMS.Application.Interfaces;
 using AMMS.Application.Services;
 using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
@@ -29,6 +30,7 @@ namespace AMMS.API.Controllers
         private readonly AppDbContext _db;
         private readonly ISmsOtpService _smsOtp;
         private readonly IConfiguration _config;
+        private readonly IPaymentsService _payment;
         public RequestsController(
             IRequestService service,
             IDealService dealService,
@@ -36,7 +38,7 @@ namespace AMMS.API.Controllers
             AppDbContext db,
             IProductionSchedulingService schedulingService,
             ISmsOtpService smsOtp,
-            IConfiguration config)
+            IConfiguration config, IPaymentsService payment)
         {
             _service = service;
             _dealService = dealService;
@@ -45,6 +47,7 @@ namespace AMMS.API.Controllers
             _schedulingService = schedulingService;
             _smsOtp = smsOtp;
             _config = config;
+            _payment = payment;
         }
         [HttpPost("create-request-by-consultant")]
         [ProducesResponseType(typeof(CreateRequestResponse), StatusCodes.Status201Created)]
@@ -225,32 +228,75 @@ namespace AMMS.API.Controllers
 
 
         [HttpGet("payos/return")]
-        public async Task<IActionResult> PayOsReturn([FromQuery] int request_id, [FromQuery] long order_code, [FromServices] IPaymentRepository paymentRepo, CancellationToken ct)
+        public async Task<IActionResult> PayOsReturn(
+    [FromQuery] int request_id,
+    [FromQuery] long order_code,
+    [FromQuery] string? status,
+    [FromQuery] long? orderCode,
+    [FromServices] IPaymentRepository paymentRepo,
+    CancellationToken ct)
         {
-            var info = await HttpContext.RequestServices.GetRequiredService<IPayOsService>()
-                    .GetPaymentLinkInformationAsync(order_code, ct);
+            var fe = _config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app";
 
-            var isPaid =
-                string.Equals(info?.status, "PAID", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(info?.status, "SUCCESS", StringComparison.OrdinalIgnoreCase);
-
-            if (isPaid)
+            try
             {
-                var amount = info?.amount ?? 0;
-                await ProcessPaidAsync(
-                    request_id,
-                    order_code,
-                    amount,
-                    info?.payment_link_id,
-                    info?.transaction_id,
-                    info?.raw_json ?? "{}",
-                    paymentRepo,
-                    ct);
-            }
+                var oc = order_code > 0 ? order_code : (orderCode ?? 0);
+                if (oc <= 0)
+                    return Redirect($"{fe}/request-detail/{request_id}?payos=invalid_order_code");
 
-            var fe = "https://sep490-fe.vercel.app";
-            return Redirect($"{fe}/request-detail/{request_id}");
+                // paid from query
+                var paidByQuery =
+                    string.Equals(status, "PAID", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(status, "SUCCESS", StringComparison.OrdinalIgnoreCase);
+
+                PayOsResultDto? info = null;
+                try
+                {
+                    info = await HttpContext.RequestServices.GetRequiredService<IPayOsService>()
+                        .GetPaymentLinkInformationAsync(oc, ct);
+                }
+                catch
+                {
+                }
+
+                var paidByApi =
+                    string.Equals(info?.status, "PAID", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(info?.status, "SUCCESS", StringComparison.OrdinalIgnoreCase);
+
+                var isPaid = paidByApi || paidByQuery;
+
+                if (isPaid)
+                {
+                    long amount = info?.amount ?? 0;
+                    string rawJson = info?.raw_json ?? "{}";
+                    string? paymentLinkId = info?.payment_link_id;
+                    string? transactionId = info?.transaction_id;
+
+                    if (amount <= 0 || rawJson == "{}")
+                    {
+                        var pending = await _paymentService.GetLatestPendingByRequestIdAsync(request_id, ct);
+                        if (pending != null && !string.IsNullOrWhiteSpace(pending.payos_raw))
+                        {
+                            var dto = PayOsRawMapper.FromPayment(pending);
+                            amount = dto.amount ?? (long)(pending.amount);
+                            rawJson = pending.payos_raw!;
+                            paymentLinkId ??= pending.payos_payment_link_id;
+                            transactionId ??= pending.payos_transaction_id;
+                        }
+                    }
+
+                    await ProcessPaidAsync(request_id, oc, amount, paymentLinkId, transactionId, rawJson, paymentRepo, ct);
+                }
+
+                return Redirect($"{fe}/request-detail/{request_id}?payos={(isPaid ? "paid" : "pending")}&orderCode={oc}");
+            }
+            catch (Exception ex)
+            {
+                var msg = Uri.EscapeDataString(ex.Message ?? "unknown");
+                return Redirect($"{fe}/request-detail/{request_id}?payos=error&message={msg}");
+            }
         }
+
 
         [HttpGet("payos/cancel")]
         public IActionResult PayOsCancel([FromQuery] int orderRequestId, [FromQuery] long orderCode)
@@ -266,53 +312,73 @@ namespace AMMS.API.Controllers
     [FromServices] IPaymentRepository paymentRepo,
     CancellationToken ct)
         {
-            if (!raw.TryGetProperty("data", out var dataNode))
-                return Ok(new { ok = true, error = "missing data" });
-
-            var rootCode = raw.TryGetProperty("code", out var rc) ? (rc.GetString() ?? "") : "";
-            var rootSuccess = raw.TryGetProperty("success", out var rs) && rs.ValueKind == JsonValueKind.True;
-
-            var dataCode = dataNode.TryGetProperty("code", out var dc) ? (dc.GetString() ?? "") : "";
-
-            var isPaid = rootSuccess && rootCode == "00" && dataCode == "00";
-            if (!isPaid) return Ok(new { ok = true, ignored = true, rootCode, dataCode });
-
-            var checksumKey = _config["PayOS:ChecksumKey"];
-            if (!string.IsNullOrWhiteSpace(checksumKey))
+            try
             {
-                var signature = raw.TryGetProperty("signature", out var sig) ? (sig.GetString() ?? "") : "";
-                if (!IsValidPayOsSignature(dataNode, signature, checksumKey))
-                    return Ok(new { ok = true, error = "invalid signature" });
+                if (!raw.TryGetProperty("data", out var dataNode))
+                    return Ok(new { ok = true, ignored = true, reason = "missing_data" });
+
+                var rootCode = raw.TryGetProperty("code", out var rc) ? (rc.GetString() ?? "") : "";
+                var rootSuccess = raw.TryGetProperty("success", out var rs) && rs.ValueKind == JsonValueKind.True;
+
+                var dataCode = dataNode.TryGetProperty("code", out var dc) ? (dc.GetString() ?? "") : "";
+                var dataStatus = dataNode.TryGetProperty("status", out var st) ? (st.GetString() ?? "") : "";
+                var dataDesc = dataNode.TryGetProperty("desc", out var dd) ? (dd.GetString() ?? "") : "";
+
+                var isPaid =
+                    rootSuccess &&
+                    string.Equals(rootCode, "00", StringComparison.OrdinalIgnoreCase) &&
+                    (
+                        string.Equals(dataCode, "00", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(dataStatus, "PAID", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(dataStatus, "SUCCESS", StringComparison.OrdinalIgnoreCase) ||
+                        dataDesc.Contains("thành công", StringComparison.OrdinalIgnoreCase)
+                    );
+
+                if (!isPaid)
+                    return Ok(new { ok = true, ignored = true, rootCode, dataCode, dataStatus, dataDesc });
+
+                var checksumKey = _config["PayOS:ChecksumKey"];
+                if (!string.IsNullOrWhiteSpace(checksumKey))
+                {
+                    var signature = raw.TryGetProperty("signature", out var sig) ? (sig.GetString() ?? "") : "";
+                    if (!IsValidPayOsSignature(dataNode, signature, checksumKey))
+                        return Ok(new { ok = true, ignored = true, reason = "invalid_signature" });
+                }
+
+                long orderCode =
+                    dataNode.TryGetProperty("orderCode", out var oc) && oc.ValueKind == JsonValueKind.Number
+                        ? oc.GetInt64()
+                        : 0;
+
+                long amount =
+                    dataNode.TryGetProperty("amount", out var am) && am.ValueKind == JsonValueKind.Number
+                        ? am.GetInt64()
+                        : 0;
+
+                var paymentLinkId = dataNode.TryGetProperty("paymentLinkId", out var pl) ? pl.GetString() : null;
+                var transactionId = dataNode.TryGetProperty("reference", out var rf) ? rf.GetString() : null;
+
+                if (orderCode <= 0)
+                    return Ok(new { ok = true, ignored = true, reason = "invalid_orderCode" });
+
+                var orderRequestId = (int)(orderCode / 10);
+
+                var (processed, message) = await ProcessPaidAsync(
+                    orderRequestId,
+                    orderCode,
+                    amount,
+                    paymentLinkId,
+                    transactionId,
+                    raw.ToString(),
+                    paymentRepo,
+                    ct);
+
+                return Ok(new { ok = true, processed, message, orderRequestId, orderCode });
             }
-
-            long orderCode =
-                dataNode.TryGetProperty("orderCode", out var oc) && oc.ValueKind == JsonValueKind.Number
-                    ? oc.GetInt64()
-                    : 0;
-
-            long amount =
-                dataNode.TryGetProperty("amount", out var am) && am.ValueKind == JsonValueKind.Number
-                    ? am.GetInt64()
-                    : 0;
-
-            var paymentLinkId = dataNode.TryGetProperty("paymentLinkId", out var pl) ? pl.GetString() : null;
-            var transactionId = dataNode.TryGetProperty("reference", out var rf) ? rf.GetString() : null;
-
-            if (orderCode <= 0) return Ok(new { ok = true, error = "orderCode invalid" });
-
-            var orderRequestId = (int)(orderCode / 10);
-
-            var (ok, message) = await ProcessPaidAsync(
-                orderRequestId,
-                orderCode,
-                amount,
-                paymentLinkId,
-                transactionId,
-                raw.ToString(),
-                paymentRepo,
-                ct);
-
-            return Ok(new { ok = true, processed = ok, message, orderRequestId, orderCode });
+            catch (Exception ex)
+            {
+                return Ok(new { ok = true, processed = false, error = ex.Message });
+            }
         }
 
         private static bool IsValidPayOsSignature(JsonElement dataNode, string signature, string checksumKey)
@@ -364,19 +430,37 @@ namespace AMMS.API.Controllers
             return Ok(result);
         }
         private async Task<(bool ok, string message)> ProcessPaidAsync(
-    int orderRequestId, long orderCode, long amount,
-    string? paymentLinkId, string? transactionId, string rawJson,
-    IPaymentRepository paymentRepo, CancellationToken ct)
+    int orderRequestId,
+    long orderCode,
+    long amount,
+    string? paymentLinkId,
+    string? transactionId,
+    string rawJson,
+    IPaymentRepository paymentRepo,
+    CancellationToken ct)
         {
-            var req = await _db.order_requests.AsNoTracking()
+            // 1) load request
+            var req = await _db.order_requests
+                .AsTracking()
                 .FirstOrDefaultAsync(x => x.order_request_id == orderRequestId, ct);
-            if (req == null) return (false, $"order_request_id={orderRequestId} not found");
 
+            if (req == null)
+                return (false, $"order_request_id={orderRequestId} not found");
+
+            await UpsertPaidPaymentRowAsync(orderRequestId, orderCode, amount, paymentLinkId, transactionId, rawJson, paymentRepo, ct);
+
+            // 3) nếu đã có order_id thì coi như done
+            if (req.order_id != null)
+                return (true, $"Already processed: order_id={req.order_id}");
+
+            // 4) check quote expiry
             var est = await _db.cost_estimates.AsNoTracking()
                 .Where(x => x.order_request_id == orderRequestId)
                 .OrderByDescending(x => x.created_at)
                 .FirstOrDefaultAsync(ct);
-            if (est == null) return (false, "Cost estimate not found");
+
+            if (est == null)
+                return (false, "Cost estimate not found");
 
             var expiredAt = est.created_at.AddHours(24);
             if (DateTime.UtcNow > expiredAt.ToUniversalTime())
@@ -384,49 +468,22 @@ namespace AMMS.API.Controllers
 
             var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
-            var existedPaid = await _paymentService.GetPaidByProviderOrderCodeAsync("PAYOS", orderCode, ct);
-            if (existedPaid == null)
-            {
-                try
-                {
-                    await paymentRepo.AddAsync(new payment
-                    {
-                        order_request_id = orderRequestId,
-                        provider = "PAYOS",
-                        order_code = orderCode,
-                        amount = (decimal)amount,
-                        currency = "VND",
-                        status = "PAID",
-                        paid_at = now,
-                        payos_payment_link_id = paymentLinkId,
-                        payos_transaction_id = transactionId,
-                        payos_raw = rawJson,
-                        created_at = now,
-                        updated_at = now
-                    }, ct);
-
-                    await paymentRepo.SaveChangesAsync(ct);
-                }
-                catch (DbUpdateException ex) when (ex.InnerException is PostgresException pg && pg.SqlState == "23505")
-                {
-                    Console.WriteLine("⚠️ Duplicate payment detected, skipping insert.");
-                }
-            }
-
+            // 5) mark accepted
             await _dealService.MarkAcceptedAsync(orderRequestId);
 
-            // 3) Convert
+            // 6) convert (BOM, is_enough, link req.order_id) — cần row lock ở ConvertToOrderAsync (phần D)
             var convert = await _service.ConvertToOrderAsync(orderRequestId);
             if (!convert.Success || convert.OrderId == null)
                 return (false, "ConvertToOrder failed: " + convert.Message);
 
+            // 7) schedule production
             var productTypeId = await _db.product_types.AsNoTracking()
                 .Where(x => x.code == req.product_type)
                 .Select(x => x.product_type_id)
                 .FirstOrDefaultAsync(ct);
 
             if (productTypeId <= 0)
-                return (false, "product_type invalid");
+                return (false, "product_type invalid (cannot map product_type_id)");
 
             var item = await _db.order_items.AsNoTracking()
                 .FirstOrDefaultAsync(x => x.item_id == convert.OrderItemId, ct);
@@ -438,14 +495,73 @@ namespace AMMS.API.Controllers
                 managerId: 3
             );
 
+            // 8) email: ✅ NON-FATAL (không throw)
             try
             {
                 await _dealService.NotifyConsultantPaidAsync(orderRequestId, (decimal)amount, now);
                 await _dealService.NotifyCustomerPaidAsync(orderRequestId, (decimal)amount, now);
             }
-            catch { }
+            catch
+            {
+                // TODO: log
+            }
 
             return (true, $"Processed OK: order_id={convert.OrderId}, prod_id={prodId}");
+        }
+        private async Task UpsertPaidPaymentRowAsync(
+    int orderRequestId,
+    long orderCode,
+    long amount,
+    string? paymentLinkId,
+    string? transactionId,
+    string rawJson,
+    IPaymentRepository paymentRepo,
+    CancellationToken ct)
+        {
+            var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+            // ✅ idempotent by provider+order_code
+            var existing = await _db.payments
+                .AsTracking()
+                .FirstOrDefaultAsync(p => p.provider == "PAYOS" && p.order_code == orderCode, ct);
+
+            if (existing != null)
+            {
+                existing.status = "PAID";
+                existing.paid_at ??= now;
+
+                if (amount > 0) existing.amount = (decimal)amount;
+
+                existing.payos_payment_link_id ??= paymentLinkId;
+                existing.payos_transaction_id ??= transactionId;
+
+                if (!string.IsNullOrWhiteSpace(rawJson))
+                    existing.payos_raw = rawJson;
+
+                existing.updated_at = now;
+
+                await _db.SaveChangesAsync(ct);
+                return;
+            }
+
+            // ✅ insert new
+            await paymentRepo.AddAsync(new payment
+            {
+                order_request_id = orderRequestId,
+                provider = "PAYOS",
+                order_code = orderCode,
+                amount = (decimal)amount,
+                currency = "VND",
+                status = "PAID",
+                paid_at = now,
+                payos_payment_link_id = paymentLinkId,
+                payos_transaction_id = transactionId,
+                payos_raw = rawJson,
+                created_at = now,
+                updated_at = now
+            }, ct);
+
+            await paymentRepo.SaveChangesAsync(ct);
         }
 
 
@@ -471,13 +587,10 @@ namespace AMMS.API.Controllers
                 if (DateTime.UtcNow > expiredAt.ToUniversalTime())
                     return BadRequest(new { message = "Quote expired" });
 
-                // ✅ DTO này đã đầy đủ field từ DB snapshot hoặc từ CREATE
                 var dto = await _dealService.CreateOrReuseDepositLinkAsync(request_id, ct);
 
-                // ✅ set expire_at ngay tại controller
                 dto.expired_at = expiredAt;
 
-                // (optional) đảm bảo status default
                 dto.status ??= "PENDING";
 
                 return Ok(dto);

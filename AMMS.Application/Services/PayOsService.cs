@@ -120,6 +120,17 @@ namespace AMMS.Application.Services
             return dto;
         }
 
+        private static int? TryGetInt32Flexible(JsonElement obj, string propName)
+        {
+            if (!obj.TryGetProperty(propName, out var p)) return null;
+
+            return p.ValueKind switch
+            {
+                JsonValueKind.Number => p.TryGetInt32(out var n) ? n : null,
+                JsonValueKind.String => int.TryParse(p.GetString(), out var s) ? s : null,
+                _ => null
+            };
+        }
         public async Task<PayOsResultDto?> GetPaymentLinkInformationAsync(long orderCode, CancellationToken ct = default)
         {
             using var msg = new HttpRequestMessage(HttpMethod.Get, $"{_opt.BaseUrl}/v2/payment-requests/{orderCode}");
@@ -127,25 +138,21 @@ namespace AMMS.Application.Services
             msg.Headers.Add("x-api-key", _opt.ApiKey);
 
             var res = await _http.SendAsync(msg, ct);
-            if (!res.IsSuccessStatusCode) return null;
-
             var raw = await res.Content.ReadAsStringAsync(ct);
+
             using var doc = JsonDocument.Parse(raw);
+            var root = doc.RootElement;
 
-            if (!doc.RootElement.TryGetProperty("data", out var data))
+            if (!root.TryGetProperty("data", out var data))
                 return null;
-
-            int? amount = null;
-            if (data.TryGetProperty("amount", out var am) && am.ValueKind == JsonValueKind.Number)
-                amount = am.TryGetInt32(out var v) ? v : null;
 
             return new PayOsResultDto
             {
-                order_code = orderCode,     // ✅
-                raw_json = raw,             // ✅
+                order_code = orderCode,
+                raw_json = raw,
 
                 status = GetString(data, "status"),
-                amount = amount,
+                amount = TryGetInt32Flexible(data, "amount"),
 
                 check_out_url = GetString(data, "checkoutUrl"),
                 qr_code = GetString(data, "qrCode"),
@@ -157,7 +164,6 @@ namespace AMMS.Application.Services
                 transaction_id = GetString(data, "transactionId") ?? GetString(data, "reference"),
             };
         }
-
 
         private string? GetString(JsonElement element, string propName)
         {
