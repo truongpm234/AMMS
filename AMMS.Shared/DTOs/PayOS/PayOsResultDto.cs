@@ -8,17 +8,23 @@ namespace AMMS.Shared.DTOs.PayOS
 {
     public class PayOsResultDto
     {
-        public string? checkoutUrl { get; set; }
+        public DateTime? expired_at { get; set; }   // ✅ property
+
+        public string? check_out_url { get; set; }
         public string? qr_code { get; set; }
         public string? account_number { get; set; }
         public string? account_name { get; set; }
-        public int? amount { get; set; }
+
+        public int? amount { get; set; }            // ok nullable
         public string? status { get; set; }
         public string? description { get; set; }
         public string? bin { get; set; }
+
         public string? payment_link_id { get; set; }
         public string? transaction_id { get; set; }
+
         public string? raw_json { get; set; }
-        public string? order_code { get; set; }
+        public long? order_code { get; set; }
     }
+
 }

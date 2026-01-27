@@ -33,5 +33,34 @@ namespace AMMS.Infrastructure.Repositories
                 .FirstOrDefaultAsync(ct);
         }
 
+        public async Task<payment?> GetLatestPendingByRequestIdAsync(int requestId, CancellationToken ct)
+        {
+            return await _db.payments
+                .Where(x => x.provider == "PAYOS" && x.order_request_id == requestId && x.status == "PENDING")
+                .OrderByDescending(x => x.created_at)
+                .FirstOrDefaultAsync(ct);
+        }
+
+        public async Task UpsertPendingAsync(payment p, CancellationToken ct)
+        {
+            var existing = await _db.payments
+                .FirstOrDefaultAsync(x => x.provider == p.provider && x.order_code == p.order_code, ct);
+
+            if (existing == null)
+            {
+                await _db.payments.AddAsync(p, ct);
+            }
+            else
+            {
+                // update snapshot create-link nếu muốn refresh
+                existing.status = "PENDING";
+                existing.amount = p.amount;
+                existing.payos_payment_link_id = p.payos_payment_link_id;
+                existing.payos_raw = p.payos_raw;
+                existing.updated_at = p.updated_at;
+            }
+        }
+
+
     }
 }

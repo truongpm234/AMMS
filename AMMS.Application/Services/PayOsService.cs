@@ -21,15 +21,15 @@ namespace AMMS.Application.Services
         }
 
         public async Task<PayOsResultDto> CreatePaymentLinkAsync(
-            int orderCode,
-            int amount,
-            string description,
-            string buyerName,
-            string buyerEmail,
-            string buyerPhone,
-            string returnUrl,
-            string cancelUrl,
-            CancellationToken ct = default)
+    int orderCode,
+    int amount,
+    string description,
+    string buyerName,
+    string buyerEmail,
+    string buyerPhone,
+    string returnUrl,
+    string cancelUrl,
+    CancellationToken ct = default)
         {
             var dataToSign = $"amount={amount}&cancelUrl={cancelUrl}&description={description}&orderCode={orderCode}&returnUrl={returnUrl}";
             var signature = HmacSha256Hex(_opt.ChecksumKey, dataToSign);
@@ -55,36 +55,69 @@ namespace AMMS.Application.Services
             var res = await _http.SendAsync(msg, ct);
             var rawResponse = await res.Content.ReadAsStringAsync(ct);
 
-            if (!res.IsSuccessStatusCode)
+            // ✅ PayOS có thể trả 200 nhưng success=false; hoặc trả lỗi nhưng vẫn có data
+            using var doc = JsonDocument.Parse(rawResponse);
+
+            var root = doc.RootElement;
+            var code = root.TryGetProperty("code", out var c) ? (c.GetString() ?? "") : "";
+            var hasData = root.TryGetProperty("data", out var data);
+
+            // ✅ Case "code=00" có data => coi như OK
+            if (code == "00" && hasData)
+                return MapPayOsDataToDto(data, orderCode, description, amount, rawResponse);
+
+            // Nếu HTTP fail mà vẫn có data thì vẫn map (tuỳ bạn muốn strict hay not)
+            if (hasData && !string.Equals(code, "", StringComparison.Ordinal))
             {
-                // Nếu lỗi là do OrderCode đã tồn tại (code "231" hoặc message tương tự), 
-                // ta có thể ném lỗi đặc biệt để tầng trên xử lý, hoặc cứ throw exception chung.
-                // Ở đây throw exception để log ra lỗi chi tiết.
-                throw new PayOsException($"PayOS Error: {rawResponse}");
+                // Một số case PayOS vẫn kèm data, ưu tiên trả dto để FE có link
+                return MapPayOsDataToDto(data, orderCode, description, amount, rawResponse);
             }
 
-            using var doc = JsonDocument.Parse(rawResponse);
-            if (!doc.RootElement.TryGetProperty("data", out var data))
-                throw new PayOsException("PayOS response missing data");
+            // ❌ Không có data => throw
+            throw new PayOsException($"PayOS Error: {rawResponse}");
+        }
 
-            var result = new PayOsResultDto
+        private static PayOsResultDto MapPayOsDataToDto(JsonElement data, int orderCode, string description, int amount, string raw)
+        {
+            string? GetString(string name) =>
+                data.TryGetProperty(name, out var p) ? p.GetString() : null;
+
+            int? GetInt(string name)
             {
-                checkoutUrl = GetString(data, "checkoutUrl"),
-                qr_code = GetString(data, "qrCode"),
-                account_number = GetString(data, "accountNumber"),
-                account_name = GetString(data, "accountName"),
-                bin = GetString(data, "bin"),
-                amount = amount,
-                status = "PENDING",
-                description = description,
-                payment_link_id = GetString(data, "paymentLinkId"),
-                transaction_id = null
+                if (!data.TryGetProperty(name, out var p)) return null;
+                if (p.ValueKind == JsonValueKind.Number && p.TryGetInt32(out var v)) return v;
+                if (p.ValueKind == JsonValueKind.String && int.TryParse(p.GetString(), out var s)) return s;
+                return null;
+            }
+
+            long? GetLong(string name)
+            {
+                if (!data.TryGetProperty(name, out var p)) return null;
+                if (p.ValueKind == JsonValueKind.Number && p.TryGetInt64(out var v)) return v;
+                if (p.ValueKind == JsonValueKind.String && long.TryParse(p.GetString(), out var s)) return s;
+                return null;
+            }
+
+            var dto = new PayOsResultDto
+            {
+                order_code = GetLong("orderCode") ?? orderCode,
+                check_out_url = GetString("checkoutUrl"),
+                qr_code = GetString("qrCode"),
+                account_number = GetString("accountNumber"),
+                account_name = GetString("accountName"),
+                bin = GetString("bin"),
+                amount = GetInt("amount") ?? amount,
+                status = GetString("status") ?? "PENDING",
+                description = GetString("description") ?? description,
+                payment_link_id = GetString("paymentLinkId"),
+                transaction_id = GetString("transactionId") ?? GetString("reference"),
+                raw_json = raw
             };
 
-            if (string.IsNullOrEmpty(result.checkoutUrl))
+            if (string.IsNullOrWhiteSpace(dto.check_out_url))
                 throw new PayOsException("PayOS response missing checkoutUrl");
 
-            return result;
+            return dto;
         }
 
         public async Task<PayOsResultDto?> GetPaymentLinkInformationAsync(long orderCode, CancellationToken ct = default)
@@ -102,20 +135,29 @@ namespace AMMS.Application.Services
             if (!doc.RootElement.TryGetProperty("data", out var data))
                 return null;
 
+            int? amount = null;
+            if (data.TryGetProperty("amount", out var am) && am.ValueKind == JsonValueKind.Number)
+                amount = am.TryGetInt32(out var v) ? v : null;
+
             return new PayOsResultDto
             {
+                order_code = orderCode,     // ✅
+                raw_json = raw,             // ✅
+
                 status = GetString(data, "status"),
-                amount = data.TryGetProperty("amount", out var am) && am.ValueKind == JsonValueKind.Number ? am.GetInt32() : 0,
-                checkoutUrl = GetString(data, "checkoutUrl"),
+                amount = amount,
+
+                check_out_url = GetString(data, "checkoutUrl"),
                 qr_code = GetString(data, "qrCode"),
                 account_number = GetString(data, "accountNumber"),
                 account_name = GetString(data, "accountName"),
                 bin = GetString(data, "bin"),
                 description = GetString(data, "description"),
                 payment_link_id = GetString(data, "paymentLinkId"),
-                transaction_id = GetString(data, "transactionId") ?? GetString(data, "reference")
+                transaction_id = GetString(data, "transactionId") ?? GetString(data, "reference"),
             };
         }
+
 
         private string? GetString(JsonElement element, string propName)
         {

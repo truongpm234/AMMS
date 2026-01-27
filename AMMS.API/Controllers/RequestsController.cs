@@ -4,6 +4,7 @@ using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Email;
+using AMMS.Shared.DTOs.PayOS;
 using AMMS.Shared.DTOs.Requests;
 using AMMS.Shared.DTOs.Requests.AMMS.Shared.DTOs.Requests;
 using Microsoft.AspNetCore.Authorization;
@@ -453,20 +454,33 @@ namespace AMMS.API.Controllers
         {
             try
             {
-                var link = await _dealService.CreateOrReuseDepositLinkAsync(request_id, ct);
+                var req = await _service.GetByIdAsync(request_id);
+                if (req == null)
+                    return NotFound(new { message = "Request not found" });
 
-                return Ok(new
-                {
-                    check_out_url = link.checkoutUrl,
-                    qr_code = link.qr_code,
-                    account_number = link.account_number,
-                    account_name = link.account_name,
-                    bin = link.bin,
-                    amount = link.amount,
-                    description = link.description,
-                    status = link.status ?? "PENDING",
-                    order_code = link.order_code
-                });
+                var est = await _db.cost_estimates
+                    .AsNoTracking()
+                    .Where(x => x.order_request_id == request_id)
+                    .OrderByDescending(x => x.created_at)
+                    .FirstOrDefaultAsync(ct);
+
+                if (est == null)
+                    return BadRequest(new { message = "Cost estimate not found" });
+
+                var expiredAt = est.created_at.AddHours(24);
+                if (DateTime.UtcNow > expiredAt.ToUniversalTime())
+                    return BadRequest(new { message = "Quote expired" });
+
+                // ✅ DTO này đã đầy đủ field từ DB snapshot hoặc từ CREATE
+                var dto = await _dealService.CreateOrReuseDepositLinkAsync(request_id, ct);
+
+                // ✅ set expire_at ngay tại controller
+                dto.expired_at = expiredAt;
+
+                // (optional) đảm bảo status default
+                dto.status ??= "PENDING";
+
+                return Ok(dto);
             }
             catch (Exception ex)
             {

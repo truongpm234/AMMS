@@ -143,7 +143,10 @@ builder.Services.Configure<CloudinaryOptions>(
 builder.Services.Configure<SendGridSettings>(
     builder.Configuration.GetSection("SendGrid"));
 builder.Services.Configure<PayOsOptions>(builder.Configuration.GetSection("PayOS"));
-
+builder.Services.AddControllers().AddJsonOptions(o =>
+{
+    o.JsonSerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.Never;
+});
 
 // Services
 builder.Services.AddScoped<IUploadFileService, UploadFileService>();

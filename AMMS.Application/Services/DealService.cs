@@ -2,6 +2,7 @@
 using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
+using AMMS.Shared.DTOs.Exceptions.AMMS.Application.Exceptions;
 using AMMS.Shared.DTOs.PayOS;
 using Microsoft.Extensions.Configuration;
 
@@ -16,6 +17,7 @@ namespace AMMS.Application.Services
         private readonly IEmailService _emailService;
         private readonly IQuoteRepository _quoteRepo;
         private readonly IPayOsService _payOs;
+        private readonly IPaymentsService _payment;
         public DealService(
             IRequestRepository requestRepo,
             ICostEstimateRepository estimateRepo,
@@ -23,7 +25,7 @@ namespace AMMS.Application.Services
             IConfiguration config,
             IEmailService emailService,
             IQuoteRepository quoteRepo,
-            IPayOsService payOs)
+            IPayOsService payOs, IPaymentsService payment)
         {
             _requestRepo = requestRepo;
             _estimateRepo = estimateRepo;
@@ -32,6 +34,7 @@ namespace AMMS.Application.Services
             _emailService = emailService;
             _quoteRepo = quoteRepo;
             _payOs = payOs;
+            _payment = payment;
         }
 
         public async Task SendDealAndEmailAsync(int orderRequestId)
@@ -93,7 +96,7 @@ namespace AMMS.Application.Services
             {
                 var st = (existing.status ?? "").ToUpperInvariant();
                 if (st == "PENDING" || st == "PAID" || st == "SUCCESS" || st == "CANCELLED")
-                    return existing.checkoutUrl ?? "";
+                    return existing.check_out_url ?? "";
             }
 
             var result = await _payOs.CreatePaymentLinkAsync(
@@ -107,7 +110,7 @@ namespace AMMS.Application.Services
                 cancelUrl: cancelUrl
             );
 
-            return result.checkoutUrl ?? "";
+            return result.check_out_url ?? "";
         }
 
         public async Task<PayOsDepositInfoDto> PrepareDepositPaymentAsync(int orderRequestId, CancellationToken ct = default)
@@ -155,7 +158,7 @@ namespace AMMS.Application.Services
             return new PayOsDepositInfoDto
             {
                 order_code = orderCode,
-                checkout_url = result.checkoutUrl,
+                checkout_url = result.check_out_url,
                 deposit_amount = deposit,
                 expire_at = expiredAt,
                 qr_code = result.qr_code,
@@ -337,43 +340,105 @@ namespace AMMS.Application.Services
 
         public async Task<PayOsResultDto> CreateOrReuseDepositLinkAsync(int requestId, CancellationToken ct = default)
         {
-            var req = await _requestRepo.GetByIdAsync(requestId) ?? throw new InvalidOperationException("Request not found");
+            var req = await _requestRepo.GetByIdAsync(requestId)
+                      ?? throw new InvalidOperationException("Request not found");
 
             var est = await _estimateRepo.GetByOrderRequestIdAsync(requestId)
                       ?? throw new InvalidOperationException("Cost estimate not found");
 
-            int orderCode = await GetOrCreatePayOsOrderCodeAsync(requestId, ct);
-
-            var existing = await _payOs.GetPaymentLinkInformationAsync(orderCode, ct);
-            if (existing != null)
-            {
-                var st = (existing.status ?? "").ToUpperInvariant();
-                if (st == "PENDING" || st == "PAID" || st == "SUCCESS")
-                    return existing;
-            }
+            // ✅ 1) DB snapshot trước
+            var pending = await _payment.GetLatestPendingByRequestIdAsync(requestId, ct);
+            if (pending != null && !string.IsNullOrWhiteSpace(pending.payos_raw))
+                return PayOsRawMapper.FromPayment(pending);
 
             var backendUrl = _config["Deal:BaseUrl"]!;
             var feBase = _config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app";
 
-            var returnUrl = $"{backendUrl}/api/requests/payos/return?request_id={requestId}&order_code={orderCode}";
-            var cancelUrl = $"{feBase}/reject-deal/{requestId}?status=cancel";
-
-            // ⚠️ Bạn đang chia /100 để test => nếu production thì bỏ chia
+            // ⚠️ test /100 thì giữ, prod bỏ /100
             var amount = (int)Math.Round(est.deposit_amount, 0) / 100;
-
             var description = $"AM{requestId:D6}";
 
-            return await _payOs.CreatePaymentLinkAsync(
-                orderCode: orderCode,
-                amount: amount,
-                description: description,
-                buyerName: req.customer_name ?? "Khach hang",
-                buyerEmail: req.customer_email ?? "",
-                buyerPhone: req.customer_phone ?? "",
-                returnUrl: returnUrl,
-                cancelUrl: cancelUrl,
-                ct: ct
-            );
+            // ✅ 2) Retry orderCode nếu duplicate
+            const int maxAttempt = 9;
+            Exception? last = null;
+
+            for (int attempt = 1; attempt <= maxAttempt; attempt++)
+            {
+                int orderCode = checked(requestId * 10 + attempt);
+
+                var returnUrl = $"{backendUrl}/api/requests/payos/return?request_id={requestId}&order_code={orderCode}";
+                var cancelUrl = $"{feBase}/reject-deal/{requestId}?status=cancel";
+
+                try
+                {
+                    var payos = await _payOs.CreatePaymentLinkAsync(
+                        orderCode: orderCode,
+                        amount: amount,
+                        description: description,
+                        buyerName: req.customer_name ?? "Khach hang",
+                        buyerEmail: req.customer_email ?? "",
+                        buyerPhone: req.customer_phone ?? "",
+                        returnUrl: returnUrl,
+                        cancelUrl: cancelUrl,
+                        ct: ct);
+
+                    // ✅ 3) lưu snapshot PENDING
+                    var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+                    await _payment.UpsertPendingAsync(new payment
+                    {
+                        order_request_id = requestId,
+                        provider = "PAYOS",
+                        order_code = orderCode,
+                        amount = payos.amount ?? amount,
+                        currency = "VND",
+                        status = "PENDING",
+                        payos_payment_link_id = payos.payment_link_id,
+                        payos_raw = payos.raw_json,
+                        created_at = now,
+                        updated_at = now
+                    }, ct);
+
+                    await _payment.SaveChangesAsync(ct);
+                    return payos;
+                }
+                catch (PayOsException ex) when (IsDuplicateOrderCode(ex.Message))
+                {
+                    last = ex; // thử attempt tiếp
+                    continue;
+                }
+            }
+
+            throw new InvalidOperationException($"Cannot create PayOS link after retries. Last error: {last?.Message}");
+        }
+
+        private static bool IsDuplicateOrderCode(string msg)
+        {
+            msg = (msg ?? "").ToLowerInvariant();
+            return msg.Contains("ordercode") && (msg.Contains("exists") || msg.Contains("tồn tại") || msg.Contains("231"));
+        }
+
+
+        private async Task SnapshotPendingAsync(int requestId, int orderCode, PayOsResultDto dto, CancellationToken ct)
+        {
+            var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+            await _payment.UpsertPendingAsync(new payment
+            {
+                order_request_id = requestId,
+                provider = "PAYOS",
+                order_code = orderCode,
+                amount = (decimal)(dto.amount ?? 0),
+                currency = "VND",
+                status = "PENDING",
+                paid_at = null,
+                payos_payment_link_id = dto.payment_link_id,
+                payos_transaction_id = dto.transaction_id,
+                payos_raw = dto.raw_json,
+                created_at = now,
+                updated_at = now
+            }, ct);
+
+            await _payment.SaveChangesAsync(ct);
         }
 
         private async Task<int> GetOrCreatePayOsOrderCodeAsync(

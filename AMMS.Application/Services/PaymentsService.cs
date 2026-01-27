@@ -25,5 +25,17 @@ namespace AMMS.Application.Services
         {
             return _paymentRepository.GetLatestByRequestIdAsync(orderRequestId, ct);
         }
+        public async Task<payment?> GetLatestPendingByRequestIdAsync(int requestId, CancellationToken ct)
+        {
+            return await _paymentRepository.GetLatestPendingByRequestIdAsync(requestId, ct);
+        }
+        public async Task UpsertPendingAsync(payment p, CancellationToken ct)
+        {
+            await _paymentRepository.UpsertPendingAsync(p, ct);
+        }
+         public Task<int> SaveChangesAsync(CancellationToken ct = default)
+        {
+            return _paymentRepository.SaveChangesAsync(ct);
+        }
     }
 }
