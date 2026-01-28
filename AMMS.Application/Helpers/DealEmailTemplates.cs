@@ -46,9 +46,6 @@ namespace AMMS.Application.Helpers
             return string.Join(", ", codes.Select(MapProcessCode));
         }
 
-        /// <summary>
-        /// Email báo giá: dùng 1 form duy nhất.
-        /// </summary>
         public static string QuoteEmail(order_request req, cost_estimate est, string orderDetailUrl)
         {           
             var address = $"{req.detail_address}";
@@ -217,7 +214,7 @@ namespace AMMS.Application.Helpers
             Xem chi tiết & Thanh toán
          </a>
          <p style='margin-top: 20px; font-size: 12px; color: #a0aec0;'>
-            Báo giá có hiệu lực đến {expiredAtText}
+            Báo giá có hiệu lực đến {expiredAtText}. Sau thời gian này, mọi thông tin về đơn giá và chi phí có thể thay đổi. Mọi thao tác thanh toán sau thời gian này đều sẽ không được ghi nhận, mọi thắc mắc vui lòng liên hệ lại với chúng tôi để được hỗ trợ.
          </p>
       </div>
 

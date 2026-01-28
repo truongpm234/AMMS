@@ -577,6 +577,7 @@ namespace AMMS.Infrastructure.Repositories
                 .Select(x => x.design_file_path)
                 .FirstOrDefaultAsync(ct);
         }
+
         public async Task<PagedResultLite<RequestSortedDto>> GetRequestsByPhonePagedAsync(
     string phone, int page, int pageSize, CancellationToken ct = default)
         {
@@ -694,6 +695,14 @@ namespace AMMS.Infrastructure.Repositories
                     })
                     .ToList()
             };
+        }
+        public async Task<int> DeleteDesignFilePathByRequestIdAsync(int orderRequestId, CancellationToken ct = default)
+        {
+            return await _db.order_requests
+                .Where(x => x.order_request_id == orderRequestId)
+                .ExecuteUpdateAsync(
+                    setters => setters.SetProperty(x => x.design_file_path, (string?)null),
+                    ct);
         }
     }
 }

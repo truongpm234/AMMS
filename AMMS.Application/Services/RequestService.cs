@@ -1,4 +1,5 @@
-﻿using AMMS.Application.Interfaces;
+﻿using AMMS.Application.Helpers;
+using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
@@ -58,7 +59,7 @@ namespace AMMS.Application.Services
                 quantity = req.quantity,
                 description = req.description,
                 design_file_path = req.design_file_path,
-                order_request_date = ToUnspecified(DateTime.Now),
+                order_request_date = AppTime.UtcNowUnspecified(),
                 detail_address = req.detail_address,
                 process_status = "Pending",
                 is_send_design = req.is_send_design
@@ -78,6 +79,7 @@ namespace AMMS.Application.Services
                 customer_phone = req.customer_phone,
                 customer_email = req.customer_email,
                 detail_address = req.detail_address,
+                order_request_date = AppTime.UtcNowUnspecified(),
                 process_status = "Pending"
             };
 
@@ -535,7 +537,7 @@ namespace AMMS.Application.Services
                 print_width_mm = dto.print_width_mm,
                 print_height_mm = dto.print_height_mm,
 
-                order_request_date = ToUnspecified(now),
+                order_request_date = AppTime.UtcNowUnspecified(),
                 process_status = "Pending"
             };
 
@@ -571,5 +573,10 @@ namespace AMMS.Application.Services
             await _requestRepo.UpdateAsync(entity);
             await _requestRepo.SaveChangesAsync();
         }
+        public async Task<int> DeleteDesignFilePathByRequestIdAsync(int orderRequestId, CancellationToken ct = default)
+        {
+            return await _requestRepo.DeleteDesignFilePathByRequestIdAsync(orderRequestId, ct);
+        }
+
     }
 }

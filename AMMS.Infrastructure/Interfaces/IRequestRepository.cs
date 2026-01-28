@@ -37,5 +37,6 @@ namespace AMMS.Infrastructure.Interfaces
     string phone, int page, int pageSize, CancellationToken ct = default);
         Task<RequestDetailDto?> GetInformationRequestById(int requestId, CancellationToken ct = default);
         Task<RequestWithCostDto?> GetByIdWithCostAsync(int id);
+        Task<int> DeleteDesignFilePathByRequestIdAsync(int orderRequestId, CancellationToken ct = default);
     }
 }

@@ -91,5 +91,15 @@ namespace AMMS.API.Controllers
             });
         }
 
+        [HttpDelete("delete-design-file/{request_id:int}")]
+        public async Task<IActionResult> DeleteDesignFile(int request_id,  CancellationToken ct)
+        {
+            var deletedCount = await _requestService.DeleteDesignFilePathByRequestIdAsync(request_id, ct);
+            return Ok(new
+            {
+                order_request_id = request_id,
+                deleted_count = deletedCount
+            });
+        }
     }
 }

@@ -40,7 +40,6 @@ namespace AMMS.Infrastructure.Repositories
         public Task<production?> GetByIdAsync(int prodId)
             => _db.productions.FirstOrDefaultAsync(x => x.prod_id == prodId);
 
-
         public async Task<PagedResultLite<ProducingOrderCardDto>> GetProducingOrdersAsync(int page, int pageSize, CancellationToken ct = default)
         {
             NormalizePaging(ref page, ref pageSize);
