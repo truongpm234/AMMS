@@ -12,5 +12,7 @@ namespace AMMS.Application.Interfaces
         Task<user?> GetUserForGoogleAuth(string email, string name);
 
         Task<user?> AdminCreateUpdateNewUser(UserUpdateCreateDto new_user, int? user_id);
+
+        Task<List<user>> GetAllUser();
     }
 }

@@ -118,5 +118,10 @@ namespace AMMS.Infrastructure.Repositories
                 throw new Exception("ERROR", e);
             }
         }
+
+        public async Task<List<user>> GetAllUser()
+        {
+            return await _db.users.ToListAsync();
+        }
     }
 }
