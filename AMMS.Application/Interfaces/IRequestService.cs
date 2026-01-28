@@ -11,7 +11,7 @@ namespace AMMS.Application.Interfaces
         Task CancelAsync(int id, string? reason, CancellationToken ct = default);
         Task<order_request?> GetByIdAsync(int id);
         Task<PagedResultLite<RequestPagedDto>> GetPagedAsync(int page, int pageSize);
-
+        Task<int> DeleteDesignFilePathByRequestIdAsync(int orderRequestId, CancellationToken ct = default);
         Task<ConvertRequestToOrderResponse> ConvertToOrderAsync(int requestId);
         Task<PagedResultLite<RequestSortedDto>> GetSortedByQuantityPagedAsync(
     bool ascending, int page, int pageSize, CancellationToken ct = default);

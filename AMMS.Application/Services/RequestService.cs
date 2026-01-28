@@ -573,5 +573,10 @@ namespace AMMS.Application.Services
             await _requestRepo.UpdateAsync(entity);
             await _requestRepo.SaveChangesAsync();
         }
+        public async Task<int> DeleteDesignFilePathByRequestIdAsync(int orderRequestId, CancellationToken ct = default)
+        {
+            return await _requestRepo.DeleteDesignFilePathByRequestIdAsync(orderRequestId, ct);
+        }
+
     }
 }
