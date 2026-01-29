@@ -1,4 +1,5 @@
-﻿using AMMS.Application.Interfaces;
+﻿using AMMS.Application.Helpers;
+using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
@@ -45,7 +46,7 @@ namespace AMMS.Application.Services
             {
                 await using var tx = await _db.Database.BeginTransactionAsync();
 
-                var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+                var now = AppTime.NowVnUnspecified();
 
                 var order = await _db.orders
                     .AsTracking()
@@ -83,7 +84,7 @@ namespace AMMS.Application.Services
                         manager_id = managerId,
                         status = "Scheduled",
                         product_type_id = productTypeId,
-                        start_date = now
+                        start_date = AppTime.NowVnUnspecified()
                     };
 
                     await _db.productions.AddAsync(prod);
@@ -99,7 +100,6 @@ namespace AMMS.Application.Services
                     await _db.SaveChangesAsync();
                 }
 
-                // NẾU ĐÃ CÓ TASK → KHÔNG TẠO LẠI
                 var hasTask = await _db.tasks
                     .AsNoTracking()
                     .AnyAsync(t => t.prod_id == prod.prod_id);
@@ -110,7 +110,6 @@ namespace AMMS.Application.Services
                     return prod.prod_id;
                 }
 
-                // 🔹 6. TẠO TASK (như code hiện tại của bạn)
                 var steps = await _ptpRepo.GetActiveByProductTypeIdAsync(productTypeId);
                 if (steps == null || steps.Count == 0)
                     throw new Exception("No routing found");
@@ -138,17 +137,7 @@ namespace AMMS.Application.Services
                 return prod.prod_id;
             });
         }
-
-        private static bool IsManual(machine? m, string? stepMachine)
-        {
-            if (string.IsNullOrWhiteSpace(stepMachine)) return true;
-            if (m == null) return true;
-
-            var note = (m.note ?? "");
-            return note.Contains("thủ công", StringComparison.OrdinalIgnoreCase)
-                || note.Contains("thu cong", StringComparison.OrdinalIgnoreCase);
-        }
-
+      
         private static HashSet<string> ParseProcessCsv(string? csv)
         {
             if (string.IsNullOrWhiteSpace(csv)) return new HashSet<string>(StringComparer.OrdinalIgnoreCase);

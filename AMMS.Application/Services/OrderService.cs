@@ -72,18 +72,14 @@ namespace AMMS.Application.Services
 
             foreach (var x in result.Data)
             {
-                // Base missing (repo đã set quantity=missingBase)
                 var missingBase = x.quantity;
                 if (missingBase < 0m) missingBase = 0m;
 
                 // +10%
                 var withBuffer = missingBase * 1.10m;
 
-                // round up to tens
                 var rounded = RoundUpToTens(withBuffer);
 
-                // Suy ra unit price từ total_price base / missingBase
-                // (vì DTO không có unit_price)
                 decimal unitPrice = 0m;
                 if (missingBase > 0m && x.total_price > 0m)
                 {

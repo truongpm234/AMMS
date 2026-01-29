@@ -155,7 +155,7 @@ namespace AMMS.API.Controllers
                     status = "PENDING",
                     order_request_id,
                     order_code = (long?)null,
-                    paid_at = (DateTime?)null
+                    paid_at = AppTime.NowVnUnspecified()
                 });
             }
 
@@ -465,10 +465,10 @@ namespace AMMS.API.Controllers
                 return (false, "Cost estimate not found");
 
             var expiredAt = est.created_at.AddHours(24);
-            if (DateTime.UtcNow > expiredAt.ToUniversalTime())
+            if (AppTime.NowVnUnspecified() > expiredAt.ToUniversalTime())
                 return (false, $"Quote expired at {expiredAt:o}, ignore payment.");
 
-            var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var now = AppTime.NowVnUnspecified();
 
             // 5) mark accepted
             await _dealService.MarkAcceptedAsync(orderRequestId);
@@ -518,7 +518,7 @@ namespace AMMS.API.Controllers
     IPaymentRepository paymentRepo,
     CancellationToken ct)
         {
-            var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var now = AppTime.NowVnUnspecified();
 
             var existing = await _db.payments
                 .AsTracking()
@@ -537,7 +537,7 @@ namespace AMMS.API.Controllers
                 if (!string.IsNullOrWhiteSpace(rawJson))
                     existing.payos_raw = rawJson;
 
-                existing.updated_at = now;
+                existing.updated_at = AppTime.NowVnUnspecified();
 
                 await _db.SaveChangesAsync(ct);
                 return;
@@ -557,7 +557,7 @@ namespace AMMS.API.Controllers
                 payos_transaction_id = transactionId,
                 payos_raw = rawJson,
                 created_at = now,
-                updated_at = now
+                updated_at = AppTime.NowVnUnspecified()
             }, ct);
 
             await paymentRepo.SaveChangesAsync(ct);
@@ -592,7 +592,7 @@ namespace AMMS.API.Controllers
                     return BadRequest(new { message = "Cost estimate not found" });
 
                 var expiredAt = est.created_at.AddHours(24);
-                if (DateTime.UtcNow > expiredAt.ToUniversalTime())
+                if (AppTime.NowVnUnspecified() > expiredAt.ToUniversalTime())
                     return BadRequest(new { message = "Quote expired" });
 
                 var dto = await _dealService.CreateOrReuseDepositLinkAsync(request_id, ct);

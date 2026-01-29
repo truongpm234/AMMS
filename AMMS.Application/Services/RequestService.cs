@@ -59,7 +59,7 @@ namespace AMMS.Application.Services
                 quantity = req.quantity,
                 description = req.description,
                 design_file_path = req.design_file_path,
-                order_request_date = AppTime.UtcNowUnspecified(),
+                order_request_date = AppTime.NowVnUnspecified(),
                 detail_address = req.detail_address,
                 process_status = "Pending",
                 is_send_design = req.is_send_design
@@ -79,7 +79,7 @@ namespace AMMS.Application.Services
                 customer_phone = req.customer_phone,
                 customer_email = req.customer_email,
                 detail_address = req.detail_address,
-                order_request_date = AppTime.UtcNowUnspecified(),
+                order_request_date = AppTime.NowVnUnspecified(),
                 process_status = "Pending"
             };
 
@@ -139,7 +139,7 @@ namespace AMMS.Application.Services
                 Success = true,
                 Message = "Order request updated successfully",
                 UpdatedId = id,
-                UpdatedAt = DateTime.Now
+                UpdatedAt = AppTime.NowVnUnspecified()
             };
         }
 
@@ -275,11 +275,10 @@ namespace AMMS.Application.Services
                         };
                     }
 
-                    // ✅ order.status luôn Scheduled, is_enough mới phản ánh đủ/thiếu NVL
                     var newOrder = new order
                     {
                         code = "TMP-ORD",
-                        order_date = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+                        order_date = AppTime.NowVnUnspecified(),
                         delivery_date = req.delivery_date,
                         status = "Scheduled",
                         payment_status = "Deposited",
@@ -465,7 +464,6 @@ namespace AMMS.Application.Services
         {
             return await _requestRepo.GetInformationRequestById(requestId, ct);
         }
-
         public Task<PagedResultLite<RequestSortedDto>> GetSortedByQuantityPagedAsync(
             bool ascending, int page, int pageSize, CancellationToken ct = default)
             => _requestRepo.GetSortedByQuantityPagedAsync(ascending, page, pageSize, ct);
@@ -501,7 +499,7 @@ namespace AMMS.Application.Services
             if (string.IsNullOrWhiteSpace(dto.product_name))
                 throw new ArgumentException("product_name is required");
 
-            var now = DateTime.UtcNow;
+            var now = AppTime.NowVnUnspecified();
 
             var entity = new order_request
             {
@@ -537,7 +535,7 @@ namespace AMMS.Application.Services
                 print_width_mm = dto.print_width_mm,
                 print_height_mm = dto.print_height_mm,
 
-                order_request_date = AppTime.UtcNowUnspecified(),
+                order_request_date = AppTime.NowVnUnspecified(),
                 process_status = "Pending"
             };
 

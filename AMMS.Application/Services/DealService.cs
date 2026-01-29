@@ -55,7 +55,7 @@ namespace AMMS.Application.Services
                 order_request_id = orderRequestId,
                 total_amount = est.final_total_cost,
                 status = "Sent",
-                created_at = AppTime.UtcNowUnspecified()
+                created_at = AppTime.NowVnUnspecified()
             };
 
             await _quoteRepo.AddAsync(quote);
@@ -511,7 +511,7 @@ namespace AMMS.Application.Services
                         cancelUrl: cancelUrl,
                         ct: ct);
 
-                    var now = AppTime.UtcNowUnspecified();
+                    var now = AppTime.NowVnUnspecified();
                     await _payment.UpsertPendingAsync(new payment
                     {
                         order_request_id = requestId,

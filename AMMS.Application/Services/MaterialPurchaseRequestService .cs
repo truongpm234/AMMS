@@ -1,4 +1,5 @@
-﻿using AMMS.Application.Interfaces;
+﻿using AMMS.Application.Helpers;
+using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Shared.DTOs.Materials;
@@ -108,7 +109,7 @@ namespace AMMS.Application.Services
                 supplier_id = null,      
                 created_by = managerId,
                 status = "Pending",
-                created_at = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified)
+                created_at = AppTime.NowVnUnspecified()
             };
 
             await _db.purchases.AddAsync(purchase, ct);

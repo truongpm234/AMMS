@@ -1,4 +1,5 @@
-﻿using AMMS.Application.Interfaces;
+﻿using AMMS.Application.Helpers;
+using AMMS.Application.Interfaces;
 using AMMS.Application.Rules;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
@@ -644,7 +645,7 @@ namespace AMMS.Application.Services
 
             entity.estimated_finish_date = DateTime.SpecifyKind(estimatedFinish, DateTimeKind.Unspecified);
             entity.desired_delivery_date = DateTime.SpecifyKind(req.desired_delivery_date, DateTimeKind.Unspecified);
-            entity.created_at = DateTime.SpecifyKind(now, DateTimeKind.Unspecified);
+            entity.created_at = AppTime.NowVnUnspecified();
 
             entity.sheets_required = req.paper.sheets_base;
             entity.sheets_waste = req.paper.total_waste;
@@ -669,7 +670,7 @@ namespace AMMS.Application.Services
                     unit_price = d.unit_price,
                     total_cost = d.total_cost,
                     note = d.note,
-                    created_at = ToUnspecified(now)
+                    created_at = AppTime.NowVnUnspecified()
                 });
             }
 
@@ -1046,7 +1047,7 @@ namespace AMMS.Application.Services
             var entity = await _estimateRepo.GetByOrderRequestIdAsync(req.order_request_id);
 
             bool isNew = false;
-            var now = DateTime.UtcNow;
+            var now = AppTime.NowVnUnspecified();
 
             if (entity == null)
             {
@@ -1155,7 +1156,7 @@ namespace AMMS.Application.Services
                         unit_price = p.unit_price ?? 0m,
                         total_cost = p.total_cost ?? 0m,
                         note = p.note,
-                        created_at = ToUnspecified(now)
+                        created_at = AppTime.NowVnUnspecified()
                     });
                 }
             }

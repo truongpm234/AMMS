@@ -1,4 +1,5 @@
-﻿using AMMS.Application.Interfaces;
+﻿using AMMS.Application.Helpers;
+using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Common;
@@ -16,9 +17,6 @@ namespace AMMS.Application.Services
             _repo = repo;
             _orderRepo = orderRepo;
         }
-
-        private DateTime? ToUnspecified(DateTime? dt)
-            => dt.HasValue ? DateTime.SpecifyKind(dt.Value, DateTimeKind.Unspecified) : null;
 
         public async Task<CreatePurchaseRequestResponse> CreatePurchaseRequestAsync(
             CreatePurchaseRequestDto dto,
@@ -45,7 +43,7 @@ namespace AMMS.Application.Services
                 supplier_id = dto.supplier_id,
                 created_by = createdBy,
                 status = "Pending",
-                created_at = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Unspecified),
+                created_at = AppTime.NowVnUnspecified(),
             };
 
             await _repo.AddPurchaseAsync(p, ct);
@@ -76,7 +74,6 @@ namespace AMMS.Application.Services
             );
         }
 
-        // ✅ CHANGED: implement đúng interface
         public Task<PagedResultLite<PurchaseOrderCardDto>> GetPurchaseOrdersAsync(
             string? status,
             int page,
@@ -84,7 +81,6 @@ namespace AMMS.Application.Services
             CancellationToken ct = default)
             => _repo.GetPurchaseOrdersAsync(status, page, pageSize, ct);
 
-        // ✅ CHANGED: pending trả ListItemDto (đúng repo)
         public Task<PagedResultLite<PurchaseOrderListItemDto>> GetPendingPurchasesAsync(
             int page, int pageSize, CancellationToken ct = default)
             => _repo.GetPendingPurchasesAsync(page, pageSize, ct);
@@ -99,13 +95,11 @@ namespace AMMS.Application.Services
             if (dto.Items == null || dto.Items.Count == 0)
                 throw new ArgumentException("Items is required");
 
-            // ✅ Validate items + material exists + price
             foreach (var i in dto.Items)
             {
                 if (i.material_id <= 0) throw new ArgumentException("MaterialId invalid");
                 if (i.quantity <= 0) throw new ArgumentException("Quantity must be > 0");
 
-                // price optional; nếu muốn bắt buộc: if (i.Price is null || i.Price <= 0) throw ...
                 if (i.price.HasValue && i.price.Value < 0)
                     throw new ArgumentException("Price must be >= 0");
 
@@ -119,9 +113,6 @@ namespace AMMS.Application.Services
             if (managerId == null)
                 throw new ArgumentException("User 'manager' not found. Please create it first.");
 
-            // ✅ Resolve supplier per item:
-            // - item.SupplierId ưu tiên
-            // - fallback dto.SupplierId (để tương thích kiểu cũ)
             var normalizedItems = dto.Items.Select(x => new
             {
                 SupplierId = x.supplier_id ?? dto.supplier_id,
@@ -141,7 +132,6 @@ namespace AMMS.Application.Services
                 if (!supplierOk) throw new ArgumentException($"SupplierId {sid} not found");
             }
 
-            // ✅ Group by supplier => create multiple purchases
             var groups = normalizedItems
                 .GroupBy(x => x.SupplierId!.Value)
                 .ToList();
@@ -167,13 +157,12 @@ namespace AMMS.Application.Services
                     supplier_id = supplierId,
                     created_by = managerId,
                     status = "Ordered",
-                    created_at = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Unspecified),
+                    created_at = AppTime.NowVnUnspecified(),
                 };
 
                 await _repo.AddPurchaseAsync(p, ct);
                 await _repo.SaveChangesAsync(ct);
 
-                // ✅ Create purchase_items (with price)
                 var items = g.Select(x => new purchase_item
                 {
                     purchase_id = p.purchase_id,
@@ -205,7 +194,6 @@ namespace AMMS.Application.Services
             );
             await _orderRepo.SaveChangesAsync();
 
-            // ✅ Return 1 DTO (vì interface yêu cầu 1 object)
             if (createdPurchases.Count == 1)
             {
                 var one = createdPurchases[0];
@@ -243,7 +231,7 @@ namespace AMMS.Application.Services
                     totalAll,
                     "Ordered",
                     null,
-                    codes // unit_summary
+                    codes
                 );
             }
         }
