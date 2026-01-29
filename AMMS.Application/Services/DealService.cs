@@ -486,7 +486,7 @@ namespace AMMS.Application.Services
             var feBase = _config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app";
 
             var amount = (int)Math.Round(est.deposit_amount, 0) / 100;
-            var description = $"AM{requestId:D6}";
+            //var description = $"AM{requestId:D6}";
 
             const int maxAttempt = 9;
             Exception? last = null;
@@ -494,7 +494,7 @@ namespace AMMS.Application.Services
             for (int attempt = 1; attempt <= maxAttempt; attempt++)
             {
                 int orderCode = checked(requestId * 10 + attempt);
-
+                var description = $"AM{orderCode}";
                 var returnUrl = $"{backendUrl}/api/requests/payos/return?request_id={requestId}&order_code={orderCode}";
                 var cancelUrl = $"{feBase}/reject-deal/{requestId}?status=cancel";
 
