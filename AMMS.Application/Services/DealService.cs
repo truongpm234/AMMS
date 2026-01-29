@@ -494,7 +494,7 @@ namespace AMMS.Application.Services
             for (int attempt = 1; attempt <= maxAttempt; attempt++)
             {
                 int orderCode = checked(requestId * 10 + attempt);
-                var description = $"AM{orderCode}";
+                var description = $"{orderCode}";
                 var returnUrl = $"{backendUrl}/api/requests/payos/return?request_id={requestId}&order_code={orderCode}";
                 var cancelUrl = $"{feBase}/reject-deal/{requestId}?status=cancel";
 

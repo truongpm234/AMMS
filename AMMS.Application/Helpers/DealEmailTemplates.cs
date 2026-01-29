@@ -71,7 +71,7 @@ namespace AMMS.Application.Helpers
             var productionProcessText = BuildProductionProcessText(req, est);
             var expiredAt = est.created_at.AddHours(24);
             var expiredAtText = expiredAt.ToString("dd/MM/yyyy HH:mm");
-            string FormatVND(decimal? amount) => string.Format("{0:N0} đ", amount ?? 0);
+            string FormatVND(decimal? amount) => string.Format("{0:N0} đ", amount ?? 0).Replace(",", ".");
             return $@"
 <!DOCTYPE html>
 <html>
