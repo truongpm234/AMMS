@@ -88,13 +88,14 @@ namespace AMMS.Infrastructure.Repositories
             {
                 if (updateUser != null)
                 {
-                    updateUser.email = new_user.user_email;
-                    updateUser.username = new_user.user_name;
-                    updateUser.password_hash = BCrypt.Net.BCrypt.HashPassword(new_user.user_password);
-                    updateUser.phone_number = new_user.user_phone;
-                    updateUser.full_name = new_user.full_name;
-                    updateUser.role_id = new_user.role_id;
-                    updateUser.is_active = new_user.is_active;
+                    updateUser.password_hash = new_user.user_password != null ? BCrypt.Net.BCrypt.HashPassword(new_user.user_password) : updateUser.password_hash;
+
+                    updateUser.phone_number = new_user.user_phone ?? updateUser.phone_number;
+                    updateUser.full_name = new_user.full_name ?? updateUser.full_name;
+                    updateUser.role_id = new_user.role_id ?? updateUser.role_id;
+                    updateUser.is_active = new_user.is_active ?? updateUser.is_active;
+                    updateUser.role_id = new_user.role_id ?? updateUser.role_id;
+                    updateUser.is_active = new_user.is_active ?? updateUser.is_active;
                     _db.users.Update(updateUser);
                     await _db.SaveChangesAsync();
                     return updateUser;
