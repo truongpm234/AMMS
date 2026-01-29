@@ -64,7 +64,6 @@ namespace AMMS.Application.Services
 
                     var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
-                    // ✅ trả máy task hiện tại
                     if (!string.IsNullOrWhiteSpace(t.machine))
                         await _machineRepo.ReleaseAsync(t.machine!, release: 1);
 
@@ -88,7 +87,6 @@ namespace AMMS.Application.Services
                         next.status = "Ready";
                         next.start_time ??= now;
 
-                        // ✅ giữ máy cho task next
                         if (!string.IsNullOrWhiteSpace(next.machine))
                             await _machineRepo.AllocateAsync(next.machine!, need: 1);
                     }
@@ -100,6 +98,23 @@ namespace AMMS.Application.Services
                     {
                         await _prodRepo.TryCloseProductionIfCompletedAsync(
                             t.prod_id.Value, now, CancellationToken.None);
+                    }
+
+                    var prod = await _db.productions.FirstOrDefaultAsync(p => p.prod_id == t.prod_id.Value);
+                    if (prod != null
+                        && string.Equals(prod.status, "Finished", StringComparison.OrdinalIgnoreCase)
+                        && prod.order_id.HasValue)
+                    {
+                        var order = await _db.orders
+                            .AsTracking()
+                            .FirstOrDefaultAsync(o => o.order_id == prod.order_id.Value);
+
+                        if (order != null
+                            && !string.Equals(order.status, "Finished", StringComparison.OrdinalIgnoreCase))
+                        {
+                            order.status = "Finished";
+                            await _db.SaveChangesAsync();
+                        }
                     }
 
                     await tx.CommitAsync();

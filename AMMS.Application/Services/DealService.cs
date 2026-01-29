@@ -131,7 +131,7 @@ namespace AMMS.Application.Services
             var feBase = _config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app";
             var returnUrl = $"{feBase}/request-detail/{orderRequestId}";
             var cancelUrl = returnUrl;
-            var description = $"Đặt cọc đơn hàng AM{orderRequestId:D6}";
+            var description = $"AM{orderRequestId:D6}";
 
             PayOsResultDto result;
 

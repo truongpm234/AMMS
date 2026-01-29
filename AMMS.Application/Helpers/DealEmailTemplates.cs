@@ -194,8 +194,10 @@ namespace AMMS.Application.Helpers
                 <td style='font-weight:700; color:#2d3748;'>THÀNH TIỀN</td>
                 <td align='right' class='final-price'>{FormatVND(finalTotal)}</td>
               </tr>
+              <tr>
+                <td colspan='2' style='text-align:right; font-size:11px; color:#e53e3e; padding-top:4px;'>(Đã bao gồm VAT)</td>
+              </tr>
             </table>
-
             <div style='margin-top: 20px; background: #f0fff4; border: 1px solid #9ae6b4; border-radius: 6px; padding: 12px;'>
                 <table width='100%'>
                     <tr>
@@ -276,9 +278,7 @@ namespace AMMS.Application.Helpers
 </div>";
         }
 
-        public static string AcceptConsultantEmail(
-            order_request req,
-            order order)
+        public static string AcceptConsultantEmail(order_request req, order order)
         {
             return $@"
 <div style='font-family:Arial,Helvetica,sans-serif;max-width:720px;margin:24px auto;line-height:1.6'>

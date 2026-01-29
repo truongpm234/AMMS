@@ -662,7 +662,6 @@ namespace AMMS.Infrastructure.Repositories
 
         public async Task<bool> StartProductionByOrderIdAsync(int orderId, DateTime now, CancellationToken ct = default)
         {
-            // Lấy production theo order_id (giả sử 1 order có 1 production đang active)
             var prod = await _db.productions
                 .FirstOrDefaultAsync(p => p.order_id == orderId, ct);
 
@@ -673,6 +672,17 @@ namespace AMMS.Infrastructure.Repositories
 
             if (prod.start_date == null)
                 prod.start_date = now;
+
+            if (prod.order_id.HasValue)
+            {
+                var order = await _db.orders
+                    .FirstOrDefaultAsync(o => o.order_id == prod.order_id.Value, ct);
+
+                if (order != null)
+                {
+                    order.status = "InProcessing";
+                }
+            }
 
             await _db.SaveChangesAsync(ct);
             return true;
