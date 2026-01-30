@@ -71,6 +71,35 @@ namespace AMMS.Application.Helpers
             var productionProcessText = BuildProductionProcessText(req, est);
             var expiredAt = est.created_at.AddHours(24);
             var expiredAtText = expiredAt.ToString("dd/MM/yyyy HH:mm");
+            bool isCustomerCopy = !string.IsNullOrEmpty(orderDetailUrl);
+            string actionBlock = "";
+            var expiryNoteHtml = $@"
+        <p style='margin-top: 25px; font-size: 12px; color: #64748b; font-style: italic; line-height: 1.5; border-top: 1px solid #e2e8f0; padding-top: 15px;'>
+            (*) Báo giá có hiệu lực đến <b>{expiredAt}</b>. Sau thời gian này, mọi thông tin về đơn giá và chi phí có thể thay đổi. 
+            Mọi thao tác thanh toán sau thời gian này đều sẽ không được ghi nhận, mọi thắc mắc vui lòng liên hệ lại với chúng tôi để được hỗ trợ.
+        </p>";
+            if (isCustomerCopy)
+            {
+                actionBlock = $@"
+        <div style='text-align: center; margin-top: 30px;'>
+            <a href='{orderDetailUrl}' style='background-color: #2563eb; color: #ffffff; padding: 14px 40px; text-decoration: none; font-weight: 700; border-radius: 6px; font-size: 15px; display: inline-block; box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.3);'>
+                XEM CHI TIẾT & THANH TOÁN
+            </a>
+        </div>
+        {expiryNoteHtml}";
+            }
+            else
+            {
+                actionBlock = $@"
+        <div style='text-align: center; margin-top: 30px;'>
+            <div style='background-color: #f1f5f9; border: 1px dashed #94a3b8; border-radius: 6px; padding: 12px; display: inline-block;'>
+                <span style='color: #475569; font-weight: 600; font-size: 13px;'>
+                    ⚠ Đây là email thông báo cho tư vấn viên về đơn báo giá. Vui lòng không chuyển tiếp email này cho khách hàng.
+                </span>
+            </div>
+        </div>
+        {expiryNoteHtml}";
+            }
             string FormatVND(decimal? amount) => string.Format("{0:N0} đ", amount ?? 0).Replace(",", ".");
             return $@"
 <!DOCTYPE html>
@@ -175,7 +204,10 @@ namespace AMMS.Application.Helpers
               <tr><td class='label'>Số lượng</td><td class='value'>{quantity:N0}</td></tr>
               <tr><td class='label'>Loại giấy</td><td class='value'>{paperName}</td></tr>
               <tr><td class='label'>Thiết kế</td><td class='value'>{designType}</td></tr>
-              <tr><td class='label'>Giao dự kiến</td><td class='value'>{delivery}</td></tr>
+              <tr>
+                <td class='label' style='text-align: left; vertical-align: middle;'>Giao dự kiến</td>
+                <td class='value' style='text-align: right; vertical-align: middle;'>{delivery}</td>
+              </tr>
             </table>
           </td>
 
@@ -210,22 +242,10 @@ namespace AMMS.Application.Helpers
         </tr>
 
       </table>
-
-      <div style='text-align: center; margin-top: 40px; padding-top: 30px; border-top: 1px solid #edf2f7;'>
-         <a href='{orderDetailUrl}' style='background-color: #3182ce; color: white; padding: 12px 30px; text-decoration: none; font-weight: bold; border-radius: 50px; display: inline-block; box-shadow: 0 4px 6px rgba(49, 130, 206, 0.3);'>
-            Xem chi tiết & Thanh toán
-         </a>
-         <p style='margin-top: 20px; font-size: 12px; color: #a0aec0;'>
-            Báo giá có hiệu lực đến {expiredAtText}. Sau thời gian này, mọi thông tin về đơn giá và chi phí có thể thay đổi. Mọi thao tác thanh toán sau thời gian này đều sẽ không được ghi nhận, mọi thắc mắc vui lòng liên hệ lại với chúng tôi để được hỗ trợ.
-         </p>
-      </div>
-
-    </div>
-    
+        {actionBlock}     
     <div style='background-color: #edf2f7; padding: 15px; text-align: center; font-size: 12px; color: #718096;'>
         Email này được gửi tự động từ hệ thống MES.
     </div>
-
   </div>
 </body>
 </html>";

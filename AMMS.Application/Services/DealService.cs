@@ -68,10 +68,23 @@ namespace AMMS.Application.Services
 
             var baseUrlFe = _config["Deal:BaseUrlFe"]!;
             var orderDetailUrl = $"{baseUrlFe}/checkout/{orderRequestId}";
+            var consultantEmail = _config["Deal:ConsultantEmail"];
 
-            var html = DealEmailTemplates.QuoteEmail(req, est, orderDetailUrl);
+            var htmlCustomer = DealEmailTemplates.QuoteEmail(req, est, orderDetailUrl);
             Console.WriteLine($"order_request_date = {req.order_request_date?.ToString("O") ?? "NULL"}");
-            await _emailService.SendAsync(req.customer_email, "Báo giá đơn hàng in ấn", html);
+            await _emailService.SendAsync(req.customer_email, $"Báo giá đơn hàng in ấn #{req.order_request_id:D6}", htmlCustomer);
+
+            if (!string.IsNullOrWhiteSpace(consultantEmail))
+            {
+                var htmlConsultant = DealEmailTemplates.QuoteEmail(req, est, null);
+
+                Console.WriteLine($"Sending Copy to Consultant: {consultantEmail}");
+                await _emailService.SendAsync(
+                    consultantEmail,
+                    $"[COPY] Đã gửi báo giá #{req.order_request_id:D6} cho khách",
+                    htmlConsultant
+                );
+            }
         }
 
         public async Task<string> AcceptAndCreatePayOsLinkAsync(int orderRequestId)
@@ -494,7 +507,7 @@ namespace AMMS.Application.Services
             for (int attempt = 1; attempt <= maxAttempt; attempt++)
             {
                 int orderCode = checked(requestId * 10 + attempt);
-                var description = $"{orderCode}";
+                var description = $"MES{orderCode}";
                 var returnUrl = $"{backendUrl}/api/requests/payos/return?request_id={requestId}&order_code={orderCode}";
                 var cancelUrl = $"{feBase}/reject-deal/{requestId}?status=cancel";
 

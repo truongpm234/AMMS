@@ -11,8 +11,6 @@ public partial class order
 
     public int? quote_id { get; set; }
 
-    public int? customer_id { get; set; }
-
     public int? consultant_id { get; set; }
 
     public DateTime? order_date { get; set; }
@@ -34,8 +32,6 @@ public partial class order
     public virtual production? production { get; set; }
 
     public virtual user? consultant { get; set; }
-
-    public virtual customer? customer { get; set; }
 
     public virtual ICollection<delivery> deliveries { get; set; } = new List<delivery>();
 

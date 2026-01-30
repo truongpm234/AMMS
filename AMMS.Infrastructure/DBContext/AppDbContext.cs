@@ -20,7 +20,6 @@ public partial class AppDbContext : DbContext
 
     public virtual DbSet<bom> boms { get; set; }
 
-    public virtual DbSet<customer> customers { get; set; }
 
     public virtual DbSet<delivery> deliveries { get; set; }
 
@@ -90,20 +89,6 @@ public partial class AppDbContext : DbContext
                 .HasConstraintName("boms_order_item_id_fkey");
         });
 
-        modelBuilder.Entity<customer>(entity =>
-        {
-            entity.HasKey(e => e.customer_id).HasName("customers_pkey");
-
-            entity.Property(e => e.company_name).HasMaxLength(150);
-            entity.Property(e => e.contact_name).HasMaxLength(100);
-            entity.Property(e => e.email).HasMaxLength(100);
-            entity.Property(e => e.phone).HasMaxLength(20);
-
-            entity.HasOne(d => d.user).WithMany(p => p.customers)
-                .HasForeignKey(d => d.user_id)
-                .HasConstraintName("customers_user_id_fkey");
-        });
-
         modelBuilder.Entity<delivery>(entity =>
         {
             entity.HasKey(e => e.delivery_id).HasName("deliveries_pkey");
@@ -165,10 +150,6 @@ public partial class AppDbContext : DbContext
                 .HasForeignKey(d => d.consultant_id)
                 .HasConstraintName("orders_consultant_id_fkey");
 
-            entity.HasOne(d => d.customer).WithMany(p => p.orders)
-                .HasForeignKey(d => d.customer_id)
-                .HasConstraintName("orders_customer_id_fkey");
-
             entity.HasOne(d => d.quote).WithMany(p => p.orders)
                 .HasForeignKey(d => d.quote_id)
                 .HasConstraintName("orders_quote_id_fkey");
@@ -196,10 +177,6 @@ public partial class AppDbContext : DbContext
             entity.HasOne(d => d.consultant).WithMany(p => p.orders)
                 .HasForeignKey(d => d.consultant_id)
                 .HasConstraintName("orders_consultant_id_fkey");
-
-            entity.HasOne(d => d.customer).WithMany(p => p.orders)
-                .HasForeignKey(d => d.customer_id)
-                .HasConstraintName("orders_customer_id_fkey");
 
             entity.HasOne(d => d.quote).WithMany(p => p.orders)
                 .HasForeignKey(d => d.quote_id)
@@ -358,9 +335,6 @@ public partial class AppDbContext : DbContext
                 .HasForeignKey(d => d.consultant_id)
                 .HasConstraintName("quotes_consultant_id_fkey");
 
-            entity.HasOne(d => d.customer).WithMany(p => p.quotes)
-                .HasForeignKey(d => d.customer_id)
-                .HasConstraintName("quotes_customer_id_fkey");
             entity.HasOne(q => q.order_request)
                 .WithMany()
                 .HasForeignKey(q => q.order_request_id)

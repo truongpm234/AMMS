@@ -47,9 +47,6 @@ namespace AMMS.Infrastructure.Repositories
                 join q in _db.quotes.AsNoTracking() on o.quote_id equals q.quote_id into qj
                 from q in qj.DefaultIfEmpty()
 
-                join c in _db.customers.AsNoTracking() on q.customer_id equals c.customer_id into cj
-                from c in cj.DefaultIfEmpty()
-
                     // order_request fallback
                 join r in _db.order_requests.AsNoTracking() on o.order_id equals r.order_id into rj
                 from r in rj.DefaultIfEmpty()
@@ -62,28 +59,7 @@ namespace AMMS.Infrastructure.Repositories
                     o.order_date,
                     o.delivery_date,
                     Status = o.status ?? "",
-
-                    // ✅ FIX: customer_name fallback theo thứ tự:
-                    // 1) orders.customer (nếu có customer_id)
-                    // 2) quote->customer
-                    // 3) order_request
-                    customer_name =
-                        // 1) nếu order có navigation customer (customer_id != null)
-                        (o.customer != null
-                            ? (o.customer.company_name ?? o.customer.contact_name ?? "")
-                            : "") != ""
-                        ? (o.customer!.company_name ?? o.customer!.contact_name ?? "")
-                        : (
-                            // 2) fallback quote->customer
-                            (c != null
-                                ? (c.company_name ?? c.contact_name ?? "")
-                                : "") != ""
-                            ? (c!.company_name ?? c!.contact_name ?? "")
-                            : (
-                                // 3) fallback order_request
-                                (r != null ? (r.customer_name ?? "") : "")
-                            )
-                        ),
+                    customer_name = r != null ? (r.customer_name ?? "") : "Khách hàng",
 
                     FirstItem = _db.order_items.AsNoTracking()
                         .Where(i => i.order_id == o.order_id)
@@ -372,20 +348,7 @@ namespace AMMS.Infrastructure.Repositories
             var item = order.order_items.OrderBy(i => i.item_id).FirstOrDefault();
             string customerName = string.Empty;
             string? customerEmail = null;
-            string? customerPhone = null;
-
-            if (order.customer_id.HasValue)
-            {
-                var customer = await _db.customers.AsNoTracking()
-                    .FirstOrDefaultAsync(c => c.customer_id == order.customer_id.Value, ct);
-
-                if (customer != null)
-                {
-                    customerName = customer.company_name ?? customer.contact_name ?? customerName;
-                    customerEmail = customer.email;
-                    customerPhone = customer.phone;
-                }
-            }
+            string? customerPhone = null;           
 
             if (req != null)
             {

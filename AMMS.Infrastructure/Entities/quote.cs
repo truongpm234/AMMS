@@ -10,8 +10,6 @@ public partial class quote
 
     public int? order_request_id { get; set; }
 
-    public int? customer_id { get; set; }
-
     public int? consultant_id { get; set; }
 
     public decimal? total_amount { get; set; }
@@ -23,8 +21,6 @@ public partial class quote
     public virtual order_request? order_request { get; set; }
 
     public virtual user? consultant { get; set; }
-
-    public virtual customer? customer { get; set; }
 
     public virtual ICollection<order> orders { get; set; } = new List<order>();
 }
