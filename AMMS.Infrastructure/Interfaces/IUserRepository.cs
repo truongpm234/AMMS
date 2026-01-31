@@ -14,5 +14,9 @@ namespace AMMS.Infrastructure.Interfaces
         Task<user?> UpdateCreateUser(UserUpdateCreateDto new_user, int? user_id);
 
         Task<List<user>> GetAllUser();
+
+        Task<user?> GetUserByEmail(string email);
+
+        Task<bool> ResetPassword(string newPassword, string email);
     }
 }

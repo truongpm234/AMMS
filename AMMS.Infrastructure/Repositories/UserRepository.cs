@@ -120,6 +120,24 @@ namespace AMMS.Infrastructure.Repositories
             }
         }
 
+        public async Task<bool> ResetPassword(string newPassword, string email)
+        {
+            var user = await GetUserByEmail(email);
+            if (user != null)
+            {
+                user.password_hash = BCrypt.Net.BCrypt.HashPassword(newPassword);
+                _db.users.Update(user);
+                await _db.SaveChangesAsync();
+                return true;
+            }
+            return false;
+        }
+
+        public async Task<user?> GetUserByEmail(string email)
+        {
+            return _db.users.OrderBy(u => u.user_id).SingleOrDefault(u => u.email == email);
+        }
+
         public async Task<List<user>> GetAllUser()
         {
             return await _db.users.ToListAsync();
