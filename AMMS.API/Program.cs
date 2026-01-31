@@ -195,6 +195,9 @@ builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<JWTService>();
 builder.Services.AddScoped<GoogleAuthService>();
 builder.Services.AddScoped<ISmsOtpService, TwilioSmsOtpService>();
+builder.Services.AddScoped<IMissingMaterialService, MissingMaterialService>();
+builder.Services.AddScoped<IMissingMaterialRepository, MissingMaterialRepository>();
+
 
 
 // Logging
