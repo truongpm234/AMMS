@@ -1,4 +1,5 @@
 ﻿using AMMS.Infrastructure.Entities;
+using AMMS.Infrastructure.Entities.AMMS.Infrastructure.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.Extensions.Logging;
@@ -68,6 +69,8 @@ public partial class AppDbContext : DbContext
     public virtual DbSet<process_cost_rule> process_cost_rules { get; set; }
 
     public virtual DbSet<product_template> product_templates { get; set; } = null!;
+
+    public virtual DbSet<missing_material> missing_materials { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -567,16 +570,12 @@ public partial class AppDbContext : DbContext
         modelBuilder.Entity<process_cost_rule>(entity =>
         {
             entity.HasKey(e => e.process_code).HasName("process_cost_rule_pkey");
-
             entity.Property(e => e.process_code)
                   .HasMaxLength(50);
-
             entity.Property(e => e.process_name)
                   .HasMaxLength(255);
-
             entity.Property(e => e.unit)
                   .HasMaxLength(20);
-
             entity.Property(e => e.unit_price)
                   .HasPrecision(18, 2);
         });
@@ -584,12 +583,55 @@ public partial class AppDbContext : DbContext
         modelBuilder.Entity<product_template>(entity =>
         {
             entity.HasKey(e => e.design_profile_id);
-
             entity.HasOne(e => e.product_type)
                   .WithMany(p => p.product_type_design_profiles)
                   .HasForeignKey(e => e.product_type_id);
         });
 
+        modelBuilder.Entity<missing_material>(entity =>
+        {
+            entity.ToTable("missing_materials", "AMMS_DB");
+            entity.HasKey(e => e.miss_id);
+            entity.Property(e => e.miss_id)
+                  .HasColumnName("miss_id")
+                  .ValueGeneratedOnAdd();
+            entity.Property(e => e.material_id).HasColumnName("material_id").IsRequired();
+            entity.Property(e => e.material_name)
+                  .HasColumnName("material_name")
+                  .IsRequired();
+            entity.Property(e => e.needed)
+                  .HasColumnName("needed")
+                  .HasColumnType("numeric(18,4)")
+                  .HasDefaultValue(0m);
+            entity.Property(e => e.available)
+                  .HasColumnName("available")
+                  .HasColumnType("numeric(18,4)")
+                  .HasDefaultValue(0m);
+            entity.Property(e => e.quantity)
+                  .HasColumnName("quantity")
+                  .HasColumnType("numeric(18,4)")
+                  .HasDefaultValue(0m);
+            entity.Property(e => e.unit)
+                  .HasColumnName("unit")
+                  .IsRequired();
+            entity.Property(e => e.request_date)
+                  .HasColumnName("request_date")
+                  .HasColumnType("timestamptz");
+            entity.Property(e => e.total_price)
+                  .HasColumnName("total_price")
+                  .HasColumnType("numeric(18,2)")
+                  .HasDefaultValue(0m);
+            entity.Property(e => e.is_buy)
+                  .HasColumnName("is_buy")
+                  .HasDefaultValue(false);
+            entity.Property(e => e.created_at)
+                  .HasColumnName("created_at")
+                  .HasColumnType("timestamptz")
+                  .HasDefaultValueSql("now()");
+            entity.HasIndex(e => e.material_id).HasDatabaseName("ix_missing_materials_material_id");
+            entity.HasIndex(e => e.request_date).HasDatabaseName("ix_missing_materials_request_date");
+            entity.HasIndex(e => e.created_at).HasDatabaseName("ix_missing_materials_created_at");
+        });
         OnModelCreatingPartial(modelBuilder);
     }
 
