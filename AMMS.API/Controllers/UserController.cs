@@ -15,12 +15,14 @@ namespace AMMS.API.Controllers
         private readonly IUserService _userService;
         private readonly JWTService _jwt;
         private readonly GoogleAuthService _googleAuthService;
+        private readonly IEmailService _emailService;
 
-        public UserController(IUserService userService, JWTService jwt, GoogleAuthService googleAuthService)
+        public UserController(IUserService userService, JWTService jwt, GoogleAuthService googleAuthService, IEmailService emailService)
         {
             _userService = userService;
             _jwt = jwt;
             _googleAuthService = googleAuthService;
+            _emailService = emailService;
         }
 
         [HttpPost("/login")]
@@ -89,6 +91,20 @@ namespace AMMS.API.Controllers
         public async Task<IActionResult> AdminGetAllUser()
         {
             return Ok(await _userService.GetAllUser());
+        }
+
+        [HttpPost("/reset-password")]
+        public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest req)
+        {
+            await _userService.ResetPasswordAsync(req);
+            return Ok(new { message = "Đặt lại mật khẩu thành công" });
+        }
+
+        [HttpPost("/forgot-password")]
+        public async Task<IActionResult> ForgotPassword([FromBody] string email)
+        {
+            await _emailService.SendMailResetPassword(email);
+            return Ok();
         }
     }
 }
