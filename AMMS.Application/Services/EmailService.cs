@@ -1,16 +1,13 @@
-﻿using AMMS.Application.Interfaces;
+﻿using AMMS.Application.Helpers;
+using AMMS.Application.Interfaces;
 using AMMS.Shared.DTOs.Email;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using SendGrid;
 using SendGrid.Helpers.Mail;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace AMMS.Application.Services
 {
@@ -158,6 +155,55 @@ namespace AMMS.Application.Services
 
             _cache.Remove(CacheKey(email));
             return Task.FromResult(true);
+        }
+
+        public async Task SendMailResetPassword(string email)
+        {
+            if (string.IsNullOrWhiteSpace(email))
+                throw new ArgumentException("Email không hợp lệ");
+
+            email = NormalizeEmail(email);
+
+            // ===== 1. Tạo token reset password =====
+            var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)); // 64 chars
+            var expiresAt = DateTime.UtcNow.AddMinutes(ExpiryMinutes);
+
+            // Có thể dùng chung cache hoặc tạo key riêng
+            var cacheKey = $"RESET_PASSWORD::{email}";
+
+            _cache.Set(
+                cacheKey,
+                new
+                {
+                    TokenHash = Sha256($"{email}:{token}"),
+                    ExpiresAtUtc = expiresAt
+                },
+                new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(ExpiryMinutes)
+                }
+            );
+
+            // ===== 2. Tạo link reset =====
+            var resetBaseUrl = _config["App:ResetPasswordUrl"];
+            if (string.IsNullOrWhiteSpace(resetBaseUrl))
+                throw new Exception("Thiếu cấu hình App:ResetPasswordUrl");
+
+            var resetLink = $"{resetBaseUrl}?token={token}&email={Uri.EscapeDataString(email)}";
+
+            // ===== 3. Render email HTML =====
+            var html = ResetPasswordMail.GetHtmlBody(
+                fullName: email, // hoặc truyền FullName nếu có
+                resetLink: resetLink,
+                expiredMinutes: ExpiryMinutes
+            );
+
+            // ===== 4. Gửi mail =====
+            await SendAsync(
+                toEmail: email,
+                subject: ResetPasswordMail.Subject,
+                htmlContent: html
+            );
         }
     }
 }
