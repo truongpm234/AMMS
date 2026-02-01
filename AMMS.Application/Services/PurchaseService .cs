@@ -11,11 +11,12 @@ namespace AMMS.Application.Services
     {
         private readonly IPurchaseRepository _repo;
         private readonly IOrderRepository _orderRepo;
-
-        public PurchaseService(IPurchaseRepository repo, IOrderRepository orderRepo)
+        private readonly IMissingMaterialRepository _missingRepo;
+        public PurchaseService(IPurchaseRepository repo, IOrderRepository orderRepo, IMissingMaterialRepository missingRepo)
         {
             _repo = repo;
-            _orderRepo = orderRepo;
+            _orderRepo = orderRepo; 
+            _missingRepo = missingRepo;
         }
 
         public async Task<CreatePurchaseRequestResponse> CreatePurchaseRequestAsync(
@@ -86,8 +87,8 @@ namespace AMMS.Application.Services
             => _repo.GetPendingPurchasesAsync(page, pageSize, ct);
 
         public async Task<PurchaseOrderListItemDto> CreatePurchaseOrderAsync(
-    CreatePurchaseRequestDto dto,
-    CancellationToken ct = default)
+            CreatePurchaseRequestDto dto,
+            CancellationToken ct = default)
         {
             if (dto == null)
                 throw new ArgumentException("Body is required");
@@ -107,7 +108,6 @@ namespace AMMS.Application.Services
                 if (!exists) throw new ArgumentException($"MaterialId {i.material_id} not found");
             }
 
-            // ✅ Manager (created_by)
             const string createdByName = "manager";
             var managerId = await _repo.GetManagerUserIdAsync(ct);
             if (managerId == null)
@@ -124,7 +124,6 @@ namespace AMMS.Application.Services
             if (normalizedItems.Any(x => x.SupplierId == null))
                 throw new ArgumentException("SupplierId is required (each item.SupplierId or dto.SupplierId)");
 
-            // ✅ Validate supplier exists (distinct)
             var supplierIds = normalizedItems.Select(x => x.SupplierId!.Value).Distinct().ToList();
             foreach (var sid in supplierIds)
             {
@@ -148,7 +147,6 @@ namespace AMMS.Application.Services
             foreach (var g in groups)
             {
                 var supplierId = g.Key;
-
                 var code = await _repo.GenerateNextPurchaseCodeAsync(ct);
 
                 var p = new purchase
@@ -187,17 +185,15 @@ namespace AMMS.Application.Services
                 ));
             }
 
-            // ✅ Mark is_buy for all materials (one shot)
-            await _orderRepo.MarkOrdersBuyByMaterialsAsync(
-                normalizedItems.Select(x => x.MaterialId).Distinct().ToList(),
-                ct
-            );
-            await _orderRepo.SaveChangesAsync();
+            // ❌ IMPORTANT: KHÔNG set orders.is_buy ở đây nữa
+            // vì bạn muốn chỉ is_buy=true khi mua đủ (remaining missing == 0)
+
+            // ✅ Recalc missing to make it decrease immediately (55 -> 11)
+            await _missingRepo.RecalculateAndSaveAsync(ct);
 
             if (createdPurchases.Count == 1)
             {
                 var one = createdPurchases[0];
-
                 return new PurchaseOrderListItemDto(
                     one.PurchaseId,
                     one.Code,
