@@ -21,7 +21,6 @@ public partial class AppDbContext : DbContext
 
     public virtual DbSet<bom> boms { get; set; }
 
-
     public virtual DbSet<delivery> deliveries { get; set; }
 
     public virtual DbSet<material> materials { get; set; }
@@ -642,10 +641,8 @@ public partial class AppDbContext : DbContext
             entity.HasIndex(e => e.material_id).HasDatabaseName("ix_missing_materials_material_id");
             entity.HasIndex(e => e.request_date).HasDatabaseName("ix_missing_materials_request_date");
             entity.HasIndex(e => e.created_at).HasDatabaseName("ix_missing_materials_created_at");
-        });
+        });     
         OnModelCreatingPartial(modelBuilder);
     }
-
-
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder);
 }

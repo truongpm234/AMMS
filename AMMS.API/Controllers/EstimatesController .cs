@@ -14,53 +14,11 @@ namespace AMMS.API.Controllers
     {
         private readonly IEstimateService _service;
         private readonly IEstimateBaseConfigService _baseConfig;
+
         public EstimatesController(IEstimateService service, IEstimateBaseConfigService baseConfig)
         {
             _service = service;
             _baseConfig = baseConfig;
-        }
-
-        [HttpPost("paper")]
-        [ProducesResponseType(typeof(PaperEstimateResponse), StatusCodes.Status200OK)]
-        public async Task<IActionResult> EstimatePaper([FromBody] PaperEstimateRequest req)
-        {
-            if (req.order_request_id <= 0)
-                return BadRequest(new { message = "order_request_id is required and must be greater than 0" });
-
-            var requestExists = await _service.OrderRequestExistsAsync(req.order_request_id);
-
-            if (!requestExists)
-                return NotFound(new { message = $"Order request with id {req.order_request_id} not found" });
-
-            var result = await _service.EstimatePaperAsync(req);
-            return Ok(result);
-        }
-
-        [HttpPost("cost")]
-        [ProducesResponseType(typeof(CostEstimateWithProcessResponse), StatusCodes.Status200OK)]
-        public async Task<IActionResult> CalculateCost([FromBody] CostEstimateRequest req)
-        {
-            if (req.order_request_id <= 0)
-                return BadRequest(new { message = "order_request_id is required and must be greater than 0" });
-
-            var requestExists = await _service.OrderRequestExistsAsync(req.order_request_id);
-
-            if (!requestExists)
-                return NotFound(new { message = $"Order request with id {req.order_request_id} not found" });
-
-            // 1) Tính tổng chi phí (giấy + vật liệu + rush + discount...)
-            var cost = await _service.CalculateCostEstimateAsync(req);
-
-            // 2) Tính chi phí công đoạn (IN, PHU, CAN_MANG, BE, BOI, DAN...)
-            var processCost = await _service.CalculateProcessCostBreakdownAsync(req);
-
-            var response = new CostEstimateWithProcessResponse
-            {
-                cost = cost,
-                process_cost = processCost
-            };
-
-            return Ok(response);
         }
 
         [HttpPut("adjust-cost/{orderRequestId:int}")]

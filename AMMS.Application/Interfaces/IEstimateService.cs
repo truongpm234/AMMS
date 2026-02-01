@@ -12,12 +12,9 @@ namespace AMMS.Application.Interfaces
 {
     public interface IEstimateService
     {
-        Task<PaperEstimateResponse> EstimatePaperAsync(PaperEstimateRequest req);
-        Task<CostEstimateResponse> CalculateCostEstimateAsync(CostEstimateRequest req);
         Task UpdateFinalCostAsync(int orderRequestId, decimal? finalCostInput);
         Task<cost_estimate?> GetEstimateByIdAsync(int estimateId);
         Task<cost_estimate?> GetEstimateByOrderRequestIdAsync(int orderRequestId);
-        Task<ProcessCostBreakdownResponse> CalculateProcessCostBreakdownAsync(CostEstimateRequest req);
         Task<DepositByRequestResponse?> GetDepositByRequestIdAsync(int requestId, CancellationToken ct = default);
         Task<bool> OrderRequestExistsAsync(int order_request_id);
         Task SaveFeCostEstimateAsync(CostEstimateInsertRequest req, CancellationToken ct = default);

@@ -16,7 +16,6 @@ namespace AMMS.Shared.DTOs.Enums
         CAN_MANG,
         BE,
         DUT,
-        DAN,
-        DOT
+        DAN
     }
 }

@@ -18,17 +18,16 @@ namespace AMMS.Shared.DTOs.Enums
         { ProcessType.BE, "Bế" },
         { ProcessType.DUT, "Dứt" },
         { ProcessType.DAN, "Dán" },
-        { ProcessType.DOT, "Đóng gói" },
         { ProcessType.CAN_MANG, "Cán màng" },
     };
 
         public static readonly Dictionary<ProductTypeCodeGeneral, ProcessType[]> Routing = new()
     {
-        { ProductTypeCodeGeneral.HOP_MAU, new[]{ ProcessType.RALO, ProcessType.CAT, ProcessType.IN, ProcessType.PHU, ProcessType.BOI, ProcessType.BE, ProcessType.DUT, ProcessType.DAN, ProcessType.DOT } },
-        { ProductTypeCodeGeneral.KHAY, new[]{ ProcessType.RALO, ProcessType.CAT, ProcessType.IN, ProcessType.PHU, ProcessType.BOI, ProcessType.BE, ProcessType.DUT, ProcessType.DAN, ProcessType.DOT } },
-        { ProductTypeCodeGeneral.VO_HOP_GACH, new[]{ ProcessType.RALO, ProcessType.CAT, ProcessType.IN, ProcessType.BOI, ProcessType.BE, ProcessType.DUT, ProcessType.DOT } },
-        { ProductTypeCodeGeneral.THE_MAU, new[]{ ProcessType.RALO, ProcessType.CAT, ProcessType.IN, ProcessType.PHU, ProcessType.CAT, ProcessType.DOT } },
-        { ProductTypeCodeGeneral.KHAC, new[]{ ProcessType.RALO, ProcessType.CAT, ProcessType.IN, ProcessType.PHU, ProcessType.BOI, ProcessType.BE, ProcessType.DUT, ProcessType.DAN, ProcessType.DOT } },
+        { ProductTypeCodeGeneral.HOP_MAU, new[]{ ProcessType.RALO, ProcessType.CAT, ProcessType.IN, ProcessType.PHU, ProcessType.BOI, ProcessType.BE, ProcessType.DUT, ProcessType.DAN} },
+        { ProductTypeCodeGeneral.KHAY, new[]{ ProcessType.RALO, ProcessType.CAT, ProcessType.IN, ProcessType.PHU, ProcessType.BOI, ProcessType.BE, ProcessType.DUT, ProcessType.DAN} },
+        { ProductTypeCodeGeneral.VO_HOP_GACH, new[]{ ProcessType.RALO, ProcessType.CAT, ProcessType.IN, ProcessType.BOI, ProcessType.BE, ProcessType.DUT} },
+        { ProductTypeCodeGeneral.THE_MAU, new[]{ ProcessType.RALO, ProcessType.CAT, ProcessType.IN, ProcessType.PHU, ProcessType.CAT} },
+        { ProductTypeCodeGeneral.KHAC, new[]{ ProcessType.RALO, ProcessType.CAT, ProcessType.IN, ProcessType.PHU, ProcessType.BOI, ProcessType.BE, ProcessType.DUT, ProcessType.DAN} },
     };
     }
 

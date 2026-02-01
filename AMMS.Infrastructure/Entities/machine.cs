@@ -16,6 +16,8 @@ namespace AMMS.Infrastructure.Entities
 
         public string machine_code { get; set; } = null!;
 
+        public string? process_code { get; set; }
+
         public bool is_active { get; set; } = true;
 
         public int quantity { get; set; } = 1;
