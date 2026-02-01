@@ -95,10 +95,9 @@ builder.Services.AddAuthorization(options =>
 
     options.AddPolicy("warehouse_manager", policy =>
         policy.RequireClaim("roleid", "4"));
-
-    options.AddPolicy("printer", policy =>
-        policy.RequireClaim("roleid", "5"));
     options.AddPolicy("user", policy =>
+        policy.RequireClaim("roleid", "5"));
+    options.AddPolicy("staff", policy =>
         policy.RequireClaim("roleid", "6"));
 });
 
