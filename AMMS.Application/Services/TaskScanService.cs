@@ -87,6 +87,22 @@ namespace AMMS.Application.Services
                         next.status = "Ready";
                         next.start_time ??= now;
 
+                        // ✅ nếu chưa có máy thì auto chọn theo process_code
+                        if (string.IsNullOrWhiteSpace(next.machine))
+                        {
+                            var pcode = await _db.product_type_processes.AsNoTracking()
+                                .Where(x => x.process_id == next.process_id)
+                                .Select(x => x.process_code)
+                                .FirstOrDefaultAsync();
+
+                            pcode = (pcode ?? "").Trim().ToUpperInvariant();
+                            if (!string.IsNullOrWhiteSpace(pcode))
+                            {
+                                var best = await _machineRepo.FindBestMachineByProcessCodeAsync(pcode, CancellationToken.None);
+                                next.machine = best?.machine_code;
+                            }
+                        }
+
                         if (!string.IsNullOrWhiteSpace(next.machine))
                             await _machineRepo.AllocateAsync(next.machine!, need: 1);
                     }

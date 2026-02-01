@@ -19,12 +19,7 @@ namespace AMMS.Application.Services
         private readonly IMachineRepository _machineRepo;
         private readonly ITaskRepository _taskRepo;
 
-        public ProductionSchedulingService(
-            AppDbContext db,
-            IProductionRepository prodRepo,
-            IProductTypeProcessRepository ptpRepo,
-            IMachineRepository machineRepo,
-            ITaskRepository taskRepo)
+        public ProductionSchedulingService(AppDbContext db, IProductionRepository prodRepo, IProductTypeProcessRepository ptpRepo, IMachineRepository machineRepo, ITaskRepository taskRepo)
         {
             _db = db;
             _prodRepo = prodRepo;
@@ -33,11 +28,7 @@ namespace AMMS.Application.Services
             _taskRepo = taskRepo;
         }
 
-        public async Task<int> ScheduleOrderAsync(
-    int orderId,
-    int productTypeId,
-    string? productionProcessCsv,
-    int? managerId = 3)
+        public async Task<int> ScheduleOrderAsync(int orderId, int productTypeId, string? productionProcessCsv, int? managerId = 3)
         {
             var selected = ParseProcessCsv(productionProcessCsv);
 
@@ -84,7 +75,7 @@ namespace AMMS.Application.Services
                         manager_id = managerId,
                         status = "Scheduled",
                         product_type_id = productTypeId,
-                        start_date = AppTime.NowVnUnspecified()
+                        start_date = now
                     };
 
                     await _db.productions.AddAsync(prod);
@@ -110,40 +101,77 @@ namespace AMMS.Application.Services
                     return prod.prod_id;
                 }
 
+                // Load routing
                 var steps = await _ptpRepo.GetActiveByProductTypeIdAsync(productTypeId);
                 if (steps == null || steps.Count == 0)
                     throw new Exception("No routing found");
 
+                // ✅ lọc theo CSV nếu có
+                if (selected.Count > 0)
+                {
+                    steps = steps
+                        .Where(s =>
+                        {
+                            var code = (s.process_code ?? "").Trim().ToUpperInvariant();
+                            return !string.IsNullOrWhiteSpace(code) && selected.Contains(code);
+                        })
+                        .ToList();
+
+                    if (steps.Count == 0)
+                        throw new Exception("No routing after applying productionProcessCsv filter");
+                }
+
                 var firstSeq = steps.Min(x => x.seq_num);
+
                 var tasks = new List<task>();
 
+                // ✅ IMPORTANT: chọn & gán machine_code cho TỪNG TASK ngay lúc tạo
                 foreach (var s in steps.OrderBy(x => x.seq_num))
                 {
+                    var pcode = (s.process_code ?? "").Trim().ToUpperInvariant();
+                    string? machineCode = null;
+
+                    if (!string.IsNullOrWhiteSpace(pcode))
+                    {
+                        var best = await _machineRepo.FindBestMachineByProcessCodeAsync(pcode, CancellationToken.None);
+                        machineCode = best?.machine_code;
+                    }
+
+                    var isFirst = s.seq_num == firstSeq;
+
                     tasks.Add(new task
                     {
                         prod_id = prod.prod_id,
                         process_id = s.process_id,
                         seq_num = s.seq_num,
                         name = s.process_name,
-                        status = s.seq_num == firstSeq ? "Ready" : "Unassigned",
-                        start_time = s.seq_num == firstSeq ? now : null
+                        status = isFirst ? "Ready" : "Unassigned",
+                        start_time = isFirst ? now : null,
+                        machine = machineCode
                     });
                 }
 
                 await _taskRepo.AddRangeAsync(tasks);
                 await _taskRepo.SaveChangesAsync();
 
+                var firstTask = tasks.FirstOrDefault(t => t.seq_num == firstSeq);
+                if (firstTask != null && !string.IsNullOrWhiteSpace(firstTask.machine))
+                {
+                    await _machineRepo.AllocateAsync(firstTask.machine!, need: 1);
+                }
+
                 await tx.CommitAsync();
                 return prod.prod_id;
             });
         }
-      
+
         private static HashSet<string> ParseProcessCsv(string? csv)
         {
-            if (string.IsNullOrWhiteSpace(csv)) return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(csv))
+                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             return csv.Split(',', StringSplitOptions.RemoveEmptyEntries)
-                .Select(x => x.Trim())
+                .Select(x => x.Trim().ToUpperInvariant())
                 .Where(x => !string.IsNullOrWhiteSpace(x))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
         }

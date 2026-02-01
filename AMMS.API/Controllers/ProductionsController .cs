@@ -1,5 +1,6 @@
 ﻿using AMMS.Application.Interfaces;
 using AMMS.Application.Services;
+using AMMS.Shared.DTOs.Orders;
 using AMMS.Shared.DTOs.Productions;
 using Microsoft.AspNetCore.Mvc;
 
@@ -11,11 +12,13 @@ namespace AMMS.API.Controllers
     {
         private readonly IProductionService _service;
         private readonly IProductionSchedulingService _svc;
+        private readonly IOrderMaterialService _orderMaterialService;
 
-        public ProductionsController(IProductionService service, IProductionSchedulingService svc)
+        public ProductionsController(IProductionService service, IProductionSchedulingService svc, IOrderMaterialService orderMaterialService)
         {
             _service = service;
             _svc = svc;
+            _orderMaterialService = orderMaterialService;
         }
 
         [HttpPost("schedule")]
@@ -72,6 +75,16 @@ namespace AMMS.API.Controllers
             var result = await _service.GetProductionWasteAsync(prodId, ct);
             if (result == null) return NotFound();
             return Ok(result);
+        }
+
+        [HttpGet("information/{orderId:int}")]
+        [ProducesResponseType(typeof(OrderMaterialsResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<ActionResult<OrderMaterialsResponse>> Get(int orderId, CancellationToken ct)
+        {
+            var res = await _orderMaterialService.GetMaterialsByOrderIdAsync(orderId, ct);
+            if (res == null) return NotFound();
+            return Ok(res);
         }
 
         [HttpPost("start/{orderId:int}")]

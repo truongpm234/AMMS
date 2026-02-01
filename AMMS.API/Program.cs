@@ -197,15 +197,11 @@ builder.Services.AddScoped<ISmsOtpService, TwilioSmsOtpService>();
 builder.Services.AddScoped<IEstimateBaseConfigService, EstimateBaseConfigService>();
 builder.Services.AddScoped<IMissingMaterialService, MissingMaterialService>();
 builder.Services.AddScoped<IMissingMaterialRepository, MissingMaterialRepository>();
-//builder.Services.AddScoped<IOrderCompletionEstimatorService, OrderCompletionEstimatorService>();
-//builder.Services.AddScoped<IOrderEstimateQueryRepository, OrderEstimateQueryRepository>();
-//builder.Services.AddScoped<IPlanRepository, PlanRepository>();
-//builder.Services.AddScoped<IMachineQueryRepository, MachineQueryRepository>();
-//builder.Services.AddScoped<IRoutingRepository, RoutingRepository>();
+builder.Services.AddScoped<IOrderPlanningService, OrderPlanningService>();
+builder.Services.AddScoped<IOrderMaterialRepository, OrderMaterialRepository>();
+builder.Services.AddScoped<IOrderMaterialService, OrderMaterialService>();
 
-
-
-
+// Logging
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 builder.Logging.SetMinimumLevel(LogLevel.Information);

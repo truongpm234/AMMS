@@ -24,5 +24,7 @@ namespace AMMS.Infrastructure.Interfaces
         Task<List<machine>> GetAllAsync();
         Task AllocateAsync(string machineCode, int need = 1, CancellationToken ct = default);
         Task ReleaseAsync(string machineCode, int release = 1, CancellationToken ct = default);
+        Task<machine?> FindBestMachineByProcessCodeAsync(string processCode, CancellationToken ct = default);
+
     }
 }

@@ -23,7 +23,6 @@ namespace AMMS.Infrastructure.Repositories
                 .Where(m => m.is_active)
                 .ToListAsync();
 
-            // Nếu DB đã có busy/free => dùng luôn
             var hasBusyFree = machines.Any(m => m.busy_quantity != null || m.free_quantity != null);
 
             if (hasBusyFree)
@@ -47,7 +46,6 @@ namespace AMMS.Infrastructure.Repositories
                     .ToList();
             }
 
-            // Fallback: tính từ tasks (nhưng phải theo status mới)
             var busyMachineCodes = await _db.tasks
                 .AsNoTracking()
                 .Where(t => t.machine != null &&
@@ -176,6 +174,43 @@ namespace AMMS.Infrastructure.Repositories
         public async Task<List<machine>> GetAllAsync()
         {
             return await _db.machines.ToListAsync();
+        }
+
+        public async Task<machine?> FindBestMachineByProcessCodeAsync(string processCode, CancellationToken ct = default)
+        {
+            var p = (processCode ?? "").Trim().ToUpperInvariant();
+            if (string.IsNullOrWhiteSpace(p)) return null;
+
+            // Load candidates
+            var list = await _db.machines
+                .AsNoTracking()
+                .Where(m => m.is_active && m.process_code != null && m.process_code != "")
+                .Where(m => m.process_code!.Trim().ToUpper() == p)
+                .Select(m => new
+                {
+                    Machine = m,
+                    Free = (m.free_quantity ?? (m.quantity - (m.busy_quantity ?? 0))),
+                    Busy = (m.busy_quantity ?? 0),
+                    Cap = m.capacity_per_hour
+                })
+                .ToListAsync(ct);
+
+            if (list.Count == 0) return null;
+
+            var anyFree = list.Any(x => x.Free > 0);
+
+            var best = anyFree
+                ? list.OrderByDescending(x => x.Free)
+                      .ThenBy(x => x.Busy)
+                      .ThenByDescending(x => x.Cap)
+                      .ThenBy(x => x.Machine.machine_id)
+                      .FirstOrDefault()
+                : list.OrderBy(x => x.Busy)             
+                      .ThenByDescending(x => x.Cap)
+                      .ThenBy(x => x.Machine.machine_id)
+                      .FirstOrDefault();
+
+            return best?.Machine;
         }
     }
 }

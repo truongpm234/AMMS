@@ -3,6 +3,7 @@ using AMMS.Application.Interfaces;
 using AMMS.Application.Services;
 using AMMS.Shared.DTOs.Estimates;
 using AMMS.Shared.DTOs.Estimates.AMMS.Shared.DTOs.Estimates;
+using AMMS.Shared.DTOs.Planning;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
@@ -14,11 +15,21 @@ namespace AMMS.API.Controllers
     {
         private readonly IEstimateService _service;
         private readonly IEstimateBaseConfigService _baseConfig;
+        private readonly IOrderPlanningService _planning;
 
-        public EstimatesController(IEstimateService service, IEstimateBaseConfigService baseConfig)
+        public EstimatesController(IEstimateService service, IEstimateBaseConfigService baseConfig, IOrderPlanningService planning)
         {
             _service = service;
             _baseConfig = baseConfig;
+            _planning = planning;
+        }
+
+        [HttpGet("estimate-finish/{orderRequestId:int}")]
+        public async Task<ActionResult<EstimateFinishDateResponse>> EstimateFinish(int orderRequestId, CancellationToken ct)
+        {
+            var res = await _planning.EstimateFinishByOrderRequestAsync(orderRequestId, ct);
+            if (res == null) return NotFound();
+            return Ok(res);
         }
 
         [HttpPut("adjust-cost/{orderRequestId:int}")]

@@ -39,7 +39,6 @@ namespace AMMS.Infrastructure.Entities
         public string? note { get; set; }
 
         [NotMapped]
-        public decimal daily_capacity =>
-            quantity * capacity_per_hour * working_hours_per_day * efficiency_percent / 100m;
+        public decimal daily_capacity => quantity * capacity_per_hour * working_hours_per_day * (efficiency_percent / 100m);
     }
 }
