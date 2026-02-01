@@ -34,7 +34,7 @@ namespace AMMS.Infrastructure.Repositories
                     ContactPerson = s.contact_person,
                     Phone = s.phone,
                     Email = s.email,
-                    MainMaterialType = s.main_material_type,
+                    MainMaterialType = s.type,
                     Rating = s.rating
                 })
                 .ToListAsync(ct);
@@ -56,7 +56,7 @@ namespace AMMS.Infrastructure.Repositories
                     s.contact_person,
                     s.phone,
                     s.email,
-                    s.main_material_type
+                    s.type
                 })
                 .FirstOrDefaultAsync(ct);
 
@@ -103,7 +103,7 @@ namespace AMMS.Infrastructure.Repositories
                 contact_person = supplier.contact_person,
                 phone = supplier.phone,
                 email = supplier.email,
-                main_material_type = supplier.main_material_type,
+                type = supplier.type,
                 Materials = new PagedResultLite<SupplierMaterialDto>
                 {
                     Page = page,

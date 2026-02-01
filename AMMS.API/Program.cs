@@ -195,7 +195,7 @@ builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<JWTService>();
 builder.Services.AddScoped<GoogleAuthService>();
 builder.Services.AddScoped<ISmsOtpService, TwilioSmsOtpService>();
-
+builder.Services.AddScoped<IEstimateBaseConfigService, EstimateBaseConfigService>();
 
 // Logging
 builder.Logging.ClearProviders();

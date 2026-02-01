@@ -23,8 +23,7 @@ namespace AMMS.Infrastructure.Repositories
             CancellationToken ct = default)
         {
             return await _db.product_templates
-                .AsNoTracking()
-                .Where(x => x.product_type_id == productTypeId && x.is_active)
+                .Where(x => x.product_type_id == productTypeId && x.is_active == true)
                 .OrderBy(x => x.template_code)
                 .ToListAsync(ct);
         }
@@ -37,6 +36,14 @@ namespace AMMS.Infrastructure.Repositories
                 .OrderBy(x => x.template_code)
                 .ToListAsync(ct);
         }
-        
+        public Task<List<material>> GetPaperMaterialsStockDescAsync(CancellationToken ct = default)
+        {
+            return _db.materials
+                .AsNoTracking()
+                .Where(m => m.material_class == "MAIN" && m.type == "GIẤY")
+                .OrderByDescending(m => m.stock_qty ?? 0m)
+                .ThenBy(m => m.code)
+                .ToListAsync(ct);
+        }
     }
 }

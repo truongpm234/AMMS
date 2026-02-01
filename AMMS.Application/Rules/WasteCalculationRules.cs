@@ -11,29 +11,25 @@ namespace AMMS.Application.Rules
     {
         public static class PrintingWaste
         {
-            // Gạch
             public const int GACH_1MAU = 50;
             public const int GACH_XUAT_KHAU_DON_GIAN = 120;
             public const int GACH_XUAT_KHAU_TERACON = 200;
             public const int GACH_NOI_DIA_4SP = 150;
             public const int GACH_NOI_DIA_6SP = 180;
 
-            // Hộp màu
             public const int HOP_MAU_1LUOT_DON_GIAN = 200;
             public const int HOP_MAU_1LUOT_THUONG = 230;
             public const int HOP_MAU_1LUOT_KHO = 250;
             public const int HOP_MAU_AQUA_DOI = 450;
-            public const int HOP_MAU_2LUOT_1 = 230;  // Lượt 1
-            public const int HOP_MAU_2LUOT_2 = 100;  // Lượt 2
+            public const int HOP_MAU_2LUOT_1 = 230;  
+            public const int HOP_MAU_2LUOT_2 = 100;  
 
-            // Thêm cho mỗi cao bản (chỉ áp dụng hộp màu)
             public const int PER_PLATE = 10;
 
             public static int GetBaseWaste(string productTypeCode)
             {
                 productTypeCode = (productTypeCode ?? "").Trim();
 
-                // 1) Gạch
                 if (Enum.TryParse<ProductTypeCodeOfGach>(productTypeCode, true, out var gach))
                 {
                     return gach switch
@@ -47,7 +43,6 @@ namespace AMMS.Application.Rules
                     };
                 }
 
-                // 2) Hộp màu
                 if (Enum.TryParse<ProductTypeCodeOfHop_mau>(productTypeCode, true, out var hop))
                 {
                     return hop switch
@@ -66,13 +61,7 @@ namespace AMMS.Application.Rules
 
         }
 
-        // ==================== HAO HỤT CÔNG ĐOẠN BẾ ====================
-
-        /// <summary>
-        /// Hao hụt công đoạn bế (tờ)
-        /// Chưa tính phần giấy xắp của công đoạn bồi chuẩn bị cho bế
-        /// </summary>
-        public static class DieCuttingWaste
+        public class DieCuttingWaste
         {
             public static int Calculate(int sheetsBase)
             {
@@ -86,12 +75,7 @@ namespace AMMS.Application.Rules
             }
         }
 
-        // ==================== HAO HỤT CÔNG ĐOẠN BỒI ====================
-
-        /// <summary>
-        /// Hao hụt công đoạn bồi (tờ)
-        /// </summary>
-        public static class MountingWaste
+        public class MountingWaste
         {
             public static int Calculate(int sheetsBase)
             {
@@ -105,14 +89,7 @@ namespace AMMS.Application.Rules
             }
         }
 
-        // ==================== HAO HỤT CÔNG ĐOẠN PHỦ ====================
-
-        /// <summary>
-        /// Hao hụt công đoạn phủ (tờ)
-        /// Keo nước: 0 (có thể phủ lại)
-        /// Keo dầu: tính theo số lượng tờ in
-        /// </summary>
-        public static class CoatingWaste
+        public class CoatingWaste
         {
             public static int Calculate(int sheetsBase, CoatingType coatingType)
             {
@@ -126,12 +103,7 @@ namespace AMMS.Application.Rules
             }
         }
 
-        // ==================== HAO HỤT CÔNG ĐOẠN CÁN MÀNG ====================
-
-        /// <summary>
-        /// Hao hụt công đoạn cán màng (tờ)
-        /// </summary>
-        public static class LaminationWaste
+        public class LaminationWaste
         {
             public static int Calculate(int sheetsBase)
             {
@@ -139,17 +111,10 @@ namespace AMMS.Application.Rules
             }
         }
 
-        // ==================== HAO HỤT CÔNG ĐOẠN DÁN ====================
-
-        /// <summary>
-        /// Hao hụt công đoạn dán (hộp)
-        /// Trung bình 20-30 hộp, chưa tính phần giấy xắp của công đoạn dứt
-        /// </summary>
-        public static class GluingWaste
+        public class GluingWaste
         {
             public static int Calculate(int quantity)
             {
-                // Tính theo số lượng sản phẩm (hộp)
                 return quantity switch
                 {
                     < 100 => 10,
@@ -160,46 +125,25 @@ namespace AMMS.Application.Rules
             }
         }
 
-        // ==================== HAO HỤT CÔNG ĐOẠN DỨT ====================
-
-        /// <summary>
-        /// Công đoạn dứt: Không để hao hụt mà tính bằng công đoạn bế
-        /// </summary>
-        public static class TrimWaste
+        public class TrimWaste
         {
-            // Không tính hao hụt riêng, đã tính trong Bế
             public const int NO_WASTE = 0;
         }
 
-        // ==================== HAO HỤT CÔNG ĐOẠN CẮT ====================
-
-        /// <summary>
-        /// Công đoạn cắt: Không tính hao hụt
-        /// Nếu cắt nhầm phải ralo bù vì mỗi lần hỏng là hỏng trên 100 tờ
-        /// </summary>
-        public static class CuttingWaste
+        public class CuttingWaste
         {
             public const int NO_WASTE = 0;
         }
     }
 
-    /// <summary>
-    /// Định mức vật liệu và giá
-    /// Dựa trên tài liệu "Định mức và cách tính"
-    /// </summary>
-    public static class MaterialRates
+    public class MaterialRates
     {
-        // ==================== ĐỊNH MỨC MỰC IN ====================
-
-        /// <summary>
-        /// Định mức mực in (kg/m2)
-        /// </summary>
-        public static class InkRates
+        public class InkRates
         {
-            public const decimal GACH_NOI_DIA = 0.0003m;           // Gạch nội địa
-            public const decimal GACH_XUAT_KHAU_DON_GIAN = 0.0003m; // Gạch XK đơn giản
-            public const decimal HOP_MAU = 0.0009m;                 // Hộp màu
-            public const decimal GACH_NHIEU_MAU = 0.001m;          // Gạch nhiều màu
+            public const decimal GACH_NOI_DIA = 0.0003m;           
+            public const decimal GACH_XUAT_KHAU_DON_GIAN = 0.0003m; 
+            public const decimal HOP_MAU = 0.0009m;                
+            public const decimal GACH_NHIEU_MAU = 0.001m;          
 
             public static decimal GetRate(string productTypeCode)
             {
@@ -222,14 +166,10 @@ namespace AMMS.Application.Rules
 
         }
 
-        // ==================== ĐỊNH MỨC KEO PHỦ ====================
-        /// <summary>
-        /// Định mức keo phủ (kg/m2 tờ in)
-        /// </summary>
-        public static class CoatingGlueRates
+        public class CoatingGlueRates
         {
-            public const decimal KEO_NUOC = 0.003m;  // Keo nước
-            public const decimal KEO_DAU = 0.004m;   // Keo dầu
+            public const decimal KEO_NUOC = 0.003m;  
+            public const decimal KEO_DAU = 0.004m;
 
             public static decimal GetRate(CoatingType coatingType)
             {
@@ -242,46 +182,27 @@ namespace AMMS.Application.Rules
             }
         }
 
-        // ==================== ĐỊNH MỨC KEO BỒI ====================
 
-        /// <summary>
-        /// Định mức keo bồi (kg/m2 tờ sóng)
-        /// Tính theo dung dịch keo đã pha
-        /// </summary>
-        public static class MountingGlueRates
+        public class MountingGlueRates
         {
             public const decimal RATE = 0.004m;
         }
 
-        // ==================== ĐỊNH MỨC MÀNG CÁN ====================
-
-        /// <summary>
-        /// Định mức màng cán (kg/m2 tờ in)
-        /// 12g màng + 5g keo = 17g/m2 = 0.017kg/m2
-        /// </summary>
-        public static class LaminationRates
+        public class LaminationRates
         {
             public const decimal RATE_12MIC = 0.017m;
         }
     }
 
-    /// <summary>
-    /// Giá vật liệu (VND)
-    /// Có thể load từ database hoặc config
-    /// </summary>
-    public static class MaterialPrices
+    public class MaterialPrices
     {
-        // Giá mực (VND/kg)
         public const decimal INK_PRICE_PER_KG = 150000m;
 
-        // Giá keo phủ (VND/kg)
         public const decimal COATING_GLUE_KEO_NUOC_PER_KG = 70000m;
         public const decimal COATING_GLUE_KEO_DAU_PER_KG = 80000m;
 
-        // Giá keo bồi (VND/kg)
         public const decimal MOUNTING_GLUE_PER_KG = 60000m;
 
-        // Giá màng (VND/kg)
         public const decimal LAMINATION_PER_KG = 200000m;
 
         public static decimal GetCoatingGluePrice(CoatingType coatingType)
@@ -295,21 +216,14 @@ namespace AMMS.Application.Rules
         }
     }
 
-    /// <summary>
-    /// Các tham số khác cho hệ thống
-    /// </summary>
-    public static class SystemParameters
+    public class SystemParameters
     {
-        // Khấu hao máy móc
         public const decimal OVERHEAD_PERCENT = 5m;
 
-        // Số ngày làm việc dự kiến để hoàn thành đơn hàng
         public const int DEFAULT_PRODUCTION_DAYS = 5;
 
-        // Ngưỡng rush order (số ngày giao sớm hơn dự kiến)
         public const int RUSH_THRESHOLD_DAYS = 1;
 
-        // Phần trăm phí gấp theo số ngày giao sớm
         public static decimal GetRushPercent(int daysEarly)
         {
             return daysEarly switch

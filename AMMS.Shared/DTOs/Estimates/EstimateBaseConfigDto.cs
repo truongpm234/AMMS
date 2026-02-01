@@ -56,7 +56,6 @@ namespace AMMS.Shared.DTOs.Estimates
 
     public class PrintingWasteConfig
     {
-        // map code product_type -> base waste
         public Dictionary<string, int> by_product_type { get; set; } = new();
         public int per_plate { get; set; }
         public int @default { get; set; }
@@ -91,6 +90,7 @@ namespace AMMS.Shared.DTOs.Estimates
         public decimal overhead_percent { get; set; }
         public int default_production_days { get; set; }
         public int rush_threshold_days { get; set; }
+        public decimal vat_percent { get; set; }
         public Dictionary<int, decimal> rush_percent_by_days_early { get; set; } = new();
     }
 

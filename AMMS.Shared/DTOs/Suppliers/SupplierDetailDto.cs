@@ -13,7 +13,7 @@ namespace AMMS.Shared.DTOs.Suppliers {
         public string? contact_person { get; init; }
         public string? phone { get; init; }
         public string? email { get; init; }
-        public string? main_material_type { get; init; }
+        public string? type { get; init; }
         public PagedResultLite<SupplierMaterialDto> Materials { get; init; }
     }
 }

@@ -17,7 +17,7 @@ public partial class supplier
 
     public string? email { get; set; }
 
-    public string? main_material_type { get; set; }
+    public string? type { get; set; }
 
     [Column(TypeName = "numeric(3,2)")]
     public decimal rating { get; set; } = 0;

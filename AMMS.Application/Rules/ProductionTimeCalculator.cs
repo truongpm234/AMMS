@@ -16,7 +16,6 @@ namespace AMMS.Application.Rules
         {
             if (!machines.Any() || !processes.Any())
             {
-                // 5 ngày nếu không có dữ liệu
                 return SystemParameters.DEFAULT_PRODUCTION_DAYS;
             }
 
@@ -26,7 +25,6 @@ namespace AMMS.Application.Rules
             {
                 string processName = MapProcessTypeToName(process);
 
-                // Lấy tất cả máy của công đoạn này
                 var processMachines = machines
                     .Where(m => m.process_name == processName && m.is_active == true)
                     .ToList();
@@ -36,7 +34,6 @@ namespace AMMS.Application.Rules
                     continue;
                 }
 
-                // Tổng công suất hàng ngày của công đoạn
                 decimal totalDailyCapacity = processMachines.Sum(m => m.daily_capacity);
 
                 if (totalDailyCapacity <= 0)
@@ -44,13 +41,11 @@ namespace AMMS.Application.Rules
                     continue;
                 }
 
-                // Xác định số lượng cần xử lý (tờ hoặc sản phẩm)
                 int requiredQty = GetRequiredQuantity(process, sheetsWithWaste, productQuantity);
 
                 // Tính số ngày cần
                 double daysNeeded = (double)requiredQty / (double)totalDailyCapacity;
 
-                // Làm tròn lên, tối thiểu 1 ngày
                 daysNeeded = Math.Max(1, Math.Ceiling(daysNeeded));
 
                 processDays.Add(daysNeeded);
@@ -61,19 +56,15 @@ namespace AMMS.Application.Rules
                 return SystemParameters.DEFAULT_PRODUCTION_DAYS;
             }
 
-            // Lấy công đoạn chậm nhất (bottleneck)
             int bottleneckDays = (int)Math.Ceiling(processDays.Max());
 
-            // Thêm buffer 30% cho setup, chuyển đổi, rủi ro
             int totalDays = (int)Math.Ceiling(bottleneckDays * 1.3);
 
-            // Giới hạn: 2-30 ngày
             totalDays = Math.Max(2, Math.Min(30, totalDays));
 
             return totalDays;
         }
 
-        // Tính chi tiết thời gian cho từng công đoạn (dùng để hiển thị)
         public static Dictionary<string, ProcessTimeDetail> CalculateDetailedProcessTime(int sheetsWithWaste, int productQuantity, List<ProcessType> processes, List<machine> machines)
         {
             var details = new Dictionary<string, ProcessTimeDetail>();

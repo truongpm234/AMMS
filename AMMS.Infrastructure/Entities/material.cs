@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AMMS.Infrastructure.Entities;
@@ -28,7 +29,11 @@ public partial class material
 
     public int? sheet_length_mm { get; set; }
 
-    public string? main_material_type { get; set; }
+    public string? type { get; set; }
+
+    [Column("material_class")]
+    [MaxLength(10)]
+    public string material_class { get; set; }
 
     public virtual ICollection<bom> boms { get; set; } = new List<bom>();
 

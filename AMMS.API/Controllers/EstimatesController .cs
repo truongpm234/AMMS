@@ -13,10 +13,11 @@ namespace AMMS.API.Controllers
     public class EstimatesController : ControllerBase
     {
         private readonly IEstimateService _service;
-
-        public EstimatesController(IEstimateService service)
+        private readonly IEstimateBaseConfigService _baseConfig;
+        public EstimatesController(IEstimateService service, IEstimateBaseConfigService baseConfig)
         {
             _service = service;
+            _baseConfig = baseConfig;
         }
 
         [HttpPost("paper")]
@@ -81,9 +82,9 @@ namespace AMMS.API.Controllers
 
         [HttpGet("base-config")]
         [ProducesResponseType(typeof(EstimateBaseConfigDto), StatusCodes.Status200OK)]
-        public IActionResult GetBaseConfig()
+        public async Task<IActionResult> GetBaseConfig(CancellationToken ct)
         {
-            var cfg = EstimateConfigBuilder.Build();
+            var cfg = await _baseConfig.GetAsync(ct);
             return Ok(cfg);
         }
 

@@ -9,5 +9,7 @@ namespace AMMS.Infrastructure.Interfaces
     {
         Task<List<product_template>> GetByProductTypeIdAsync(int productTypeId, CancellationToken ct = default);
         Task<List<product_template>> GetAllAsync(CancellationToken ct = default);
+        Task<List<material>> GetPaperMaterialsStockDescAsync(CancellationToken ct = default);
+
     }
 }

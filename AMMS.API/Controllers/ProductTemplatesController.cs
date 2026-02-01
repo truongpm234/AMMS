@@ -33,5 +33,13 @@ namespace AMMS.API.Controllers
             var data = await _service.GetAllAsync(ct);
             return Ok(data);
         }
+
+        [HttpGet("get-paper-stock")]
+        [ProducesResponseType(typeof(ProductTemplatesWithPaperStockResponse), StatusCodes.Status200OK)]
+        public async Task<ActionResult<ProductTemplatesWithPaperStockResponse>> GetByProductTypeWithPaperStock(CancellationToken ct)
+        {
+            var data = await _service.GetByProductTypeIdWithPaperStockAsync(ct);
+            return Ok(data);
+        }
     }
 }

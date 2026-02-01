@@ -14,7 +14,7 @@ namespace AMMS.Infrastructure.Entities
         [Key]
         [Column("process_code")]
         [MaxLength(50)]
-        public string process_code { get; set; } = null!;  
+        public string process_code { get; set; } = null!;
 
         [Column("process_name")]
         [MaxLength(255)]
@@ -22,7 +22,7 @@ namespace AMMS.Infrastructure.Entities
 
         [Column("unit")]
         [MaxLength(20)]
-        public string unit { get; set; } = null!;           
+        public string unit { get; set; } = null!;
 
         [Column("unit_price", TypeName = "numeric(18,2)")]
         public decimal unit_price { get; set; }

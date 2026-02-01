@@ -72,6 +72,8 @@ public partial class AppDbContext : DbContext
 
     public virtual DbSet<missing_material> missing_materials { get; set; } = null!;
 
+    public virtual DbSet<estimate_config> estimate_config { get; set; } = null!;
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<bom>(entity =>
@@ -118,7 +120,7 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.name).HasMaxLength(150);
             entity.Property(e => e.stock_qty).HasPrecision(10, 2).HasDefaultValueSql("0");
             entity.Property(e => e.unit).HasMaxLength(20);
-            entity.Property(e => e.main_material_type).HasMaxLength(50);
+            entity.Property(e => e.type).HasMaxLength(50);
         });
 
         modelBuilder.Entity<machine>(entity =>
@@ -384,7 +386,7 @@ public partial class AppDbContext : DbContext
 
             entity.Property(e => e.contact_person).HasMaxLength(100);
             entity.Property(e => e.email).HasMaxLength(100);
-            entity.Property(e => e.main_material_type).HasMaxLength(50);
+            entity.Property(e => e.type).HasMaxLength(50);
             entity.Property(e => e.name).HasMaxLength(150);
             entity.Property(e => e.phone).HasMaxLength(20);
             entity.Property(e => e.rating)
@@ -588,6 +590,15 @@ public partial class AppDbContext : DbContext
                   .HasForeignKey(e => e.product_type_id);
         });
 
+        modelBuilder.Entity<estimate_config>(e =>
+        {
+            e.HasKey(x => new { x.config_group, x.config_key });
+
+            e.Property(x => x.config_group).HasMaxLength(100);
+            e.Property(x => x.config_key).HasMaxLength(120);
+            e.Property(x => x.value_num).HasColumnType("numeric(18,6)");
+        });
+
         modelBuilder.Entity<missing_material>(entity =>
         {
             entity.ToTable("missing_materials", "AMMS_DB");
@@ -634,6 +645,7 @@ public partial class AppDbContext : DbContext
         });
         OnModelCreatingPartial(modelBuilder);
     }
+
 
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder);
 }

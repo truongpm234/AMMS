@@ -18,13 +18,13 @@ namespace AMMS.Application.Services
             _repo = repo;
         }
 
-        public async Task<List<ProductTemplateDto>> GetByProductTypeIdAsync(
-            int productTypeId,
-            CancellationToken ct = default)
+        public async Task<List<ProductTemplateDto>> GetByProductTypeIdAsync(int productTypeId, CancellationToken ct = default)
         {
-            var entities = await _repo.GetByProductTypeIdAsync(productTypeId, ct);
+            var templates = await _repo.GetByProductTypeIdAsync(productTypeId, ct);
+            var papers = await _repo.GetPaperMaterialsStockDescAsync(ct);
+            var suggested = papers.FirstOrDefault();
 
-            return entities.Select(x => new ProductTemplateDto
+            return templates.Select(x => new ProductTemplateDto
             {
                 design_profile_id = x.design_profile_id,
                 product_type_id = x.product_type_id,
@@ -42,8 +42,9 @@ namespace AMMS.Application.Services
                 number_of_plates = x.number_of_plates,
                 coating_type = x.coating_type,
 
-                paper_code = x.paper_code,
-                paper_name = x.paper_name,
+                paper_code = suggested?.code ?? x.paper_code,
+                paper_name = suggested?.name ?? x.paper_name,
+
                 wave_type = x.wave_type,
 
                 print_width_mm = x.print_width_mm,
@@ -56,6 +57,27 @@ namespace AMMS.Application.Services
                 created_at = x.created_at,
                 updated_at = x.updated_at
             }).ToList();
+        }
+
+        public async Task<ProductTemplatesWithPaperStockResponse> GetByProductTypeIdWithPaperStockAsync(CancellationToken ct = default)
+        {
+            var papers = await _repo.GetPaperMaterialsStockDescAsync(ct);
+            var suggested = papers.FirstOrDefault();
+
+            var dtoPapers = papers.Select(p => new PaperStockDto
+            {
+                material_id = p.material_id,
+                code = p.code,
+                name = p.name,
+                unit = p.unit,
+                stock_qty = p.stock_qty ?? 0m,
+                cost_price = p.cost_price
+            }).ToList();
+
+            return new ProductTemplatesWithPaperStockResponse
+            {
+                paper_stock = dtoPapers
+            };
         }
 
         public async Task<List<product_template>> GetAllAsync(CancellationToken ct = default)
