@@ -20,7 +20,7 @@ namespace AMMS.Application.Services
         private static string GetUnit(string processCode)
         {
             processCode = Norm(processCode);
-            if (processCode is "IN" or "PHU" or "CAN" or "CAN") return "m2";
+            if (processCode is "IN" or "PHU" or "CAN") return "tờ";
             if (processCode is "DAN") return "sp";
             return "tờ";
         }

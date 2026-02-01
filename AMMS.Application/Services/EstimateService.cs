@@ -156,20 +156,68 @@ namespace AMMS.Application.Services
             SetIfNotNull(req.cost_note, v => entity.cost_note = v);
 
             // ----- PROCESS COSTS -----
+            // ----- PROCESS COSTS -----
             if (req.process_costs != null)
             {
                 entity.process_costs.Clear();
 
+                // dùng “tờ” làm base cho IN/PHU/CAN
+                int sheetsBase = entity.sheets_required > 0
+                    ? entity.sheets_required
+                    : (entity.sheets_total > 0 ? entity.sheets_total : 1);
+
+                decimal totalArea = entity.total_area_m2 > 0 ? entity.total_area_m2 : 0m;
+                decimal areaPerSheet = (sheetsBase > 0 && totalArea > 0) ? (totalArea / sheetsBase) : 0m;
+
                 foreach (var p in req.process_costs)
                 {
+                    var pcode = (p.process_code ?? "").Trim().ToUpperInvariant();
+
+                    decimal qty = p.quantity ?? 0m;
+                    decimal unitPrice = p.unit_price ?? 0m;
+
+                    // total_cost ưu tiên lấy từ FE nếu có, không thì tự tính
+                    decimal totalCost = (p.total_cost.HasValue && p.total_cost.Value > 0)
+                        ? p.total_cost.Value
+                        : (qty * unitPrice);
+
+                    var unit = (p.unit ?? "").Trim();
+
+                    // ✅ Normalize IN/PHU/CAN từ m2 -> tờ
+                    if (pcode is "IN" or "PHU" or "CAN" or "CAN_MANG")
+                    {
+                        var qtySheets = (decimal)sheetsBase;
+                        var unitPriceSheet = sheetsBase > 0 ? (totalCost / qtySheets) : 0m;
+
+                        if (totalCost <= 0 && unitPrice > 0 && totalArea > 0)
+                        {
+                            totalCost = unitPrice * totalArea;
+                            unitPriceSheet = sheetsBase > 0 ? (totalCost / qtySheets) : 0m;
+                        }
+
+                        entity.process_costs.Add(new cost_estimate_process
+                        {
+                            process_code = p.process_code,
+                            process_name = p.process_name ?? p.process_code,
+                            quantity = qtySheets,       
+                            unit = "tờ",                
+                            unit_price = unitPriceSheet,
+                            total_cost = totalCost,
+                            note = p.note,
+                            created_at = AppTime.NowVnUnspecified()
+                        });
+
+                        continue;
+                    }
+
                     entity.process_costs.Add(new cost_estimate_process
                     {
                         process_code = p.process_code,
                         process_name = p.process_name ?? p.process_code,
-                        quantity = p.quantity ?? 0m,
-                        unit = p.unit ?? "",
-                        unit_price = p.unit_price ?? 0m,
-                        total_cost = p.total_cost ?? 0m,
+                        quantity = qty,
+                        unit = string.IsNullOrWhiteSpace(unit) ? "" : unit,
+                        unit_price = unitPrice,
+                        total_cost = totalCost,
                         note = p.note,
                         created_at = AppTime.NowVnUnspecified()
                     });

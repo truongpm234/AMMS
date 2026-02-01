@@ -107,6 +107,7 @@ namespace AMMS.Application.Services
                             await _machineRepo.AllocateAsync(next.machine!, need: 1);
                     }
 
+
                     await _taskRepo.SaveChangesAsync();
                     await _logRepo.SaveChangesAsync();
 
@@ -148,6 +149,10 @@ namespace AMMS.Application.Services
                     throw;
                 }
             });
+        }
+        public async Task<int> SuggestQtyGoodAsync(int taskId, CancellationToken ct = default)
+        {
+            return await _taskRepo.SuggestQtyGoodAsync(taskId, ct);
         }
     }
 }

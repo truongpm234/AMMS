@@ -14,5 +14,6 @@ namespace AMMS.Infrastructure.Interfaces
         Task<task?> GetByIdAsync(int taskId);
         Task<task?> GetNextTaskAsync(int prodId, int currentSeqNum);
         Task<task?> GetPrevTaskAsync(int prodId, int seqNum);
+        Task<int> SuggestQtyGoodAsync(int taskId, CancellationToken ct = default);
     }
 }

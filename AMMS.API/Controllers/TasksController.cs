@@ -24,21 +24,31 @@ namespace AMMS.API.Controllers
         }
 
         [HttpPost("qr")]
-        public async Task<ActionResult<TaskQrResponse>> CreateQr([FromBody] CreateTaskQrRequest req)
+        public async Task<ActionResult<TaskQrResponse>> CreateQr([FromBody] CreateTaskQrRequest req, CancellationToken ct)
         {
             var t = await _taskRepo.GetByIdAsync(req.task_id);
             if (t == null) return NotFound();
 
             var ttl = TimeSpan.FromMinutes(Math.Max(1, req.ttl_minutes));
+            var isAuto = req.qty_good <= 0;
+            var qtyGood = (int)req.qty_good;
 
-            var token = _tokenSvc.CreateToken(req.task_id, req.qty_good, ttl);
+            if (isAuto)
+            {
+                qtyGood = await _svc.SuggestQtyGoodAsync(req.task_id, ct);
+                if (qtyGood <= 0) qtyGood = 1;
+            }
+
+            var token = _tokenSvc.CreateToken(req.task_id, qtyGood, ttl);
             var expiresAt = DateTimeOffset.UtcNow.Add(ttl).ToUnixTimeSeconds();
 
             return new TaskQrResponse
             {
                 task_id = req.task_id,
                 token = token,
-                expires_at_unix = expiresAt
+                expires_at_unix = expiresAt,
+                qty_good_used = qtyGood,
+                is_auto_filled = isAuto
             };
         }
 
