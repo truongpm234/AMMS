@@ -524,7 +524,6 @@ namespace AMMS.Infrastructure.Repositories
                         // ✅ quantity = missingBase
                         quantity = missingBase,
                         total_price = totalPriceBase,
-                        is_enough = isEnoughSummary,
                         is_buy = isBuySummary
 
                     };

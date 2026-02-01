@@ -16,7 +16,6 @@ namespace AMMS.Shared.DTOs.Orders
         public string? unit { get; set; }         
         public DateTime? request_date { get; set; }
         public decimal total_price { get; set; }
-        public bool? is_enough { get; set; }
         public bool? is_buy { get; set; }
     }
 }
