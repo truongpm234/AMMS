@@ -22,11 +22,8 @@ namespace AMMS.Application.Interfaces
         Task<int?> StartProductionAndPromoteFirstTaskAsync(int orderId, CancellationToken ct = default);
         Task<List<MachineScheduleBoardDto>> GetMachineScheduleBoardAsync(DateTime from, DateTime to, CancellationToken ct = default);
         Task<ProductionReadyCheckResponse?> GetProductionReadyAsync(int orderId, CancellationToken ct = default);
-
-        Task<bool> SetProductionReadyAsync(int orderId, bool isProductionReady, bool isFullProcess, CancellationToken ct = default);
+        Task<bool> SetProductionReadyAsync(int orderId, bool isProductionReady, CancellationToken ct = default);
         Task<GenerateImportReceiveResponse?> GenerateImportReceiveAsync(int orderId, CancellationToken ct = default);
-
-        Task<bool> SetProductionReadyAsync(int orderId, bool isProductionReady, bool isFullProcess, int? subId, CancellationToken ct = default);
-
+        Task<SetProductionMethodResponse?> SetProductionMethodAsync(SetProductionMethodRequest req, CancellationToken ct = default);
     }
 }

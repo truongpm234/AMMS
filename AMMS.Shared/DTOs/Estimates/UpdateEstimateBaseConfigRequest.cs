@@ -9,51 +9,40 @@ namespace AMMS.Shared.DTOs.Estimates
 {
     public class UpdateEstimateBaseConfigRequest
     {
-        /// <summary>
-        /// Nhóm cấu hình giá vật tư.
-        /// </summary>
+        // Nhóm cấu hình giá vật tư.
         public MaterialPricesUpdateDto? material_prices { get; set; }
 
-        /// <summary>
-        /// Nhóm cấu hình định mức vật tư.
-        /// </summary>
+        // Nhóm cấu hình định mức vật tư.
         public MaterialRatesUpdateDto? material_rates { get; set; }
 
-        /// <summary>
-        /// Nhóm cấu hình hao hụt.
-        /// </summary>
+        // Nhóm cấu hình hao hụt.
         public WasteRulesUpdateDto? waste_rules { get; set; }
 
-        /// <summary>
-        /// Nhóm cấu hình tham số hệ thống (VAT, rush, số ngày SX mặc định...).
-        /// </summary>
+        // Nhóm cấu hình tham số hệ thống (VAT, rush, số ngày SX mặc định...).
         public SystemParametersUpdateDto? system_parameters { get; set; }
 
-        /// <summary>
-        /// Nhóm cấu hình công đoạn sản xuất.
-        /// </summary>
+        // Nhóm cấu hình công đoạn sản xuất.
         public ProcessCostsUpdateDto? process_costs { get; set; }
 
-        /// <summary>
-        /// Nhóm cấu hình chi phí thiết kế.
-        /// </summary>
+        // Nhóm cấu hình chi phí thiết kế.
         public DesignUpdateDto? design { get; set; }
 
-        /// <summary>
-        /// Nhóm cấu hình giá bản kẽm theo khổ.
-        /// </summary>
+        // Nhóm cấu hình giá bản kẽm theo khổ.
         public PlatePricesUpdateDto? plate_prices { get; set; }
 
-        /// <summary>
-        /// Nhóm cấu hình thanh toán.
-        /// Chỉ sửa deposit_percent, remaining_percent sẽ được backend tự tính = 100 - deposit_percent.
-        /// </summary>
+        // Nhóm cấu hình thanh toán.
         public PaymentTermsUpdateDto? payment_terms { get; set; }
 
-        /// <summary>
-        /// Nhóm cấu hình lập lịch sản xuất / giờ làm việc.
-        /// </summary>
+        // Nhóm cấu hình lập lịch sản xuất / giờ làm việc.
         public PlanningUpdateDto? planning { get; set; }
+
+        // Nhóm cấu hình thanh toán khi giao hàng.
+        public DeliveryPaymentUpdateDto? delivery_payment { get; set; }
+    }
+
+    public class DeliveryPaymentUpdateDto
+    {
+        public bool? require_remaining_before_delivery { get; set; }
     }
 
     public class MaterialPricesUpdateDto

@@ -9,8 +9,6 @@ namespace AMMS.Shared.DTOs.Productions
     public class ConfirmProductionReadyRequest
     {
         public bool is_production_ready { get; set; }
-        public bool is_full_process { get; set; } = true;
-        public int? sub_id { get; set; }
     }
 
     public class ProductionReadyCheckResponse

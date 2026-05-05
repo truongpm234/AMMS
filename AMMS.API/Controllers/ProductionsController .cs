@@ -23,19 +23,21 @@ namespace AMMS.API.Controllers
         private readonly IBackgroundJobClient _backgroundJobClient;
         private readonly ILogger<ProductionsController> _logger;
         private readonly IMaterialService _materialService;
-
+        private readonly IDealService _dealService;
         public ProductionsController(
     IProductionService service,
     IProductionSchedulingService svc,
     IBackgroundJobClient backgroundJobClient,
     ILogger<ProductionsController> logger,
-    IMaterialService materialService)
+    IMaterialService materialService,
+    IDealService dealService)
         {
             _service = service;
             _svc = svc;
             _backgroundJobClient = backgroundJobClient;
             _logger = logger;
             _materialService = materialService;
+            _dealService = dealService;
         }
 
         private int? GetRoleId()
@@ -138,19 +140,11 @@ namespace AMMS.API.Controllers
         }
 
         [HttpPut("start-ready/{orderId:int}")]
-        public async Task<IActionResult> SetProductionReady(
-    int orderId,
-    [FromBody] ConfirmProductionReadyRequest req,
-    CancellationToken ct)
+        public async Task<IActionResult> SetProductionReady(int orderId, [FromBody] ConfirmProductionReadyRequest req, CancellationToken ct)
         {
             try
             {
-                var ok = await _service.SetProductionReadyAsync(
-                    orderId,
-                    req.is_production_ready,
-                    req.is_full_process,
-                    req.sub_id,
-                    ct);
+                var ok = await _service.SetProductionReadyAsync(orderId, req.is_production_ready, ct);
 
                 if (!ok)
                     return NotFound(new { message = "Order not found" });
@@ -158,17 +152,7 @@ namespace AMMS.API.Controllers
                 return Ok(new
                 {
                     order_id = orderId,
-                    is_production_ready = req.is_production_ready,
-                    is_full_process = req.is_full_process,
-                    sub_id = req.sub_id,
-                    production_method = req.is_full_process
-                        ? "FullProcess"
-                        : "UseSubProduct",
-                    message = req.is_production_ready
-                        ? req.is_full_process
-                            ? "General manager confirmed production readiness with full process."
-                            : "General manager confirmed production readiness using selected sub_product."
-                        : "Production readiness confirmation has been removed."
+                    is_production_ready = req.is_production_ready,                   
                 });
             }
             catch (InvalidOperationException ex)
@@ -190,6 +174,55 @@ namespace AMMS.API.Controllers
             }
         }
 
+        [HttpPost("production-method")]
+        public async Task<IActionResult> SetProductionMethod(
+    [FromBody] SetProductionMethodRequest req,
+    CancellationToken ct)
+        {
+            if (req == null || req.order_id <= 0)
+            {
+                return BadRequest(new
+                {
+                    message = "order_id is required"
+                });
+            }
+
+            try
+            {
+                var result = await _service.SetProductionMethodAsync(req, ct);
+
+                if (result == null)
+                {
+                    return NotFound(new
+                    {
+                        message = "Order not found",
+                        order_id = req.order_id
+                    });
+                }
+
+                return Ok(result);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message,
+                    order_id = req.order_id,
+                    is_full_process = req.is_full_process,
+                    sub_id = req.sub_id
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    message = "Set production method failed",
+                    detail = ex.Message,
+                    order_id = req.order_id
+                });
+            }
+        }
+
         [HttpPost("start/{orderId:int}")]
         public async Task<IActionResult> StartProduction(int orderId, CancellationToken ct)
         {
@@ -205,7 +238,7 @@ namespace AMMS.API.Controllers
                     message = "Production started successfully",
                     prod_id = prodId.Value,
                     first_task_status = "Unassigned",
-                    start_mode = "ManualReadyByStaff"
+                    start_mode = "ManualReady"
                 });
             }
             catch (BomValidationException ex)
@@ -255,6 +288,7 @@ namespace AMMS.API.Controllers
                     "Failed to enqueue DeliveryHandoverEmailJob. orderId={OrderId}",
                     orderId);
             }
+            await _dealService.SendRemainingPaymentEmailAsync(orderId, ct);
 
             return NoContent();
         }

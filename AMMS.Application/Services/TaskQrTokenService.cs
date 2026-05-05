@@ -35,11 +35,7 @@ namespace AMMS.Application.Services
         public string CreateToken(int taskId, int qtyGood, TimeSpan ttl)
             => CreateToken(taskId, qtyGood, null, ttl);
 
-        public string CreateToken(
-            int taskId,
-            int qtyGood,
-            IReadOnlyList<TaskMaterialUsageInputDto>? materials,
-            TimeSpan ttl)
+        public string CreateToken(int taskId, int qtyGood, IReadOnlyList<TaskMaterialUsageInputDto>? materials, TimeSpan ttl)
         {
             if (taskId <= 0)
                 throw new ArgumentException("taskId must be > 0");
@@ -266,7 +262,6 @@ namespace AMMS.Application.Services
                 .ToList();
         }
 
-        // scale 4 số lẻ để giữ đúng logic hiện tại
         private static ulong ToScaledUInt64(decimal value)
         {
             if (value < 0)

@@ -16,7 +16,7 @@ namespace AMMS.Infrastructure.Interfaces
         Task<int> SaveChangesAsync();
         Task<int> CountAsync();
         Task<List<RequestPagedDto>> GetPagedAsync(int skip, int takePlusOne, int? consultantUserId = null);
-        Task<RequestPagedDto?> GetByOrderIdAsync(int orderId, int? consultantUserId = null);
+        Task<RequestPagedDto?> GetByOrderIdAsync(int orderId);
         Task<RequestWithCostDto?> GetByIdWithCostAsync(int id, int? consultantUserId = null);
         Task<bool> AnyOrderLinkedAsync(int requestId);
         Task<bool> HasEnoughStockForRequestAsync(int requestId, CancellationToken ct = default);

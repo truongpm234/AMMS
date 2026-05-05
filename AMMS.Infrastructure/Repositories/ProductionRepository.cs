@@ -409,6 +409,7 @@ namespace AMMS.Infrastructure.Repositories
                 length_mm = header.first_item?.i_length,
                 width_mm = header.first_item?.i_width,
                 height_mm = header.first_item?.i_height,
+                is_full_process = header.pr.is_full_process,
             };
 
             order_request? orderReq = null;
@@ -1879,6 +1880,205 @@ namespace AMMS.Infrastructure.Repositories
                 .Where(x => x.order_id == orderId)
                 .OrderByDescending(x => x.prod_id)
                 .FirstOrDefaultAsync(ct);
+        }
+
+        public async Task<SetProductionMethodResponse?> SetProductionMethodAsync(
+    SetProductionMethodRequest req,
+    CancellationToken ct = default)
+        {
+            if (req == null)
+                throw new InvalidOperationException("Request body is required.");
+
+            if (req.order_id <= 0)
+                throw new InvalidOperationException("order_id không hợp lệ.");
+
+            var strategy = _db.Database.CreateExecutionStrategy();
+
+            return await strategy.ExecuteAsync(async () =>
+            {
+                await using var tx = await _db.Database.BeginTransactionAsync(ct);
+
+                var order = await _db.orders
+                    .FirstOrDefaultAsync(x => x.order_id == req.order_id, ct);
+
+                if (order == null)
+                    return null;
+
+                var prod = await _db.productions
+                    .Where(x => x.order_id == req.order_id)
+                    .OrderByDescending(x => x.prod_id)
+                    .FirstOrDefaultAsync(ct);
+
+                if (prod == null)
+                    throw new InvalidOperationException("Production not found for this order.");
+
+                if (string.Equals(prod.status, "InProcessing", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(prod.status, "Importing", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(prod.status, "Delivery", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(prod.status, "Completed", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        "Không thể thay đổi phương thức sản xuất vì đơn hàng đã bắt đầu hoặc đã hoàn tất sản xuất.");
+                }
+
+                var orderReq = await _db.order_requests
+                    .AsNoTracking()
+                    .Where(x => x.order_id == req.order_id)
+                    .OrderByDescending(x => x.order_request_id)
+                    .FirstOrDefaultAsync(ct);
+
+                if (orderReq == null)
+                    throw new InvalidOperationException("Order request not found for this order.");
+
+                var orderQty = orderReq.quantity ?? 0;
+
+                if (orderQty <= 0)
+                {
+                    orderQty = await _db.order_items
+                        .AsNoTracking()
+                        .Where(x => x.order_id == req.order_id)
+                        .OrderBy(x => x.item_id)
+                        .Select(x => x.quantity)
+                        .FirstOrDefaultAsync(ct);
+                }
+
+                if (orderQty <= 0)
+                    throw new InvalidOperationException("Số lượng đơn hàng không hợp lệ.");
+
+                // Nếu production trước đó đang dùng bán thành phẩm, thì hoàn lại số lượng đã trừ trước khi đổi phương thức.
+                if (prod.is_full_process == false
+                    && prod.sub_product_id.HasValue
+                    && prod.sub_product_used_qty > 0)
+                {
+                    var oldSubProduct = await _db.sub_products
+                        .FirstOrDefaultAsync(x => x.id == prod.sub_product_id.Value, ct);
+
+                    if (oldSubProduct != null)
+                    {
+                        oldSubProduct.quantity += prod.sub_product_used_qty;
+                    }
+
+                    prod.sub_product_id = null;
+                    prod.sub_product_used_qty = 0;
+                }
+
+                // CASE 1: Sản xuất đầy đủ quy trình
+                if (req.is_full_process)
+                {
+                    prod.is_full_process = true;
+                    prod.sub_product_id = null;
+                    prod.sub_product_used_qty = 0;
+
+                    await _db.SaveChangesAsync(ct);
+                    await tx.CommitAsync(ct);
+
+                    return new SetProductionMethodResponse
+                    {
+                        success = true,
+                        order_id = order.order_id,
+                        prod_id = prod.prod_id,
+
+                        is_full_process = true,
+                        sub_product_id = null,
+                        sub_product_used_qty = 0,
+
+                        order_quantity = orderQty,
+                        production_method = "FullProcess",
+                        message = "Đã chọn phương thức sản xuất đầy đủ quy trình."
+                    };
+                }
+
+                // CASE 2: Dùng bán thành phẩm
+                if (!req.sub_id.HasValue || req.sub_id.Value <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "Vui lòng truyền sub_id khi chọn phương thức sản xuất bằng bán thành phẩm.");
+                }
+
+                if (!prod.product_type_id.HasValue || prod.product_type_id.Value <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "Production chưa có product_type_id nên không thể kiểm tra bán thành phẩm.");
+                }
+
+                if (!orderReq.print_width_mm.HasValue || orderReq.print_width_mm.Value <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "Order request chưa có print_width_mm nên không thể kiểm tra bán thành phẩm.");
+                }
+
+                if (!orderReq.print_length_mm.HasValue || orderReq.print_length_mm.Value <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "Order request chưa có print_length_mm nên không thể kiểm tra bán thành phẩm.");
+                }
+
+                var selectedSubProduct = await _db.sub_products
+                    .Include(x => x.product_type)
+                    .FirstOrDefaultAsync(x => x.id == req.sub_id.Value, ct);
+
+                if (selectedSubProduct == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Không tìm thấy bán thành phẩm có id = {req.sub_id.Value}.");
+                }
+
+                if (!selectedSubProduct.is_active)
+                {
+                    throw new InvalidOperationException(
+                        "Bán thành phẩm đã chọn đang không hoạt động.");
+                }
+
+                if (selectedSubProduct.product_type_id != prod.product_type_id.Value)
+                {
+                    throw new InvalidOperationException(
+                        "Bán thành phẩm đã chọn không cùng loại sản phẩm với production.");
+                }
+
+                if (selectedSubProduct.width != orderReq.print_width_mm.Value)
+                {
+                    throw new InvalidOperationException(
+                        $"Bán thành phẩm đã chọn không đúng chiều rộng. " +
+                        $"Yêu cầu: {orderReq.print_width_mm.Value}, thực tế: {selectedSubProduct.width}.");
+                }
+
+                if (selectedSubProduct.length != orderReq.print_length_mm.Value)
+                {
+                    throw new InvalidOperationException(
+                        $"Bán thành phẩm đã chọn không đúng chiều dài. " +
+                        $"Yêu cầu: {orderReq.print_length_mm.Value}, thực tế: {selectedSubProduct.length}.");
+                }
+
+                if (selectedSubProduct.quantity < orderQty)
+                {
+                    throw new InvalidOperationException(
+                        $"Số lượng bán thành phẩm không đủ. Cần: {orderQty}, hiện có: {selectedSubProduct.quantity}.");
+                }
+
+                selectedSubProduct.quantity -= orderQty;
+
+                prod.is_full_process = false;
+                prod.sub_product_id = selectedSubProduct.id;
+                prod.sub_product_used_qty = orderQty;
+
+                await _db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
+
+                return new SetProductionMethodResponse
+                {
+                    success = true,
+                    order_id = order.order_id,
+                    prod_id = prod.prod_id,
+
+                    is_full_process = false,
+                    sub_product_id = selectedSubProduct.id,
+                    sub_product_used_qty = orderQty,
+
+                    order_quantity = orderQty,
+                    production_method = "UseSubProduct",
+                    message = "Đã chọn phương thức sản xuất bằng bán thành phẩm."
+                };
+            });
         }
 
         private static string RemoveDiacriticsForMaterial(string? text)

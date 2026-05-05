@@ -21,6 +21,7 @@
         public int quantity { get; set; }
         public string? packaging_standard { get; set; }
         public int? product_type_id { get; set; }
+        public bool is_full_process { get; set; }
 
         // Kích thước
         public int? length_mm { get; set; }

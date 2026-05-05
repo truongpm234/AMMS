@@ -11,6 +11,12 @@
         public PlatePriceConfig PlatePrices { get; set; } = null!;
         public PaymentTermsConfig PaymentTerms { get; set; } = null!;
         public PlanningConfig Planning { get; set; } = null!;
+        public DeliveryPaymentConfig DeliveryPayment { get; set; } = null!;
+    }
+
+    public class DeliveryPaymentConfig
+    {
+        public bool require_remaining_before_delivery { get; set; } = true;
     }
 
     public class PlanningConfig

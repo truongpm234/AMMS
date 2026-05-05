@@ -308,6 +308,11 @@ namespace AMMS.Infrastructure.Repositories
                     lamination_material_id = ce != null ? ce.lamination_material_id : null,
                     lamination_material_code = ce != null ? ce.lamination_material_code : null,
                     lamination_material_name = ce != null ? ce.lamination_material_name : null,
+                    require_remaining_before_delivery =_db.estimate_config.AsNoTracking().Where(c =>c.config_group == "deliveryPayment" &&
+            c.config_key == "require_remaining_before_delivery")
+        .OrderByDescending(c => c.updated_at)
+        .Select(c => c.value_bool)
+        .FirstOrDefault() ?? true,
                 }
             )
             .Skip(skip)
@@ -315,10 +320,17 @@ namespace AMMS.Infrastructure.Repositories
             .ToListAsync();
         }
 
-        public async Task<RequestPagedDto?> GetByOrderIdAsync(int orderId, int? consultantUserId = null)
+        public async Task<RequestPagedDto?> GetByOrderIdAsync(int orderId)
         {
             var requestQuery = _db.order_requests.AsNoTracking();
-
+            var requireRemainingBeforeDelivery = await _db.estimate_config
+    .AsNoTracking()
+    .Where(x =>
+        x.config_group == "deliveryPayment" &&
+        x.config_key == "require_remaining_before_delivery")
+    .OrderByDescending(x => x.updated_at)
+    .Select(x => x.value_bool)
+    .FirstOrDefaultAsync() ?? true;
             return await (
                 from r in requestQuery
                 where r.order_id == orderId
@@ -425,6 +437,7 @@ namespace AMMS.Infrastructure.Repositories
                     lamination_material_id = ce != null ? ce.lamination_material_id : null,
                     lamination_material_code = ce != null ? ce.lamination_material_code : null,
                     lamination_material_name = ce != null ? ce.lamination_material_name : null,
+                    require_remaining_before_delivery = requireRemainingBeforeDelivery
                 }
             ).FirstOrDefaultAsync();
         }

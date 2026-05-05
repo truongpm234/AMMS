@@ -35,10 +35,32 @@ namespace AMMS.Infrastructure.Repositories
                 Design = MapDesign(rows),
                 PlatePrices = MapPlatePrices(rows),
                 PaymentTerms = MapPaymentTerms(rows),
-                Planning = planning
+                Planning = planning,
+                DeliveryPayment = MapDeliveryPayment(rows)
+
             };
 
             return dto;
+        }
+
+        private static DeliveryPaymentConfig MapDeliveryPayment(List<estimate_config> rows)
+        {
+            bool GetBool(string key, bool fallback)
+            {
+                var value = rows
+                    .Where(x => x.config_group == "deliveryPayment" && x.config_key == key)
+                    .OrderByDescending(x => x.updated_at)
+                    .Select(x => x.value_bool)
+                    .FirstOrDefault();
+
+                return value ?? fallback;
+            }
+
+            return new DeliveryPaymentConfig
+            {
+                require_remaining_before_delivery =
+                    GetBool("require_remaining_before_delivery", true)
+            };
         }
 
         private static PlanningConfig MapPlanning(List<estimate_config> rows)
@@ -512,6 +534,16 @@ namespace AMMS.Infrastructure.Repositories
                 await UpsertNumericAsync("paymentTerms", "remaining_percent", remaining, now, ct);
             }
 
+            if (dto.delivery_payment?.require_remaining_before_delivery.HasValue == true)
+            {
+                await UpsertBoolAsync(
+                    "deliveryPayment",
+                    "require_remaining_before_delivery",
+                    dto.delivery_payment.require_remaining_before_delivery.Value,
+                    now,
+                    ct);
+            }
+
             // 9) PLANNING
             if (dto.planning != null)
             {
@@ -524,6 +556,31 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             await _db.SaveChangesAsync(ct);
+        }
+
+        private async Task UpsertBoolAsync(
+    string group,
+    string key,
+    bool value,
+    DateTime now,
+    CancellationToken ct)
+        {
+            var row = await _db.Set<estimate_config>()
+                .FirstOrDefaultAsync(x => x.config_group == group && x.config_key == key, ct);
+
+            if (row == null)
+            {
+                row = new estimate_config
+                {
+                    config_group = group,
+                    config_key = key
+                };
+
+                await _db.Set<estimate_config>().AddAsync(row, ct);
+            }
+
+            row.value_bool = value;
+            row.updated_at = now;
         }
 
         private async Task UpsertNumericIfHasValueAsync(
@@ -650,7 +707,6 @@ namespace AMMS.Infrastructure.Repositories
             if (!string.IsNullOrWhiteSpace(dto.unit))
                 row.value_text = dto.unit.Trim();
 
-            // Giữ comment/note cố định để FE đọc Swagger, không cho FE sửa config_key/group
             row.value_json = GetProcessCostMetaJson(processCode, row.value_json);
             row.updated_at = now;
         }

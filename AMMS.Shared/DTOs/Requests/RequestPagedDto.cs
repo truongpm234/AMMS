@@ -102,5 +102,6 @@ namespace AMMS.Shared.DTOs.Requests
         public int? lamination_material_id { get; set; }
         public string? lamination_material_code { get; set; }
         public string? lamination_material_name { get; set; }
+        public bool require_remaining_before_delivery { get; set; }
     }
 }
