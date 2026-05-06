@@ -197,10 +197,10 @@ namespace AMMS.Application.Services
 
                         if (request != null)
                         {
-                            await _hub.Clients.Group(RealtimeGroups.ByRole("warehouse manager")).SendAsync(
-                                "Importing",
-                                new { message = $"Đơn hàng {ord.order_id} đã được sản xuất xong, chờ nhập kho" },
-                                innerCt);
+                            //await _hub.Clients.Group(RealtimeGroups.ByRole("warehouse manager")).SendAsync(
+                            //    "Importing",
+                            //    new { message = $"Đơn hàng {ord.order_id} đã được sản xuất xong, chờ nhập kho" },
+                            //    innerCt);
                             await _hub.Clients.Group(RealtimeGroups.ByRole("general manager")).SendAsync(
                                 "Importing",
                                 new { message = $"Đơn hàng {ord.order_id} đã được sản xuất xong, chờ nhập kho" },
