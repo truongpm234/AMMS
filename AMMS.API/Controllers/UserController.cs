@@ -113,6 +113,17 @@ namespace AMMS.API.Controllers
             return Ok();
         }
 
+        [HttpGet("/get-user-by-id/{user_id:int}")]
+        public async Task<IActionResult> GetUserById([FromRoute] int user_id)
+        {
+            var user = await _userService.GetUserById(user_id);
+            if (user != null)
+            {
+                return Ok(user);
+            }
+            return NotFound();
+        }
+
         [HttpPost("upload-users")]
         public async Task<IActionResult> UploadUsers(IFormFile file)
         {

@@ -51,6 +51,11 @@ namespace AMMS.Application.Services
             return await _userRepository.UpdateCreateUser(new_user, user_id);
         }
 
+        public async Task<user?> GetUserById(int user_id)
+        {
+            return await _userRepository.GetByIdAsync(user_id);
+        }
+
         public async Task<List<user>> GetAllUser()
         {
             return await _userRepository.GetAllUser();

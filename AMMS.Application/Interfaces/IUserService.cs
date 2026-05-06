@@ -11,5 +11,6 @@ namespace AMMS.Application.Interfaces
         Task<user?> AdminCreateUpdateNewUser(UserUpdateCreateDto new_user, int? user_id);
         Task<List<user>> GetAllUser();
         Task ResetPasswordAsync(ResetPasswordRequest request);
+        Task<user?> GetUserById(int user_id);
     }
 }
