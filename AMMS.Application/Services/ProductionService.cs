@@ -202,7 +202,7 @@ namespace AMMS.Application.Services
                 request_print_length_mm = req?.print_length_mm,
                 order_quantity = req?.quantity,
 
-                is_full_process = prod.is_full_process,
+                is_full_process = (bool)prod.is_full_process,
                 selected_sub_product_id = prod?.sub_product_id,
                 sub_product_used_qty = prod?.sub_product_used_qty ?? 0,
 

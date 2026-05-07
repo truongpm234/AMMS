@@ -1094,7 +1094,7 @@ namespace AMMS.Application.Services
         {
             var empty = new SubProductCompletedContext();
 
-            if (prod.is_full_process)
+            if ((bool)prod.is_full_process)
                 return empty;
 
             if (!prod.sub_product_id.HasValue || prod.sub_product_id.Value <= 0)

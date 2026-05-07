@@ -410,7 +410,7 @@ namespace AMMS.Infrastructure.Repositories
                 length_mm = header.first_item?.i_length,
                 width_mm = header.first_item?.i_width,
                 height_mm = header.first_item?.i_height,
-                is_full_process = header.pr.is_full_process,
+                is_full_process = (bool)header.pr.is_full_process,
             };
 
             order_request? orderReq = null;
@@ -2249,9 +2249,6 @@ namespace AMMS.Infrastructure.Repositories
 
         /// <summary>
         /// Khi production đã có task rồi, chọn sub_product sẽ tự Finished các task từ đầu route
-        /// đến công đoạn được ghi trong sub_product.product_process.
-        /// Ví dụ product_process = "CAT" => Finished RALO + CAT.
-        /// Ví dụ product_process = "CAN" => Finished RALO + CAT + IN + PHU + CAN.
         /// </summary>
         private async Task ApplySubProductToExistingTasksAsync(
             production prod,
@@ -2259,7 +2256,7 @@ namespace AMMS.Infrastructure.Repositories
             int orderQty,
             CancellationToken ct)
         {
-            if (prod.is_full_process)
+            if ((bool)prod.is_full_process)
                 return;
 
             if (string.IsNullOrWhiteSpace(selectedSubProduct.product_process))

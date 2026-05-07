@@ -63,9 +63,8 @@ namespace AMMS.Infrastructure.Repositories
         Status = o.status ?? "",
         is_production_ready = o.is_production_ready,
         customer_name = r != null ? (r.customer_name ?? "") : "Khách hàng",
-
+        is_full_process = p != null ? (bool?)p.is_full_process : null,
         import_recieve_path = p != null ? p.import_recieve_path : null,
-
         FirstItem = _db.order_items.AsNoTracking()
             .Where(i => i.order_id == o.order_id)
             .OrderBy(i => i.item_id)
@@ -234,6 +233,7 @@ namespace AMMS.Infrastructure.Repositories
                     status = o.Status,
                     can_fulfill = canFulfill,
                     is_production_ready = o.is_production_ready,
+                    is_full_process = o.is_full_process,
                     missing_materials = canFulfill == false
                         ? (missingMaterials ?? new List<MissingMaterialDto>())
                         : null,

@@ -29,7 +29,7 @@ public partial class production
 
     public string? note { get; set; }
 
-    public bool is_full_process { get; set; } = true;
+    public bool? is_full_process { get; set; }
 
     public int? sub_product_id { get; set; }
 

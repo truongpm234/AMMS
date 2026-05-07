@@ -21,6 +21,7 @@ namespace AMMS.Shared.DTOs.Orders
         public List<MissingMaterialDto>? missing_materials { get; set; }
         public bool layout_confirmed { get; set; }
         public bool is_production_ready { get; set; }
+        public bool? is_full_process { get; set; }
         public string? import_recieve_path { get; set; }
 
     }
