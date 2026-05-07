@@ -11,8 +11,6 @@ namespace AMMS.Application.Services
     {
         private const byte TokenVersion = 1;
 
-        // càng nhỏ thì token càng ngắn, nhưng vẫn phải đủ an toàn
-        // 10 byte = 80-bit MAC, khá ổn cho nghiệp vụ QR nội bộ
         private const int SignatureLength = 10;
 
         // chỉ gồm số + chữ, không ký tự đặc biệt

@@ -85,7 +85,9 @@ namespace AMMS.Application.Services
             {
                 throw new ArgumentOutOfRangeException(
                     nameof(req.token),
-                    $"qty_good={qtyGood} vượt ngoài khoảng cho phép {policy.min_allowed}..{policy.max_allowed} {policy.qty_unit} của công đoạn {policy.process_code}.");
+                    $"qty_good={qtyGood} không hợp lệ. " +
+                    $"Công đoạn [{policy.process_code} - {policy.process_name}] " +
+                    $"chỉ cho phép báo cáo trong khoảng {policy.min_allowed}..{policy.max_allowed} {policy.qty_unit}.");
             }
 
             var result = await _taskRepo.ExecuteInTransactionAsync(async innerCt =>
@@ -1545,13 +1547,6 @@ namespace AMMS.Application.Services
         {
             return string.Equals(status, "InProcessing", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(status, "Importing", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool IsLockedAfterProduction(string? status)
-        {
-            return string.Equals(status, "Delivery", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(status, "Completed", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(status, "Finished", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string ShowStatus(string? status)

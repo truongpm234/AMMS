@@ -676,13 +676,25 @@ namespace AMMS.Application.Services
 
             var allowRemainingPayment =
                 string.Equals(prodStatus, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(prodStatus, "Importing", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(prodStatus, "PendingPaid", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(prodStatus, "Paid", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(prodStatus, "PendingPaid", StringComparison.OrdinalIgnoreCase);
+                string.Equals(prodStatus, "Delivery", StringComparison.OrdinalIgnoreCase);
 
             if (!allowRemainingPayment)
             {
                 throw new InvalidOperationException(
-                    "Production must be Finished, PendingPaid or Paid before remaining payment.");
+                    $"Production must be Finished, Importing, PendingPaid, Paid or Delivery before remaining payment. Current={prodStatus}");
+            }
+
+            var latestRemaining = await _paymentRepo.GetLatestByRequestIdAndTypeAsync(
+                req.order_request_id,
+                PaymentTypes.Remaining,
+                ct);
+
+            if (latestRemaining != null && IsPaidStatus(latestRemaining.status))
+            {
+                return;
             }
 
             if (string.IsNullOrWhiteSpace(req.customer_email))
@@ -698,7 +710,12 @@ namespace AMMS.Application.Services
             var paymentPageUrl = $"{feBase}/payment/{id}";
 
             var html = RemainingPaymentEmailTemplates.BuildOrderFinishedRemainingPaymentEmail(
-                req, ord, prod, est, remainingAmount, paymentPageUrl);
+                req,
+                ord,
+                prod,
+                est,
+                remainingAmount,
+                paymentPageUrl);
 
             await _emailQueue.QueueAsync(new EmailQueueItem(
                 req.customer_email!,
@@ -708,8 +725,219 @@ namespace AMMS.Application.Services
             ord.status = "PendingPaid";
             req.process_status = "PendingPaid";
             prod.status = "PendingPaid";
-            await _db.SaveChangesAsync();
-            await _hub.Clients.All.SendAsync("PendingPaid", new { message = "PendingPaid" });
+
+            await _db.SaveChangesAsync(ct);
+
+            await _hub.Clients.Group(RealtimeGroups.ByRole("consultant, warehouse manager")).SendAsync(
+                "pending-paid",
+                new
+                {
+                    message = $"Đơn hàng {ord.code} đã được gửi email yêu cầu thanh toán phần còn lại.",
+                    order_id = id,
+                    request_id = req.order_request_id
+                },
+                ct);
+
+            await _hub.Clients.All.SendAsync(
+                "PendingPaid",
+                new
+                {
+                    message = "PendingPaid",
+                    order_id = id,
+                    request_id = req.order_request_id
+                },
+                ct);
+
+            await _hub.Clients.All.SendAsync("update-ui", new { message = "Đã gửi yêu cầu thành toán phần còn lại đơn hàng." }, ct);
+        }
+
+        public async Task NotifyRemainingPaidAsync(
+    int orderId,
+    decimal paidAmount,
+    DateTime paidAt,
+    CancellationToken ct = default)
+        {
+            var req = await _requestRepo.GetByOrderIdAsync(orderId, ct)
+                ?? throw new InvalidOperationException("Order request not found for order");
+
+            var ord = await _orderRepo.GetByIdAsync(orderId)
+                ?? throw new InvalidOperationException("Order not found");
+
+            var prod = await _prodRepo.GetLatestByOrderIdAsync(orderId, ct);
+
+            var est = await ResolveAcceptedEstimateAsync(req, ct);
+
+            static string FormatVND(decimal amount)
+                => string.Format("{0:N0} đ", amount);
+
+            var orderCode = !string.IsNullOrWhiteSpace(ord.code)
+                ? ord.code
+                : $"ORD-{orderId:D5}";
+
+            var finalTotal = est.final_total_cost;
+            var depositAmount = PaymentAmountHelper.GetDepositDisplayAmount(est);
+            var remainingAmount = PaymentAmountHelper.GetRemainingDisplayAmount(est);
+
+            var message =
+                $"Đơn hàng {orderCode} đã được thanh toán phần còn lại: {FormatVND(paidAmount)}.";
+
+            try
+            {
+                await SendConsultantStatusEmailAsync(
+                    req,
+                    est,
+                    statusText: "KHÁCH ĐÃ THANH TOÁN PHẦN CÒN LẠI",
+                    paidAmount: paidAmount,
+                    paidAt: paidAt,
+                    ct: ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Send consultant remaining paid email failed. OrderId={OrderId}, RequestId={RequestId}",
+                    orderId,
+                    req.order_request_id);
+            }
+
+            if (!string.IsNullOrWhiteSpace(req.customer_email))
+            {
+                var htmlCustomer = $@"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset='utf-8'>
+</head>
+<body style='margin:0; padding:30px 0; background:#f1f5f9; font-family:Arial,sans-serif;'>
+    <div style='max-width:620px; margin:0 auto; background:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 4px 12px rgba(0,0,0,0.08);'>
+        <div style='background:linear-gradient(135deg,#16a34a 0%,#15803d 100%); padding:26px; text-align:center; color:white;'>
+            <div style='font-size:20px; font-weight:700;'>THANH TOÁN THÀNH CÔNG</div>
+            <div style='font-size:13px; margin-top:6px;'>Hệ thống đã ghi nhận thanh toán phần còn lại</div>
+        </div>
+
+        <div style='padding:28px; color:#1e293b;'>
+            <p style='font-size:15px; line-height:1.6; margin-top:0;'>
+                Chào <b>{System.Net.WebUtility.HtmlEncode(req.customer_name ?? "Quý khách")}</b>,
+            </p>
+
+            <p style='font-size:14px; line-height:1.6;'>
+                Cảm ơn quý khách. Hệ thống đã ghi nhận khoản thanh toán phần còn lại cho đơn hàng <b>{orderCode}</b>.
+            </p>
+
+            <div style='background:#f0fdf4; border:1px solid #bbf7d0; border-radius:10px; padding:18px; margin:22px 0;'>
+                <table width='100%' style='border-collapse:collapse;'>
+                    <tr>
+                        <td style='font-size:13px; color:#64748b; padding:6px 0;'>Mã đơn hàng</td>
+                        <td style='font-size:13px; font-weight:700; text-align:right; padding:6px 0;'>{orderCode}</td>
+                    </tr>
+                    <tr>
+                        <td style='font-size:13px; color:#64748b; padding:6px 0;'>Sản phẩm</td>
+                        <td style='font-size:13px; font-weight:700; text-align:right; padding:6px 0;'>{System.Net.WebUtility.HtmlEncode(req.product_name ?? "")}</td>
+                    </tr>
+                    <tr>
+                        <td style='font-size:13px; color:#64748b; padding:6px 0;'>Tổng giá trị</td>
+                        <td style='font-size:13px; font-weight:700; text-align:right; padding:6px 0;'>{FormatVND(finalTotal)}</td>
+                    </tr>
+                    <tr>
+                        <td style='font-size:13px; color:#64748b; padding:6px 0;'>Đặt cọc</td>
+                        <td style='font-size:13px; font-weight:700; text-align:right; padding:6px 0;'>{FormatVND(depositAmount)}</td>
+                    </tr>
+                    <tr>
+                        <td style='font-size:14px; color:#15803d; font-weight:700; padding:10px 0; border-top:1px dashed #86efac;'>Thanh toán phần còn lại</td>
+                        <td style='font-size:16px; color:#15803d; font-weight:800; text-align:right; padding:10px 0; border-top:1px dashed #86efac;'>{FormatVND(paidAmount)}</td>
+                    </tr>
+                    <tr>
+                        <td style='font-size:13px; color:#64748b; padding:6px 0;'>Thời gian thanh toán</td>
+                        <td style='font-size:13px; font-weight:700; text-align:right; padding:6px 0;'>{paidAt:dd/MM/yyyy HH:mm:ss}</td>
+                    </tr>
+                </table>
+            </div>
+
+            <p style='font-size:14px; line-height:1.6;'>
+                Đơn hàng của quý khách đã hoàn tất thanh toán. Doanh nghiệp sẽ tiếp tục xử lý các bước giao nhận theo quy trình.
+            </p>
+        </div>
+
+        <div style='background:#f8fafc; padding:14px; text-align:center; color:#94a3b8; font-size:12px;'>
+            Email này được gửi tự động từ hệ thống AMMS.
+        </div>
+    </div>
+</body>
+</html>";
+
+                try
+                {
+                    await _emailQueue.QueueAsync(new EmailQueueItem(
+                        req.customer_email!,
+                        $"[MES] Xác nhận thanh toán phần còn lại - Đơn {orderCode}",
+                        htmlCustomer));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Queue customer remaining paid email failed. OrderId={OrderId}, RequestId={RequestId}",
+                        orderId,
+                        req.order_request_id);
+                }
+            }
+
+            var payload = new
+            {
+                message,
+                order_id = orderId,
+                request_id = req.order_request_id,
+                amount = paidAmount,
+                paid_at = paidAt
+            };
+
+            await _hub.Clients.Group(RealtimeGroups.ByRole("consultant"))
+                .SendAsync("remaining-paid", payload, ct);
+
+            await _hub.Clients.Group(RealtimeGroups.ByRole("warehouse manager"))
+                .SendAsync("remaining-paid", payload, ct);
+
+            await _hub.Clients.Group(RealtimeGroups.ByRole("warehouse"))
+                .SendAsync("remaining-paid", payload, ct);
+
+            await _hub.Clients.Group(RealtimeGroups.ByRole("general manager"))
+                .SendAsync("remaining-paid", payload, ct);
+
+            await _hub.Clients.All.SendAsync(
+                "Paid",
+                new
+                {
+                    message = "Paid",
+                    order_id = orderId,
+                    request_id = req.order_request_id
+                },
+                ct);
+
+            await _hub.Clients.All.SendAsync(
+                "update-ui",
+                new { message = "update UI" },
+                ct);
+
+            await _notificationService.CreateNotfi(
+                2,
+                message,
+                req.assigned_consultant,
+                req.order_request_id,
+                "Paid");
+
+            await _notificationService.CreateNotfi(
+                4,
+                message,
+                null,
+                req.order_request_id,
+                "Paid");
+
+            await _notificationService.CreateNotfi(
+                18,
+                message,
+                null,
+                req.order_request_id,
+                "Paid");
         }
 
         public async Task<PayOsResultDto> CreateOrReuseRemainingPaymentLinkAsync(int id, CancellationToken ct = default)

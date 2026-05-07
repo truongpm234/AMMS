@@ -272,25 +272,56 @@ namespace AMMS.API.Controllers
         [HttpPut("delivery/{orderId:int}")]
         public async Task<IActionResult> SetDelivery(int orderId, CancellationToken ct)
         {
-            var ok = await _service.SetProductionDeliveryAsync(orderId, ct);
-
-            if (!ok)
-                return NotFound(new { message = "Production not found for this orderId" });
+            var remainingEmailSent = false;
 
             try
             {
-                _backgroundJobClient.Enqueue<DeliveryHandoverEmailJob>(
-                    x => x.RunAsync(orderId, CancellationToken.None));
+                await _dealService.SendRemainingPaymentEmailAsync(orderId, ct);
+                remainingEmailSent = true;
+
+                var ok = await _service.SetProductionDeliveryAsync(orderId, ct);
+
+                if (!ok)
+                    return NotFound(new { message = "Production not found for this orderId" });
+
+                try
+                {
+                    _backgroundJobClient.Enqueue<DeliveryHandoverEmailJob>(
+                        x => x.RunAsync(orderId, CancellationToken.None));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "Failed to enqueue DeliveryHandoverEmailJob. orderId={OrderId}",
+                        orderId);
+                }
+
+                return Ok(new
+                {
+                    message = "Delivery confirmed successfully",
+                    order_id = orderId,
+                    remaining_email_sent = remainingEmailSent
+                });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message,
+                    order_id = orderId,
+                    remaining_email_sent = remainingEmailSent
+                });
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
-                    "Failed to enqueue DeliveryHandoverEmailJob. orderId={OrderId}",
-                    orderId);
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    message = "Set delivery failed",
+                    detail = ex.Message,
+                    order_id = orderId,
+                    remaining_email_sent = remainingEmailSent
+                });
             }
-            await _dealService.SendRemainingPaymentEmailAsync(orderId, ct);
-
-            return NoContent();
         }
 
         [HttpPut("competed/{orderId:int}")]

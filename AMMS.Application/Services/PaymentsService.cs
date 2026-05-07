@@ -16,6 +16,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Hosting;
 using System.Text.Json;
+using AMMS.Shared.DTOs.PayOS;
 
 namespace AMMS.Application.Services
 {
@@ -30,13 +31,15 @@ namespace AMMS.Application.Services
         private readonly IWebHostEnvironment _env;
         private readonly IBaseConfigRepository _baseconfigRepo;
         private readonly ICloudinaryFileStorageService _cloudinaryStorage;
-
+        private readonly IPayOsService _payOs;
         public PaymentsService(
             AppDbContext db,
             IRequestService requestService,
             IDealService dealService,
             IPaymentRepository paymentRepo,
-            ILogger<PaymentsService> logger, IConfiguration config, IWebHostEnvironment env, IBaseConfigRepository baseconfigRepo, ICloudinaryFileStorageService cloudinaryStorage)
+            ILogger<PaymentsService> logger, IConfiguration config, 
+            IWebHostEnvironment env, IBaseConfigRepository baseconfigRepo, 
+            ICloudinaryFileStorageService cloudinaryStorage, IPayOsService payOs)
         {
             _db = db;
             _requestService = requestService;
@@ -47,6 +50,7 @@ namespace AMMS.Application.Services
             _env = env;
             _baseconfigRepo = baseconfigRepo;
             _cloudinaryStorage = cloudinaryStorage;
+            _payOs = payOs;
         }
 
         public Task<payment?> GetPaidByProviderOrderCodeAsync(string provider, long orderCode, CancellationToken ct = default)
@@ -506,6 +510,23 @@ namespace AMMS.Application.Services
                     payosRawJson: rawJson,
                     forceGenerateWhenPayOsPaid: PayOsRawIndicatesPaid(rawJson));
 
+                try
+                {
+                    await _dealService.NotifyRemainingPaidAsync(
+                        ord.order_id,
+                        actualRemainingAmount,
+                        now,
+                        ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Notify remaining paid failed. OrderId={OrderId}, OrderCode={OrderCode}",
+                        ord.order_id,
+                        orderCode);
+                }
+
                 return (true, $"Remaining payment recorded successfully: order_id={ord.order_id}");
             });
         }
@@ -603,6 +624,22 @@ namespace AMMS.Application.Services
 
             if (payment == null)
                 return null;
+            var receiptStatus = await ResolveReceiptPaymentStatusAsync(
+    payment,
+    payosRawJson: null,
+    forceGenerateWhenPayOsPaid: false,
+    ct: ct);
+
+            if (!receiptStatus.is_paid)
+                return null;
+
+            payment.status = receiptStatus.status;
+
+            if (!payment.paid_at.HasValue)
+                payment.paid_at = receiptStatus.paid_at;
+
+            if (receiptStatus.amount.HasValue && receiptStatus.amount.Value > 0)
+                payment.amount = receiptStatus.amount.Value;
 
             var req = await _db.order_requests
                 .AsNoTracking()
@@ -687,7 +724,7 @@ namespace AMMS.Application.Services
                 ? ord!.code
                 : $"AM{req.order_request_id:D6}";
 
-            var receiptDate = payment.paid_at;
+            var receiptDate = payment.paid_at ?? receiptStatus.paid_at;
             var receiptNo = $"PT-{receiptDate:yyyyMMdd}-{payment.payment_id:D6}";
 
             var receiptContent = string.Equals(payment.payment_type, PaymentTypes.Remaining, StringComparison.OrdinalIgnoreCase)
@@ -703,8 +740,7 @@ namespace AMMS.Application.Services
                 company_info = BuildReceiptCompanyInfo(),
 
                 receipt_no = receiptNo,
-                receipt_date = (DateTime)receiptDate,
-
+                receipt_date = receiptDate,
                 payment_id = payment.payment_id,
                 provider = payment.provider,
                 payment_type = payment.payment_type ?? "",
@@ -783,6 +819,40 @@ namespace AMMS.Application.Services
             //{
             //    throw new InvalidOperationException("Payment has not been completed yet.");
             //}
+            var receiptStatus = await ResolveReceiptPaymentStatusAsync(
+    payment,
+    payosRawJson: null,
+    forceGenerateWhenPayOsPaid: false,
+    ct: ct);
+
+            if (!receiptStatus.is_paid)
+                return null;
+
+            payment.status = receiptStatus.status;
+
+            if (!payment.paid_at.HasValue)
+                payment.paid_at = receiptStatus.paid_at;
+
+            if (receiptStatus.amount.HasValue && receiptStatus.amount.Value > 0)
+                payment.amount = receiptStatus.amount.Value;
+
+            if (string.IsNullOrWhiteSpace(payment.payos_raw) &&
+                !string.IsNullOrWhiteSpace(receiptStatus.payos_raw))
+            {
+                payment.payos_raw = receiptStatus.payos_raw;
+            }
+
+            if (string.IsNullOrWhiteSpace(payment.payos_payment_link_id) &&
+                !string.IsNullOrWhiteSpace(receiptStatus.payment_link_id))
+            {
+                payment.payos_payment_link_id = receiptStatus.payment_link_id;
+            }
+
+            if (string.IsNullOrWhiteSpace(payment.payos_transaction_id) &&
+                !string.IsNullOrWhiteSpace(receiptStatus.transaction_id))
+            {
+                payment.payos_transaction_id = receiptStatus.transaction_id;
+            }
 
             var request = await _db.order_requests
                 .AsNoTracking()
@@ -820,15 +890,28 @@ namespace AMMS.Application.Services
             }
 
             var allPaidPayments = await _db.payments
-                .AsNoTracking()
-                .Where(x =>
-                    x.order_request_id == request.order_request_id &&
-                    x.provider == "PAYOS" &&
-                    (x.status == "PAID" || x.status == "SUCCESS" || x.status == "PendingPaid" || x.status == "PENDING"))
-                .ToListAsync(ct);
+    .AsNoTracking()
+    .Where(x =>
+        x.order_request_id == request.order_request_id &&
+        x.provider == "PAYOS" &&
+        (
+            x.status == "PAID" ||
+            x.status == "SUCCESS"
+        ))
+    .ToListAsync(ct);
 
             static DateTime GetSortTime(payment x)
-                => (DateTime)x.paid_at;
+            {
+                DateTime? value = x.paid_at;
+
+                if (!value.HasValue)
+                    value = x.updated_at;
+
+                if (!value.HasValue)
+                    value = x.created_at;
+
+                return value ?? DateTime.MinValue;
+            }
 
             var orderedPaidPayments = allPaidPayments
                 .OrderBy(GetSortTime)
@@ -857,7 +940,7 @@ namespace AMMS.Application.Services
                 ? "Tư vấn viên lập phiếu"
                 : request.assign_name.Trim();
 
-            var receiptDate = (DateTime)payment.paid_at;
+            var receiptDate = payment.paid_at ?? receiptStatus.paid_at;
             var receiptNo = $"PT-{receiptDate:yyyyMMdd}-{payment.payment_id:D6}";
 
             var company = new ReceiptCompanyInfo
@@ -1006,14 +1089,13 @@ namespace AMMS.Application.Services
                 if (payment == null)
                     return;
 
-                var dbPaymentPaid = IsSuccessfulPaymentStatus(payment.status);
+                var receiptStatus = await ResolveReceiptPaymentStatusAsync(
+                    payment,
+                    payosRawJson,
+                    forceGenerateWhenPayOsPaid,
+                    ct);
 
-                var payosSaysPaid =
-                    forceGenerateWhenPayOsPaid ||
-                    PayOsRawIndicatesPaid(payosRawJson) ||
-                    PayOsRawIndicatesPaid(payment.payos_raw);
-
-                if (!dbPaymentPaid && !payosSaysPaid)
+                if (!receiptStatus.is_paid)
                     return;
 
                 var request = await _db.order_requests
@@ -1069,6 +1151,89 @@ namespace AMMS.Application.Services
                     orderCode,
                     paymentType);
             }
+        }
+
+        private static DateTime ResolveReceiptPaidAt(payment payment)
+        {
+            DateTime? resolved = payment.paid_at;
+
+            if (!resolved.HasValue)
+                resolved = payment.updated_at;
+
+            if (!resolved.HasValue)
+                resolved = payment.created_at;
+
+            return resolved ?? AppTime.NowVnUnspecified();
+        }
+
+        private async Task<ReceiptPaymentStatusContext> ResolveReceiptPaymentStatusAsync(
+            payment payment,
+            string? payosRawJson = null,
+            bool forceGenerateWhenPayOsPaid = false,
+            CancellationToken ct = default)
+        {
+            var dbPaid = IsSuccessfulPaymentStatus(payment.status);
+
+            var rawPaid =
+                forceGenerateWhenPayOsPaid ||
+                PayOsRawIndicatesPaid(payosRawJson) ||
+                PayOsRawIndicatesPaid(payment.payos_raw);
+
+            PayOsResultDto? liveInfo = null;
+            var livePaid = false;
+
+            if (!dbPaid && !rawPaid)
+            {
+                try
+                {
+                    liveInfo = await _payOs.GetPaymentLinkInformationAsync(payment.order_code, ct);
+                    livePaid = IsSuccessfulPaymentStatus(liveInfo?.status);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Cannot verify PayOS status before receipt generation. OrderCode={OrderCode}",
+                        payment.order_code);
+                }
+            }
+
+            var isPaid = dbPaid || rawPaid || livePaid;
+
+            var resolvedStatus =
+                dbPaid ? payment.status :
+                rawPaid ? "PAID" :
+                livePaid ? liveInfo?.status ?? "PAID" :
+                payment.status ?? "PENDING";
+
+            decimal? resolvedAmount = null;
+
+            if (payment.amount > 0)
+                resolvedAmount = payment.amount;
+            else if (liveInfo?.amount.HasValue == true)
+                resolvedAmount = liveInfo.amount.Value;
+
+            return new ReceiptPaymentStatusContext
+            {
+                is_paid = isPaid,
+                status = resolvedStatus,
+                paid_at = ResolveReceiptPaidAt(payment),
+                amount = resolvedAmount,
+                payos_raw = liveInfo?.raw_json ?? payosRawJson ?? payment.payos_raw,
+                payment_link_id = liveInfo?.payment_link_id ?? payment.payos_payment_link_id,
+                transaction_id = liveInfo?.transaction_id ?? payment.payos_transaction_id
+            };
+        }
+
+        private sealed class ReceiptPaymentStatusContext
+        {
+            public bool is_paid { get; init; }
+            public string status { get; init; } = "PENDING";
+            public DateTime paid_at { get; init; }
+            public decimal? amount { get; init; }
+            public string? payos_raw { get; init; }
+            public string? payment_link_id { get; init; }
+            public string? transaction_id { get; init; }
         }
     }
 }

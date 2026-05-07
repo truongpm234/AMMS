@@ -358,13 +358,33 @@ namespace AMMS.Infrastructure.Repositories
                 .ToList();
 
             var qtyProfile = StageQuantityHelper.BuildPolicy(
-                currentCode: pcode,
-                currentStageIndex: currentIndex,
-                routeProcessCodes: routeCodes,
-                sheetsTotal: sheetsTotal,
-                nUp: nUp,
-                numberOfPlates: numberOfPlates,
-                tokenQtyMax: TokenQtyMax);
+    currentCode: pcode,
+    currentStageIndex: currentIndex,
+    routeProcessCodes: routeCodes,
+    sheetsTotal: sheetsTotal,
+    nUp: nUp,
+    numberOfPlates: numberOfPlates,
+    tokenQtyMax: TokenQtyMax);
+
+            var minAllowed = qtyProfile.MinAllowed;
+            var maxAllowed = qtyProfile.MaxAllowed;
+            var suggestedQty = qtyProfile.SuggestedQty;
+            var happyCaseQty = qtyProfile.SuggestedQty;
+
+            var previousActualCap = await GetPreviousFinishedQtyGoodCapAsync(
+                route,
+                currentIndex,
+                ct);
+
+            if (previousActualCap.HasValue && previousActualCap.Value > 0)
+            {
+                maxAllowed = Math.Min(maxAllowed, previousActualCap.Value);
+                if (maxAllowed <= 0)
+                    maxAllowed = previousActualCap.Value;
+
+                minAllowed = 1;
+                suggestedQty = maxAllowed;
+            }
 
             return new TaskQtyPolicyDto
             {
@@ -373,9 +393,9 @@ namespace AMMS.Infrastructure.Repositories
                 process_name = pname,
                 qty_unit = qtyProfile.QtyUnit,
 
-                min_allowed = qtyProfile.MinAllowed,
-                max_allowed = qtyProfile.MaxAllowed,
-                suggested_qty = qtyProfile.SuggestedQty,
+                min_allowed = minAllowed,
+                max_allowed = maxAllowed,
+                suggested_qty = suggestedQty,
 
                 order_qty = orderQty,
                 sheets_required = sheetsRequired,
@@ -384,7 +404,7 @@ namespace AMMS.Infrastructure.Repositories
                 n_up = nUp,
                 number_of_plates = numberOfPlates,
 
-                happy_case_qty = qtyProfile.SuggestedQty,
+                happy_case_qty = happyCaseQty,
                 stage_index = currentIndex,
                 stage_count = route.Count
             };
@@ -456,8 +476,70 @@ namespace AMMS.Infrastructure.Repositories
         private static string Norm(string? code)
             => (code ?? "").Trim().ToUpperInvariant();
 
-        private static bool IsRalo(string? code)
-            => Norm(code) is "RALO" or "RA_LO";
+        private static bool IsCutProcess(string? code)
+        {
+            var c = Norm(code);
+            return c == "CAT" || c == "CUT";
+        }
+
+        private static bool ShouldCapByPreviousActual(string? currentCode, string? previousCode)
+        {
+            var current = Norm(currentCode);
+            var previous = Norm(previousCode);
+
+            if (string.IsNullOrWhiteSpace(current) || string.IsNullOrWhiteSpace(previous))
+                return false;
+
+            if (ProductionFlowHelper.IsRalo(current))
+                return false;
+
+            if (IsCutProcess(current))
+                return false;
+
+            if (ProductionFlowHelper.IsRalo(previous))
+                return false;
+
+            return true;
+        }
+
+        private async Task<int?> GetPreviousFinishedQtyGoodCapAsync(
+            List<task> route,
+            int currentIndex,
+            CancellationToken ct = default)
+        {
+            if (route == null || route.Count == 0)
+                return null;
+
+            if (currentIndex <= 0 || currentIndex >= route.Count)
+                return null;
+
+            var current = route[currentIndex];
+            var previous = route[currentIndex - 1];
+
+            var currentCode = current.process?.process_code;
+            var previousCode = previous.process?.process_code;
+
+            if (!ShouldCapByPreviousActual(currentCode, previousCode))
+                return null;
+
+            if (!string.Equals(previous.status, "Finished", StringComparison.OrdinalIgnoreCase)
+                && previous.end_time == null)
+            {
+                return null;
+            }
+
+            var qty = await _db.task_logs
+                .AsNoTracking()
+                .Where(x =>
+                    x.task_id == previous.task_id &&
+                    x.action_type == "Finished")
+                .SumAsync(x => x.qty_good ?? 0, ct);
+
+            if (qty <= 0)
+                return null;
+
+            return qty;
+        }
 
         private static int SafePositive(int value, int fallback = 1)
             => value > 0 ? value : fallback;
