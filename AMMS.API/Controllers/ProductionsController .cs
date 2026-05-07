@@ -5,10 +5,12 @@ using AMMS.Application.Services;
 using AMMS.Shared.DTOs.Exceptions;
 using AMMS.Shared.DTOs.Orders;
 using AMMS.Shared.DTOs.Productions;
+using AMMS.Shared.DTOs.Socket;
 using AMMS.Shared.Helpers;
 using Hangfire;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using System.Security.Claims;
 
 namespace AMMS.API.Controllers
@@ -24,7 +26,11 @@ namespace AMMS.API.Controllers
         private readonly ILogger<ProductionsController> _logger;
         private readonly IMaterialService _materialService;
         private readonly IDealService _dealService;
+        private readonly IHubContext<RealtimeHub> _hub;
+        private readonly NotificationService _noti;
         public ProductionsController(
+    NotificationService noti,
+    IHubContext<RealtimeHub> hub,
     IProductionService service,
     IProductionSchedulingService svc,
     IBackgroundJobClient backgroundJobClient,
@@ -32,6 +38,8 @@ namespace AMMS.API.Controllers
     IMaterialService materialService,
     IDealService dealService)
         {
+            _noti = noti;
+            _hub = hub;
             _service = service;
             _svc = svc;
             _backgroundJobClient = backgroundJobClient;
@@ -43,7 +51,7 @@ namespace AMMS.API.Controllers
         private int? GetRoleId()
         {
             var roleIdValue =
-                User.FindFirst("roleid")?.Value ??     
+                User.FindFirst("roleid")?.Value ??
                 User.FindFirst("role_id")?.Value ??
                 User.FindFirst(ClaimTypes.Role)?.Value;
 
@@ -149,10 +157,12 @@ namespace AMMS.API.Controllers
                 if (!ok)
                     return NotFound(new { message = "Order not found" });
 
+                await _hub.Clients.Group(RealtimeGroups.ByRole("manager")).SendAsync("approve-production", new { message = $"Có đơn {orderId} cần duyệt lệnh sản xuất" });
+                await _noti.CreateNotfi(3, $"Có đơn {orderId} cần duyệt lệnh sản xuất", null, orderId, "Scheduled");
                 return Ok(new
                 {
                     order_id = orderId,
-                    is_production_ready = req.is_production_ready,                   
+                    is_production_ready = req.is_production_ready,
                 });
             }
             catch (InvalidOperationException ex)
@@ -200,6 +210,8 @@ namespace AMMS.API.Controllers
                     });
                 }
 
+                await _hub.Clients.Group(RealtimeGroups.ByRole("production manager")).SendAsync("approved-production", new { message = $"Đơn {req.order_id} đã được duyệt lệnh sản xuất" });
+                await _noti.CreateNotfi(6, $"Đơn {req.order_id} đã được duyệt lệnh sản xuất", null, req.order_id, "Scheduled");
                 return Ok(result);
             }
             catch (InvalidOperationException ex)
@@ -375,9 +387,20 @@ namespace AMMS.API.Controllers
             try
             {
                 var result = await _service.GenerateImportReceiveAsync(req.order_id, ct);
+
                 if (result == null)
                     return NotFound(new { message = "Production or order not found", orderId = req.order_id });
 
+                await _hub.Clients.Group(RealtimeGroups.ByRole("warehouse manager")).SendAsync(
+                    "Importing",
+                    new { message = $"Đơn hàng {req.order_id} đã được sản xuất xong, chờ nhập kho" },
+                    ct);
+                await _noti.CreateNotfi(
+                                4,
+                                $"Đơn hàng {req.order_id} đã được sản xuất xong, chờ nhập kho",
+                                null,
+                                req.order_id,
+                                "Importing");
                 return Ok(result);
             }
             catch (InvalidOperationException ex)
