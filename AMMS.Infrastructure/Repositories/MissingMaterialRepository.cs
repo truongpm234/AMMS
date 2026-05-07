@@ -66,11 +66,10 @@ namespace AMMS.Infrastructure.Repositories
             {
                 await using var tx = await _db.Database.BeginTransactionAsync(ct);
 
-                // 1) clear table
                 _db.missing_materials.RemoveRange(_db.missing_materials);
                 await _db.SaveChangesAsync(ct);
 
-                // 2) chỉ tính cho order thiếu vật liệu và status = "Accepted"
+                // Giữ đúng logic nghiệp vụ: chỉ tính missing cho order đang LayoutPending
                 var orderIds = await _db.orders.AsNoTracking()
                     .Where(o =>
                         o.status == "LayoutPending" &&
@@ -85,7 +84,6 @@ namespace AMMS.Infrastructure.Repositories
                     return new { insertedRows = 0, message = "No target orders to recalculate." };
                 }
 
-                // 3) load BOM lines
                 var bomLines = await (
                     from oi in _db.order_items.AsNoTracking()
                     join b in _db.boms.AsNoTracking() on oi.item_id equals b.order_item_id
@@ -102,9 +100,10 @@ namespace AMMS.Infrastructure.Repositories
 
                         DeliveryDate = o.delivery_date,
 
-                        OrderQty = (decimal)oi.quantity,
-                        QtyPerProduct = b.qty_per_product ?? 0m,
-                        WastagePercent = b.wastage_percent ?? 0m
+                        OrderQty = oi.quantity,
+                        QtyTotal = b.qty_total,
+                        QtyPerProduct = b.qty_per_product,
+                        WastagePercent = b.wastage_percent
                     }
                 ).ToListAsync(ct);
 
@@ -168,9 +167,25 @@ namespace AMMS.Infrastructure.Repositories
 
                         foreach (var r in g)
                         {
-                            var baseQty = Math.Round(r.OrderQty * Math.Round(r.QtyPerProduct, 4), 4);
-                            var factor = Math.Round(1m + (Math.Round(r.WastagePercent, 2) / 100m), 4);
-                            var lineRequired = Math.Round(baseQty * factor, 4);
+                            decimal lineRequired = 0m;
+
+                            // Ưu tiên qty_total nếu BOM đã lưu sẵn tổng lượng cần
+                            if (r.QtyTotal.HasValue && r.QtyTotal.Value > 0m)
+                            {
+                                lineRequired = Math.Round(r.QtyTotal.Value, 4);
+                            }
+                            else if (r.QtyPerProduct.HasValue && r.QtyPerProduct.Value > 0m)
+                            {
+                                var baseQty = Math.Round(r.OrderQty * r.QtyPerProduct.Value, 4);
+                                var factor = Math.Round(1m + ((r.WastagePercent ?? 0m) / 100m), 4);
+                                lineRequired = Math.Round(baseQty * factor, 4);
+                            }
+                            else
+                            {
+                                // Không lấy mặc định = 0 gây sai lệch như code cũ
+                                continue;
+                            }
+
                             if (lineRequired < 0m) lineRequired = 0m;
                             requiredQty += lineRequired;
                         }
@@ -179,7 +194,6 @@ namespace AMMS.Infrastructure.Repositories
                         var safetyQty = Math.Round(usage30 * 0.30m, 4);
 
                         var needed = Math.Round(requiredQty + safetyQty, 0, MidpointRounding.AwayFromZero);
-
                         var available = Math.Round(g.Max(x => x.StockQty), 4);
 
                         var baseMissing = needed - available;
@@ -225,7 +239,7 @@ namespace AMMS.Infrastructure.Repositories
                 return new
                 {
                     insertedRows = insertRows.Count,
-                    message = "Recalculated & saved missing materials (baseMissing - orderedOutstanding)."
+                    message = "Recalculated & saved missing materials successfully."
                 };
             });
         }
