@@ -35,6 +35,14 @@ public partial class production
 
     public int sub_product_used_qty { get; set; } = 0;
 
+    public string? prod_method { get; set; }
+
+    public string? gm_note { get; set; }
+
+    public string? mgr_note { get; set; }
+
+    public int nvl_qty { get; set; } = 0;
+
     public virtual sub_product? sub_product { get; set; }
 
     public virtual user? manager { get; set; }

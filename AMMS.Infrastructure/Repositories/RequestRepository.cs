@@ -342,7 +342,12 @@ namespace AMMS.Infrastructure.Repositories
                     .OrderByDescending(x => x.estimate_id)
                     .Take(1)
                     .DefaultIfEmpty()
-
+                join pr in _db.productions.AsNoTracking()
+on r.order_id equals pr.order_id into prj
+                from pr in prj
+                    .OrderByDescending(x => x.prod_id)
+                    .Take(1)
+                    .DefaultIfEmpty()
                 select new RequestPagedDto
                 {
                     order_request_id = r.order_request_id,
@@ -361,6 +366,13 @@ namespace AMMS.Infrastructure.Repositories
                     product_type = r.product_type,
                     number_of_plates = r.number_of_plates,
                     order_id = r.order_id,
+                    production_method = pr != null ? pr.prod_method : null,
+                    is_full_process = pr != null ? pr.is_full_process : null,
+                    sub_product_id = pr != null ? pr.sub_product_id : null,
+                    sub_product_used_qty = pr != null ? pr.sub_product_used_qty : 0,
+                    nvl_qty = pr != null ? pr.nvl_qty : 0,
+                    gm_note = pr != null ? pr.gm_note : null,
+                    mgr_note = pr != null ? pr.mgr_note : null,
                     quote_id = r.quote_id,
                     product_length_mm = r.product_length_mm,
                     product_width_mm = r.product_width_mm,

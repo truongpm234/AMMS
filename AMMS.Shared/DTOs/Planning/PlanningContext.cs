@@ -27,5 +27,9 @@ namespace AMMS.Shared.DTOs.Planning
         public int QueueOrderKey { get; init; }
         public int WaveSheetsRequired { get; set; }
         public int WaveSheetsUsed { get; set; }
+        public string? ProductionMethod { get; init; }
+        public string? SubProductProcess { get; init; }
+        public int SubProductUsedQty { get; init; }
+        public int NvlQty { get; init; }
     }
 }

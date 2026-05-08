@@ -43,6 +43,11 @@
         public int? lamination_material_id { get; set; }
         public string? lamination_material_code { get; set; }
         public string? lamination_material_name { get; set; }
+        public string? production_method { get; set; }
+        public int? sub_product_id { get; set; }
+        public int sub_product_used_qty { get; set; }
+        public int nvl_qty { get; set; }
+        public string? sub_product_process { get; set; }
         public List<ProductionStageDto> stages { get; set; } = new();
     }
 }

@@ -9,6 +9,7 @@ namespace AMMS.Shared.DTOs.Productions
     public class ConfirmProductionReadyRequest
     {
         public bool is_production_ready { get; set; }
+        public string? gm_note { get; set; }
     }
 
     public class ProductionReadyCheckResponse
@@ -23,12 +24,21 @@ namespace AMMS.Shared.DTOs.Productions
         public int? request_print_length_mm { get; set; }
         public int? order_quantity { get; set; }
         public bool? is_full_process { get; set; } = true;
+        public string? production_method { get; set; }
+        public string? gm_note { get; set; }
+        public string? mgr_note { get; set; }
+        public bool can_use_nvl { get; set; }
+        public bool can_use_sub { get; set; }
+        public bool can_use_both { get; set; }
+        public bool need_manager_approval { get; set; }
+        public int nvl_qty { get; set; }
         public bool has_matched_sub_product { get; set; }
         public string? sub_product_message { get; set; }
         public int? selected_sub_product_id { get; set; }
         public int sub_product_used_qty { get; set; }
         public MatchedSubProductDto? matched_sub_product { get; set; }
         public List<ProductionReadyMaterialDto> materials { get; set; } = new();
+        public List<ProductionReadyMaterialDto> remaining_materials_for_both { get; set; } = new();
         public List<ProductionReadyMachineDto> machines { get; set; } = new();
     }
 

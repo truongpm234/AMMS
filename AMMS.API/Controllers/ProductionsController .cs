@@ -148,21 +148,70 @@ namespace AMMS.API.Controllers
         }
 
         [HttpPut("start-ready/{orderId:int}")]
-        public async Task<IActionResult> SetProductionReady(int orderId, [FromBody] ConfirmProductionReadyRequest req, CancellationToken ct)
+        public async Task<IActionResult> SetProductionReady(
+    int orderId,
+    [FromBody] ConfirmProductionReadyRequest req,
+    CancellationToken ct)
         {
             try
             {
-                var ok = await _service.SetProductionReadyAsync(orderId, req.is_production_ready, ct);
+                var ok = await _service.SetProductionReadyAsync(
+                    orderId,
+                    req.is_production_ready,
+                    req.gm_note,
+                    ct);
 
                 if (!ok)
                     return NotFound(new { message = "Order not found" });
 
-                await _hub.Clients.Group(RealtimeGroups.ByRole("manager")).SendAsync("approve-production", new { message = $"Có đơn {orderId} cần duyệt lệnh sản xuất" });
-                await _noti.CreateNotfi(3, $"Có đơn {orderId} cần duyệt lệnh sản xuất", null, orderId, "Scheduled");
+                var state = await _service.GetProductionReadyAsync(orderId, ct);
+
+                if (state?.is_production_ready == true &&
+                    string.Equals(state.production_method, "NVL", StringComparison.OrdinalIgnoreCase))
+                {
+                    await _hub.Clients.Group(RealtimeGroups.ByRole("production manager"))
+                        .SendAsync("approved-production", new
+                        {
+                            message = $"Đơn {orderId} đã được tự động duyệt sản xuất bằng NVL"
+                        }, ct);
+
+                    await _noti.CreateNotfi(
+                        6,
+                        $"Đơn {orderId} đã được tự động duyệt sản xuất bằng NVL",
+                        null,
+                        orderId,
+                        "Scheduled");
+
+                    return Ok(new
+                    {
+                        order_id = orderId,
+                        is_production_ready = true,
+                        production_method = "NVL",
+                        need_manager_approval = false,
+                        message = "Auto confirmed production by NVL and scheduled tasks."
+                    });
+                }
+
+                await _hub.Clients.Group(RealtimeGroups.ByRole("manager"))
+                    .SendAsync("approve-production", new
+                    {
+                        message = $"Có đơn {orderId} cần duyệt phương thức sản xuất"
+                    }, ct);
+
+                await _noti.CreateNotfi(
+                    3,
+                    $"Có đơn {orderId} cần duyệt phương thức sản xuất",
+                    null,
+                    orderId,
+                    "Scheduled");
+
                 return Ok(new
                 {
                     order_id = orderId,
-                    is_production_ready = req.is_production_ready,
+                    is_production_ready = false,
+                    need_manager_approval = true,
+                    gm_note = req.gm_note,
+                    message = "Sent production method approval request to manager."
                 });
             }
             catch (InvalidOperationException ex)
@@ -210,9 +259,37 @@ namespace AMMS.API.Controllers
                     });
                 }
 
-                await _hub.Clients.Group(RealtimeGroups.ByRole("production manager")).SendAsync("approved-production", new { message = $"Đơn {req.order_id} đã được duyệt lệnh sản xuất" });
-                await _noti.CreateNotfi(6, $"Đơn {req.order_id} đã được duyệt lệnh sản xuất", null, req.order_id, "Scheduled");
-                return Ok(result);
+                var prodId = await _service.ScheduleTasksAfterMethodAsync(req.order_id, ct);
+
+                await _hub.Clients.Group(RealtimeGroups.ByRole("production manager"))
+                    .SendAsync("approved-production", new
+                    {
+                        message = $"Đơn {req.order_id} đã được duyệt lệnh sản xuất"
+                    }, ct);
+
+                await _noti.CreateNotfi(
+                    6,
+                    $"Đơn {req.order_id} đã được duyệt lệnh sản xuất",
+                    null,
+                    req.order_id,
+                    "Scheduled");
+
+                return Ok(new
+                {
+                    result.success,
+                    result.order_id,
+                    result.prod_id,
+                    scheduled_prod_id = prodId,
+                    result.is_full_process,
+                    result.production_method,
+                    result.sub_product_id,
+                    result.sub_product_used_qty,
+                    result.nvl_qty,
+                    result.order_quantity,
+                    result.gm_note,
+                    result.mgr_note,
+                    result.message
+                });
             }
             catch (InvalidOperationException ex)
             {
@@ -221,6 +298,7 @@ namespace AMMS.API.Controllers
                     message = ex.Message,
                     order_id = req.order_id,
                     is_full_process = req.is_full_process,
+                    production_method = req.production_method,
                     sub_id = req.sub_id
                 });
             }

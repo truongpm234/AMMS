@@ -65,6 +65,10 @@ namespace AMMS.Infrastructure.Repositories
         customer_name = r != null ? (r.customer_name ?? "") : "Khách hàng",
         is_full_process = p != null ? (bool?)p.is_full_process : null,
         import_recieve_path = p != null ? p.import_recieve_path : null,
+        production_method = p != null ? p.prod_method : null,
+        sub_product_id = p != null ? p.sub_product_id : null,
+        sub_product_used_qty = p != null ? p.sub_product_used_qty : 0,
+        nvl_qty = p != null ? p.nvl_qty : 0,
         FirstItem = _db.order_items.AsNoTracking()
             .Where(i => i.order_id == o.order_id)
             .OrderBy(i => i.item_id)
@@ -234,6 +238,10 @@ namespace AMMS.Infrastructure.Repositories
                     can_fulfill = canFulfill,
                     is_production_ready = o.is_production_ready,
                     is_full_process = o.is_full_process,
+                    production_method = o.production_method,
+                    sub_product_id = o.sub_product_id,
+                    sub_product_used_qty = o.sub_product_used_qty,
+                    nvl_qty = o.nvl_qty,
                     missing_materials = canFulfill == false
                         ? (missingMaterials ?? new List<MissingMaterialDto>())
                         : null,

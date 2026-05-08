@@ -16,6 +16,13 @@
         public DateTime? planned_start_date { get; set; }
         public DateTime? actual_start_date { get; set; }
         public bool? is_production_ready { get; set; }
+        public string? production_method { get; set; }
+        public bool? is_full_process { get; set; }
+        public int? sub_product_id { get; set; }
+        public int sub_product_used_qty { get; set; }
+        public string? gm_note { get; set; }
+        public string? mgr_note { get; set; }
+        public int nvl_qty { get; set; }
         public List<ProductionStageStatusDto> stage_statuses { get; set; } = new();
         public List<string> stages { get; set; } = new();
 

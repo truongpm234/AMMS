@@ -23,6 +23,9 @@ namespace AMMS.Shared.DTOs.Orders
         public bool is_production_ready { get; set; }
         public bool? is_full_process { get; set; }
         public string? import_recieve_path { get; set; }
-
+        public string? production_method { get; set; }
+        public int? sub_product_id { get; set; }
+        public int sub_product_used_qty { get; set; }
+        public int nvl_qty { get; set; }
     }
 }

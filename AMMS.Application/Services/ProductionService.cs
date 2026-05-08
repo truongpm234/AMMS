@@ -25,6 +25,7 @@ namespace AMMS.Application.Services
         private readonly NotificationService _notiService;
         private readonly IRequestRepository _requestRepo;
         private readonly ICloudinaryFileStorageService _fileStorage;
+        private readonly IProductionSchedulingService _scheduling;
 
         public ProductionService(
             IHubContext<RealtimeHub> rt,
@@ -35,7 +36,8 @@ namespace AMMS.Application.Services
             IRequestRepository requestRepository,
             NotificationService notiService,
             IWebHostEnvironment env,
-            ICloudinaryFileStorageService fileStorage)
+            ICloudinaryFileStorageService fileStorage,
+            IProductionSchedulingService scheduling)
         {
             _db = db;
             _rt = rt;
@@ -46,6 +48,7 @@ namespace AMMS.Application.Services
             _requestRepo = requestRepository;
             _env = env;
             _fileStorage = fileStorage;
+            _scheduling = scheduling;
         }
 
         public async Task<NearestDeliveryResponse> GetNearestDeliveryAsync()
@@ -144,9 +147,7 @@ namespace AMMS.Application.Services
             return await _repo.GetMachineScheduleBoardAsync(from, to, ct);
         }
 
-        public async Task<ProductionReadyCheckResponse?> GetProductionReadyAsync(
-    int orderId,
-    CancellationToken ct = default)
+        public async Task<ProductionReadyCheckResponse?> GetProductionReadyAsync(int orderId, CancellationToken ct = default)
         {
             var ord = await _orderRepo.GetByIdAsync(orderId);
 
@@ -165,26 +166,76 @@ namespace AMMS.Application.Services
                 .OrderByDescending(x => x.order_request_id)
                 .FirstOrDefaultAsync(ct);
 
-            var materials = await GetMaterialReadinessAsync(orderId, ct);
+            var orderQty = req?.quantity ?? 0;
 
+            var fullMaterials = await GetMaterialReadinessAsync(orderId, null, ct);
             var machines = await GetMachineReadinessAsync(orderId, ct);
 
             var hasEnoughMaterial =
-                materials.Count > 0 &&
-                materials.All(x => x.is_enough);
-
+                fullMaterials.Count > 0 &&
+                fullMaterials.All(x => x.is_enough);
 
             var hasFreeMachine =
                 machines.Count > 0 &&
                 machines.All(x => x.machine_found && x.is_available);
 
             var matchedSubProduct = await FindMatchedSubProductAsync(orderId, ct);
-
             var hasMatchedSubProduct = matchedSubProduct != null;
 
-            var subProductMessage = hasMatchedSubProduct
-                ? "Có bán thành phẩm phù hợp với đơn hàng."
-                : "Không có bán thành phẩm phù hợp với đơn hàng.";
+            var subQty = matchedSubProduct?.quantity ?? 0;
+
+            var canUseNvl = hasEnoughMaterial && hasFreeMachine;
+
+            var canUseSub =
+                matchedSubProduct != null &&
+                orderQty > 0 &&
+                subQty >= orderQty &&
+                hasFreeMachine;
+
+            var nvlQtyForBoth =
+                matchedSubProduct != null &&
+                orderQty > 0 &&
+                subQty > 0 &&
+                subQty < orderQty
+                    ? orderQty - subQty
+                    : 0;
+
+            var remainingMaterialsForBoth = nvlQtyForBoth > 0
+                ? await GetMaterialReadinessAsync(orderId, nvlQtyForBoth, ct)
+                : new List<ProductionReadyMaterialDto>();
+
+            var canUseBoth =
+                matchedSubProduct != null &&
+                subQty > 0 &&
+                orderQty > subQty &&
+                remainingMaterialsForBoth.Count > 0 &&
+                remainingMaterialsForBoth.All(x => x.is_enough) &&
+                hasFreeMachine;
+
+            var optionCount = 0;
+            if (canUseNvl) optionCount++;
+            if (canUseSub) optionCount++;
+            if (canUseBoth) optionCount++;
+
+            var needManagerApproval =
+                optionCount >= 2 ||
+                canUseSub ||
+                canUseBoth;
+
+            string? subMessage;
+
+            if (!hasMatchedSubProduct)
+            {
+                subMessage = "Không có bán thành phẩm phù hợp với đơn hàng.";
+            }
+            else if (subQty >= orderQty)
+            {
+                subMessage = "Có bán thành phẩm phù hợp và đủ số lượng.";
+            }
+            else
+            {
+                subMessage = $"Có bán thành phẩm phù hợp nhưng chưa đủ số lượng. Có {subQty}, cần {orderQty}, còn thiếu {Math.Max(orderQty - subQty, 0)}.";
+            }
 
             return new ProductionReadyCheckResponse
             {
@@ -195,29 +246,47 @@ namespace AMMS.Application.Services
                 has_enough_material = hasEnoughMaterial,
                 has_free_machine = hasFreeMachine,
 
-                materials = materials,
+                materials = fullMaterials,
+                remaining_materials_for_both = remainingMaterialsForBoth,
                 machines = machines,
 
                 product_type_id = prod?.product_type_id,
                 request_print_width_mm = req?.print_width_mm,
                 request_print_length_mm = req?.print_length_mm,
-                order_quantity = req?.quantity,
+                order_quantity = orderQty,
 
                 is_full_process = prod?.is_full_process,
+                production_method = prod?.prod_method,
+
+                gm_note = prod?.gm_note,
+                mgr_note = prod?.mgr_note,
+
+                can_use_nvl = canUseNvl,
+                can_use_sub = canUseSub,
+                can_use_both = canUseBoth,
+                need_manager_approval = needManagerApproval,
+                nvl_qty = prod?.nvl_qty ?? nvlQtyForBoth,
+
                 selected_sub_product_id = prod?.sub_product_id,
                 sub_product_used_qty = prod?.sub_product_used_qty ?? 0,
 
                 has_matched_sub_product = hasMatchedSubProduct,
-                sub_product_message = subProductMessage,
+                sub_product_message = subMessage,
                 matched_sub_product = matchedSubProduct
             };
         }
 
-        public async Task<bool> SetProductionReadyAsync(int orderId, bool isProductionReady, CancellationToken ct = default)
+        public async Task<bool> SetProductionReadyAsync(
+    int orderId,
+    bool isProductionReady,
+    string? gmNote = null,
+    CancellationToken ct = default)
         {
+            var shouldAutoSchedule = false;
+
             var strategy = _db.Database.CreateExecutionStrategy();
 
-            return await strategy.ExecuteAsync(async () =>
+            var result = await strategy.ExecuteAsync(async () =>
             {
                 await using var tx = await _db.Database.BeginTransactionAsync(ct);
 
@@ -244,11 +313,16 @@ namespace AMMS.Application.Services
                         "Không thể thay đổi trạng thái sẵn sàng sản xuất vì đơn hàng đã bắt đầu hoặc đã hoàn tất sản xuất.");
                 }
 
+                prod.gm_note = NormalizeNote(gmNote);
+
                 if (!isProductionReady)
                 {
                     ord.is_production_ready = false;
                     ord.is_enough = false;
 
+                    prod.prod_method = null;
+                    prod.is_full_process = null;
+                    prod.nvl_qty = 0;
 
                     await _db.SaveChangesAsync(ct);
                     await tx.CommitAsync(ct);
@@ -256,33 +330,118 @@ namespace AMMS.Application.Services
                     return true;
                 }
 
-                var materials = await GetMaterialReadinessAsync(orderId, ct);
+                var req = await _db.order_requests
+                    .AsNoTracking()
+                    .Where(x => x.order_id == orderId)
+                    .OrderByDescending(x => x.order_request_id)
+                    .FirstOrDefaultAsync(ct);
+
+                var orderQty = req?.quantity ?? 0;
+
+                if (orderQty <= 0)
+                {
+                    orderQty = await _db.order_items
+                        .AsNoTracking()
+                        .Where(x => x.order_id == orderId)
+                        .OrderBy(x => x.item_id)
+                        .Select(x => x.quantity)
+                        .FirstOrDefaultAsync(ct);
+                }
+
+                if (orderQty <= 0)
+                    throw new InvalidOperationException("Số lượng đơn hàng không hợp lệ.");
+
+                var fullMaterials = await GetMaterialReadinessAsync(orderId, null, ct);
                 var machines = await GetMachineReadinessAsync(orderId, ct);
 
                 var hasEnoughMaterial =
-                    materials.Count > 0 &&
-                    materials.All(x => x.is_enough);
+                    fullMaterials.Count > 0 &&
+                    fullMaterials.All(x => x.is_enough);
 
                 var hasFreeMachine =
                     machines.Count > 0 &&
                     machines.All(x => x.machine_found && x.is_available);
 
-                if (!hasEnoughMaterial || !hasFreeMachine)
+                var matchedSubProduct = await FindMatchedSubProductAsync(orderId, ct);
+                var subQty = matchedSubProduct?.quantity ?? 0;
+
+                var canUseNvl = hasEnoughMaterial && hasFreeMachine;
+
+                var canUseSub =
+                    matchedSubProduct != null &&
+                    subQty >= orderQty &&
+                    hasFreeMachine;
+
+                var nvlQtyForBoth =
+                    matchedSubProduct != null &&
+                    subQty > 0 &&
+                    subQty < orderQty
+                        ? orderQty - subQty
+                        : 0;
+
+                var remainingMaterialsForBoth = nvlQtyForBoth > 0
+                    ? await GetMaterialReadinessAsync(orderId, nvlQtyForBoth, ct)
+                    : new List<ProductionReadyMaterialDto>();
+
+                var canUseBoth =
+                    matchedSubProduct != null &&
+                    subQty > 0 &&
+                    subQty < orderQty &&
+                    remainingMaterialsForBoth.Count > 0 &&
+                    remainingMaterialsForBoth.All(x => x.is_enough) &&
+                    hasFreeMachine;
+
+                var optionCount = 0;
+                if (canUseNvl) optionCount++;
+                if (canUseSub) optionCount++;
+                if (canUseBoth) optionCount++;
+
+                if (optionCount <= 0)
                 {
                     throw new InvalidOperationException(
-                        "Order chưa đủ điều kiện sản xuất: thiếu nguyên vật liệu hoặc chưa có đủ máy rảnh cho toàn bộ quy trình.");
+                        "Order chưa đủ điều kiện sản xuất: thiếu NVL, thiếu bán thành phẩm hoặc chưa có đủ máy rảnh.");
                 }
 
-                ord.is_enough = true;
-                ord.is_production_ready = true;
+                // option đó là NVL => General Manager auto confirm
+                if (optionCount == 1 && canUseNvl)
+                {
+                    ord.is_enough = true;
+                    ord.is_production_ready = true;
+
+                    prod.prod_method = "NVL";
+                    prod.is_full_process = true;
+                    prod.sub_product_id = null;
+                    prod.sub_product_used_qty = 0;
+                    prod.nvl_qty = orderQty;
+
+                    shouldAutoSchedule = true;
+
+                    await _db.SaveChangesAsync(ct);
+                    await tx.CommitAsync(ct);
+
+                    return true;
+                }
+
+                // manager duyệt method, chưa tạo task.
+                ord.is_production_ready = false;
+
+                prod.prod_method = null;
+                prod.is_full_process = null;
+                prod.nvl_qty = 0;
 
                 await _db.SaveChangesAsync(ct);
                 await tx.CommitAsync(ct);
 
-                await SendProductionReadyNotificationAsync(orderId);
-
                 return true;
             });
+
+            if (result && shouldAutoSchedule)
+            {
+                await ScheduleTasksAfterMethodAsync(orderId, ct);
+                await SendProductionReadyNotificationAsync(orderId);
+            }
+
+            return result;
         }
 
         private async Task SendProductionReadyNotificationAsync(int orderId)
@@ -311,6 +470,7 @@ namespace AMMS.Application.Services
 
         private async Task<List<ProductionReadyMaterialDto>> GetMaterialReadinessAsync(
     int orderId,
+    int? overrideOrderQty = null,
     CancellationToken ct = default)
         {
             var rows = await (
@@ -321,8 +481,7 @@ namespace AMMS.Application.Services
                 where oi.order_id == orderId
                 select new
                 {
-                    order_qty = oi.quantity,
-
+                    order_qty = overrideOrderQty.HasValue && overrideOrderQty.Value > 0 ? overrideOrderQty.Value : oi.quantity,
                     b.material_id,
                     b.material_code,
                     b.material_name,
@@ -330,7 +489,6 @@ namespace AMMS.Application.Services
                     b.qty_total,
                     b.qty_per_product,
                     b.wastage_percent,
-
                     material_exists = m != null,
                     db_material_code = m != null ? m.code : null,
                     db_material_name = m != null ? m.name : null,
@@ -619,9 +777,7 @@ namespace AMMS.Application.Services
                 .ToList();
         }
 
-        private async Task<MatchedSubProductDto?> FindMatchedSubProductAsync(
-    int orderId,
-    CancellationToken ct = default)
+        private async Task<MatchedSubProductDto?> FindMatchedSubProductAsync(int orderId, CancellationToken ct = default)
         {
             var prod = await _db.productions
                 .AsNoTracking()
@@ -643,9 +799,8 @@ namespace AMMS.Application.Services
 
             var printWidth = req.print_width_mm;
             var printLength = req.print_length_mm;
-            var orderQty = req.quantity ?? 0;
 
-            if (!printWidth.HasValue || !printLength.HasValue || orderQty <= 0)
+            if (!printWidth.HasValue || !printLength.HasValue)
                 return null;
 
             return await _db.sub_products
@@ -656,8 +811,8 @@ namespace AMMS.Application.Services
                     x.product_type_id == prod.product_type_id.Value &&
                     x.width == printWidth.Value &&
                     x.length == printLength.Value &&
-                    x.quantity >= orderQty)
-                .OrderBy(x => x.quantity)
+                    x.quantity > 0)
+                .OrderByDescending(x => x.quantity)
                 .ThenByDescending(x => x.updated_at)
                 .ThenByDescending(x => x.id)
                 .Select(x => new MatchedSubProductDto
@@ -732,9 +887,7 @@ namespace AMMS.Application.Services
             };
         }
 
-        public Task<SetProductionMethodResponse?> SetProductionMethodAsync(
-    SetProductionMethodRequest req,
-    CancellationToken ct = default)
+        public Task<SetProductionMethodResponse?> SetProductionMethodAsync(SetProductionMethodRequest req, CancellationToken ct = default)
         {
             return _repo.SetProductionMethodAsync(req, ct);
         }
@@ -863,6 +1016,81 @@ namespace AMMS.Application.Services
             }
 
             return null;
+        }
+
+        public async Task<int?> ScheduleTasksAfterMethodAsync(
+    int orderId,
+    CancellationToken ct = default)
+        {
+            var prod = await _db.productions
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderByDescending(x => x.prod_id)
+                .FirstOrDefaultAsync(ct);
+
+            if (prod == null)
+                return null;
+
+            if (string.IsNullOrWhiteSpace(prod.prod_method))
+                throw new InvalidOperationException("Production method has not been selected.");
+
+            int? productTypeId = prod.product_type_id;
+
+            if (!productTypeId.HasValue || productTypeId.Value <= 0)
+            {
+                productTypeId = await _db.order_items
+                    .AsNoTracking()
+                    .Where(x => x.order_id == orderId)
+                    .OrderBy(x => x.item_id)
+                    .Select(x => x.product_type_id)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            if (!productTypeId.HasValue || productTypeId.Value <= 0)
+            {
+                var req = await _db.order_requests
+                    .AsNoTracking()
+                    .Where(x => x.order_id == orderId)
+                    .OrderByDescending(x => x.order_request_id)
+                    .FirstOrDefaultAsync(ct);
+
+                if (req != null && !string.IsNullOrWhiteSpace(req.product_type))
+                {
+                    productTypeId = await _db.product_types
+                        .AsNoTracking()
+                        .Where(x => x.code == req.product_type)
+                        .Select(x => (int?)x.product_type_id)
+                        .FirstOrDefaultAsync(ct);
+                }
+            }
+
+            if (!productTypeId.HasValue || productTypeId.Value <= 0)
+                throw new InvalidOperationException("Cannot resolve product_type_id for scheduling.");
+
+            var productionProcessCsv = await _db.order_items
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderBy(x => x.item_id)
+                .Select(x => x.production_process)
+                .FirstOrDefaultAsync(ct);
+
+            return await _scheduling.ScheduleOrderAsync(
+                orderId: orderId,
+                productTypeId: productTypeId.Value,
+                productionProcessCsv: productionProcessCsv,
+                managerId: prod.manager_id ?? 3);
+        }
+
+        private static string? NormalizeNote(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            value = value.Trim();
+
+            return value.Length <= 1000
+                ? value
+                : value.Substring(0, 1000);
         }
 
         private readonly IWebHostEnvironment _env;

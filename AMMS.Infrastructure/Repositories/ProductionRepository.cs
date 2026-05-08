@@ -78,6 +78,13 @@ namespace AMMS.Infrastructure.Repositories
                     production_status = pr.status,
                     order_status = o.status,
                     customer_name = !string.IsNullOrWhiteSpace(r.customer_name) ? r.customer_name : "",
+                    production_method = pr.prod_method,
+                    is_full_process = pr.is_full_process,
+                    sub_product_id = pr.sub_product_id,
+                    sub_product_used_qty = pr.sub_product_used_qty,
+                    nvl_qty = pr.nvl_qty,
+                    gm_note = pr.gm_note,
+                    mgr_note = pr.mgr_note,
                     first_item_product_name = _db.order_items.AsNoTracking()
                         .Where(i => i.order_id == o.order_id)
                         .OrderBy(i => i.item_id)
@@ -284,6 +291,13 @@ namespace AMMS.Infrastructure.Repositories
                     status = r.order_status,
                     production_status = r.production_status,
                     is_production_ready = ord.is_production_ready,
+                    production_method = r.production_method,
+                    is_full_process = r.is_full_process,
+                    sub_product_id = r.sub_product_id,
+                    sub_product_used_qty = r.sub_product_used_qty,
+                    nvl_qty = r.nvl_qty,
+                    gm_note = r.gm_note,
+                    mgr_note = r.mgr_note,
 
                     stage_status = currentStageStatus,
                     stages = stages,
@@ -360,11 +374,15 @@ namespace AMMS.Infrastructure.Repositories
                 join pt in _db.product_types.AsNoTracking() on pr.product_type_id equals pt.product_type_id into ptj
                 from pt in ptj.DefaultIfEmpty()
 
+                join sp in _db.sub_products.AsNoTracking() on pr.sub_product_id equals sp.id into spj
+                from sp in spj.DefaultIfEmpty()
+
                 where pr.order_id == orderId
                 orderby (pr.planned_start_date ?? pr.created_at ?? pr.end_date)
                 select new
                 {
                     pr,
+                    sp,
                     o,
                     product_type_name = pt != null ? pt.name : null,
                     packaging_standard = pt != null ? pt.packaging_standard : null,
@@ -410,7 +428,12 @@ namespace AMMS.Infrastructure.Repositories
                 length_mm = header.first_item?.i_length,
                 width_mm = header.first_item?.i_width,
                 height_mm = header.first_item?.i_height,
-                is_full_process = (bool)header.pr.is_full_process,
+                production_method = header.pr.prod_method,
+                sub_product_id = header.pr.sub_product_id,
+                sub_product_used_qty = header.pr.sub_product_used_qty,
+                nvl_qty = header.pr.nvl_qty,
+                sub_product_process = header.sp != null ? header.sp.product_process : null,
+                is_full_process = header.pr.is_full_process,
             };
 
             order_request? orderReq = null;
@@ -992,6 +1015,17 @@ namespace AMMS.Infrastructure.Repositories
             var plateQty = Math.Max(1, numberOfPlates ?? 1);
             var sheetQty = Math.Max(1, sheetsTotal);
             var productionOutputQty = StageQuantityHelper.GetProductCap(sheetQty, nUp);
+
+            var qtyContext = ResolveBothStageQuantityContext(
+                detail,
+                processCode,
+                currentStageIndex,
+                routeProcessCodes,
+                sheetQty,
+                productionOutputQty);
+
+            sheetQty = qtyContext.stage_sheet_qty;
+            productionOutputQty = qtyContext.stage_output_qty;
 
             var resolvedPaperCode = string.IsNullOrWhiteSpace(paperCode)
                 ? "PAPER"
@@ -1946,6 +1980,19 @@ namespace AMMS.Infrastructure.Repositories
                 if (orderQty <= 0)
                     throw new InvalidOperationException("Số lượng đơn hàng không hợp lệ.");
 
+                var method = (req.production_method ?? "").Trim().ToUpperInvariant();
+
+                if (string.IsNullOrWhiteSpace(method))
+                {
+                    if (req.is_full_process == true)
+                        method = "NVL";
+                    else if (req.is_full_process == false)
+                        method = "SUB";
+                }
+
+                if (method is not ("NVL" or "SUB" or "BOTH"))
+                    throw new InvalidOperationException("production_method must be NVL | SUB | BOTH.");
+
                 // Nếu production trước đó đang dùng bán thành phẩm, thì hoàn lại số lượng đã trừ trước khi đổi phương thức.
                 if (prod.is_full_process == false
                     && prod.sub_product_id.HasValue
@@ -1963,14 +2010,19 @@ namespace AMMS.Infrastructure.Repositories
                     prod.sub_product_used_qty = 0;
                 }
 
-                // CASE 1: Sản xuất đầy đủ quy trình
-                if (req.is_full_process)
+                if (method == "NVL")
                 {
                     await RollbackSubProductFinishedTasksAsync(prod.prod_id, ct);
 
+                    prod.prod_method = "NVL";
                     prod.is_full_process = true;
                     prod.sub_product_id = null;
                     prod.sub_product_used_qty = 0;
+                    prod.nvl_qty = orderQty;
+                    prod.mgr_note = string.IsNullOrWhiteSpace(req.mgr_note) ? null : req.mgr_note.Trim();
+
+                    order.is_production_ready = true;
+                    order.is_enough = true;
 
                     await _db.SaveChangesAsync(ct);
                     await tx.CommitAsync(ct);
@@ -1980,96 +2032,104 @@ namespace AMMS.Infrastructure.Repositories
                         success = true,
                         order_id = order.order_id,
                         prod_id = prod.prod_id,
-
                         is_full_process = true,
+                        production_method = "NVL",
                         sub_product_id = null,
                         sub_product_used_qty = 0,
-
+                        nvl_qty = orderQty,
                         order_quantity = orderQty,
-                        production_method = "FullProcess",
-                        message = "Đã chọn phương thức sản xuất đầy đủ quy trình."
+                        gm_note = prod.gm_note,
+                        mgr_note = prod.mgr_note,
+                        message = "Đã duyệt sản xuất bằng NVL."
                     };
                 }
 
-                // CASE 2: Dùng bán thành phẩm
+                if (method == "SUB")
+                {
+                    if (!req.sub_id.HasValue || req.sub_id.Value <= 0)
+                        throw new InvalidOperationException("Vui lòng truyền sub_id khi chọn SUB.");
+
+                    var selectedSubProduct = await ResolveValidSubProductAsync(
+                        req.sub_id.Value,
+                        prod,
+                        orderReq,
+                        orderQty,
+                        requireEnoughQty: true,
+                        ct);
+
+                    selectedSubProduct.quantity -= orderQty;
+
+                    prod.prod_method = "SUB";
+                    prod.is_full_process = false;
+                    prod.sub_product_id = selectedSubProduct.id;
+                    prod.sub_product_used_qty = orderQty;
+                    prod.nvl_qty = 0;
+                    prod.mgr_note = string.IsNullOrWhiteSpace(req.mgr_note) ? null : req.mgr_note.Trim();
+
+                    order.is_production_ready = true;
+                    order.is_enough = true;
+
+                    await ApplySubProductToExistingTasksAsync(
+                        prod,
+                        selectedSubProduct,
+                        orderQty,
+                        ct);
+
+                    await _db.SaveChangesAsync(ct);
+                    await tx.CommitAsync(ct);
+
+                    return new SetProductionMethodResponse
+                    {
+                        success = true,
+                        order_id = order.order_id,
+                        prod_id = prod.prod_id,
+                        is_full_process = false,
+                        production_method = "SUB",
+                        sub_product_id = selectedSubProduct.id,
+                        sub_product_used_qty = orderQty,
+                        nvl_qty = 0,
+                        order_quantity = orderQty,
+                        gm_note = prod.gm_note,
+                        mgr_note = prod.mgr_note,
+                        message = "Đã duyệt sản xuất bằng bán thành phẩm."
+                    };
+                }
+
+            if (method == "BOTH")
+            {
                 if (!req.sub_id.HasValue || req.sub_id.Value <= 0)
-                {
-                    throw new InvalidOperationException(
-                        "Vui lòng truyền sub_id khi chọn phương thức sản xuất bằng bán thành phẩm.");
-                }
+                    throw new InvalidOperationException("Vui lòng truyền sub_id khi chọn BOTH.");
 
-                if (!prod.product_type_id.HasValue || prod.product_type_id.Value <= 0)
-                {
-                    throw new InvalidOperationException(
-                        "Production chưa có product_type_id nên không thể kiểm tra bán thành phẩm.");
-                }
-
-                if (!orderReq.print_width_mm.HasValue || orderReq.print_width_mm.Value <= 0)
-                {
-                    throw new InvalidOperationException(
-                        "Order request chưa có print_width_mm nên không thể kiểm tra bán thành phẩm.");
-                }
-
-                if (!orderReq.print_length_mm.HasValue || orderReq.print_length_mm.Value <= 0)
-                {
-                    throw new InvalidOperationException(
-                        "Order request chưa có print_length_mm nên không thể kiểm tra bán thành phẩm.");
-                }
-
-                var selectedSubProduct = await _db.sub_products
-                    .Include(x => x.product_type)
-                    .FirstOrDefaultAsync(x => x.id == req.sub_id.Value, ct);
-
-                if (selectedSubProduct == null)
-                {
-                    throw new InvalidOperationException(
-                        $"Không tìm thấy bán thành phẩm có id = {req.sub_id.Value}.");
-                }
-
-                if (!selectedSubProduct.is_active)
-                {
-                    throw new InvalidOperationException(
-                        "Bán thành phẩm đã chọn đang không hoạt động.");
-                }
-
-                if (selectedSubProduct.product_type_id != prod.product_type_id.Value)
-                {
-                    throw new InvalidOperationException(
-                        "Bán thành phẩm đã chọn không cùng loại sản phẩm với production.");
-                }
-
-                if (selectedSubProduct.width != orderReq.print_width_mm.Value)
-                {
-                    throw new InvalidOperationException(
-                        $"Bán thành phẩm đã chọn không đúng chiều rộng. " +
-                        $"Yêu cầu: {orderReq.print_width_mm.Value}, thực tế: {selectedSubProduct.width}.");
-                }
-
-                if (selectedSubProduct.length != orderReq.print_length_mm.Value)
-                {
-                    throw new InvalidOperationException(
-                        $"Bán thành phẩm đã chọn không đúng chiều dài. " +
-                        $"Yêu cầu: {orderReq.print_length_mm.Value}, thực tế: {selectedSubProduct.length}.");
-                }
-
-                if (selectedSubProduct.quantity < orderQty)
-                {
-                    throw new InvalidOperationException(
-                        $"Số lượng bán thành phẩm không đủ. Cần: {orderQty}, hiện có: {selectedSubProduct.quantity}.");
-                }
-
-                selectedSubProduct.quantity -= orderQty;
-
-                prod.is_full_process = false;
-                prod.sub_product_id = selectedSubProduct.id;
-                prod.sub_product_used_qty = orderQty;
-
-                await ApplySubProductToExistingTasksAsync(
+                var selectedSubProduct = await ResolveValidSubProductAsync(
+                    req.sub_id.Value,
                     prod,
-                    selectedSubProduct,
+                    orderReq,
                     orderQty,
+                    requireEnoughQty: false,
                     ct);
 
+                if (selectedSubProduct.quantity <= 0)
+                    throw new InvalidOperationException("Bán thành phẩm không có số lượng để kết hợp.");
+
+                var subUseQty = Math.Min(selectedSubProduct.quantity, orderQty);
+                var nvlQty = orderQty - subUseQty;
+
+                if (nvlQty <= 0)
+                    throw new InvalidOperationException("Số lượng bán thành phẩm đã đủ. Vui lòng chọn SUB thay vì BOTH.");
+
+                selectedSubProduct.quantity -= subUseQty;
+
+                prod.prod_method = "BOTH";
+                prod.is_full_process = null;
+                prod.sub_product_id = selectedSubProduct.id;
+                prod.sub_product_used_qty = subUseQty;
+                prod.nvl_qty = nvlQty;
+                prod.mgr_note = string.IsNullOrWhiteSpace(req.mgr_note) ? null : req.mgr_note.Trim();
+
+                order.is_production_ready = true;
+                order.is_enough = true;
+
+                // Task sản xuất phần thiếu nvl_qty.
                 await _db.SaveChangesAsync(ct);
                 await tx.CommitAsync(ct);
 
@@ -2078,16 +2138,67 @@ namespace AMMS.Infrastructure.Repositories
                     success = true,
                     order_id = order.order_id,
                     prod_id = prod.prod_id,
-
-                    is_full_process = false,
+                    is_full_process = null,
+                    production_method = "BOTH",
                     sub_product_id = selectedSubProduct.id,
-                    sub_product_used_qty = orderQty,
-
+                    sub_product_used_qty = subUseQty,
+                    nvl_qty = nvlQty,
                     order_quantity = orderQty,
-                    production_method = "UseSubProduct",
-                    message = "Đã chọn phương thức sản xuất bằng bán thành phẩm."
+                    gm_note = prod.gm_note,
+                    mgr_note = prod.mgr_note,
+                    message = $"Đã duyệt sản xuất kết hợp. Dùng {subUseQty} bán thành phẩm, sản xuất thêm {nvlQty} bằng NVL."
                 };
+            }
+                throw new InvalidOperationException("Unsupported production method.");
             });
+        }
+
+        private async Task<sub_product> ResolveValidSubProductAsync(
+    int subId,
+    production prod,
+    order_request orderReq,
+    int orderQty,
+    bool requireEnoughQty,
+    CancellationToken ct)
+        {
+            if (!prod.product_type_id.HasValue || prod.product_type_id.Value <= 0)
+                throw new InvalidOperationException("Production chưa có product_type_id.");
+
+            if (!orderReq.print_width_mm.HasValue || orderReq.print_width_mm.Value <= 0)
+                throw new InvalidOperationException("Order request chưa có print_width_mm.");
+
+            if (!orderReq.print_length_mm.HasValue || orderReq.print_length_mm.Value <= 0)
+                throw new InvalidOperationException("Order request chưa có print_length_mm.");
+
+            var selectedSubProduct = await _db.sub_products
+                .Include(x => x.product_type)
+                .FirstOrDefaultAsync(x => x.id == subId, ct);
+
+            if (selectedSubProduct == null)
+                throw new InvalidOperationException($"Không tìm thấy bán thành phẩm có id = {subId}.");
+
+            if (!selectedSubProduct.is_active)
+                throw new InvalidOperationException("Bán thành phẩm đã chọn đang không hoạt động.");
+
+            if (selectedSubProduct.product_type_id != prod.product_type_id.Value)
+                throw new InvalidOperationException("Bán thành phẩm đã chọn không cùng loại sản phẩm với production.");
+
+            if (selectedSubProduct.width != orderReq.print_width_mm.Value)
+                throw new InvalidOperationException(
+                    $"Bán thành phẩm không đúng chiều rộng. Yêu cầu: {orderReq.print_width_mm.Value}, thực tế: {selectedSubProduct.width}.");
+
+            if (selectedSubProduct.length != orderReq.print_length_mm.Value)
+                throw new InvalidOperationException(
+                    $"Bán thành phẩm không đúng chiều dài. Yêu cầu: {orderReq.print_length_mm.Value}, thực tế: {selectedSubProduct.length}.");
+
+            if (requireEnoughQty && selectedSubProduct.quantity < orderQty)
+                throw new InvalidOperationException(
+                    $"Số lượng bán thành phẩm không đủ. Cần: {orderQty}, hiện có: {selectedSubProduct.quantity}.");
+
+            if (!requireEnoughQty && selectedSubProduct.quantity <= 0)
+                throw new InvalidOperationException("Bán thành phẩm không còn số lượng để kết hợp.");
+
+            return selectedSubProduct;
         }
 
         private async Task RollbackSubProductFinishedTasksAsync(
@@ -2256,7 +2367,7 @@ namespace AMMS.Infrastructure.Repositories
             int orderQty,
             CancellationToken ct)
         {
-            if ((bool)prod.is_full_process)
+            if (prod.is_full_process != false)
                 return;
 
             if (string.IsNullOrWhiteSpace(selectedSubProduct.product_process))
@@ -2497,6 +2608,105 @@ namespace AMMS.Infrastructure.Repositories
             prod.import_recieve_path = path;
             await _db.SaveChangesAsync(ct);
             return true;
+        }
+
+        private static BothStageQuantityContext ResolveBothStageQuantityContext(
+    ProductionDetailDto detail,
+    string? processCode,
+    int currentStageIndex,
+    IReadOnlyList<string?> routeProcessCodes,
+    int fullSheetQty,
+    int fullOutputQty)
+        {
+            var isBoth = string.Equals(
+                detail.production_method,
+                "BOTH",
+                StringComparison.OrdinalIgnoreCase);
+
+            if (!isBoth)
+            {
+                return new BothStageQuantityContext
+                {
+                    stage_sheet_qty = fullSheetQty,
+                    stage_output_qty = fullOutputQty,
+                    is_both = false,
+                    is_stage_covered_by_sub = false,
+                    nvl_ratio = 1m
+                };
+            }
+
+            var orderQty = detail.quantity <= 0 ? 1 : detail.quantity;
+            var nvlQty = detail.nvl_qty > 0
+                ? detail.nvl_qty
+                : Math.Max(orderQty - detail.sub_product_used_qty, 0);
+
+            if (nvlQty <= 0)
+                nvlQty = orderQty;
+
+            var nvlRatio = Math.Clamp((decimal)nvlQty / orderQty, 0m, 1m);
+
+            var subCodes = ParseSelectedProcessCodes(detail.sub_product_process);
+
+            var subLastIndex = -1;
+
+            for (var i = 0; i < routeProcessCodes.Count; i++)
+            {
+                var code = NormalizeProcessCode(routeProcessCodes[i]);
+
+                if (subCodes.Contains(code))
+                    subLastIndex = i;
+            }
+
+            var currentCode = NormalizeProcessCode(processCode);
+
+            var isRalo = currentCode == "RALO" || currentCode == "RA_LO";
+
+            // Nếu sub_product đã đi tới công đoạn X, thì các công đoạn từ đầu tới X chỉ cần sản xuất phần thiếu bằng NVL.
+            var isCoveredBySub =
+                subLastIndex >= 0 &&
+                currentStageIndex <= subLastIndex;
+
+            if (!isCoveredBySub)
+            {
+                // quay về tổng số lượng full.
+                return new BothStageQuantityContext
+                {
+                    stage_sheet_qty = fullSheetQty,
+                    stage_output_qty = fullOutputQty,
+                    is_both = true,
+                    is_stage_covered_by_sub = false,
+                    nvl_ratio = nvlRatio
+                };
+            }
+
+            if (isRalo)
+            {
+                return new BothStageQuantityContext
+                {
+                    stage_sheet_qty = fullSheetQty,
+                    stage_output_qty = fullOutputQty,
+                    is_both = true,
+                    is_stage_covered_by_sub = true,
+                    nvl_ratio = nvlRatio
+                };
+            }
+
+            var scaledSheetQty = Math.Max(
+                1,
+                (int)Math.Ceiling(fullSheetQty * nvlRatio));
+
+            var scaledOutputQty = Math.Max(
+                1,
+                (int)Math.Ceiling(fullOutputQty * nvlRatio));
+
+            return new BothStageQuantityContext
+            {
+                stage_sheet_qty = scaledSheetQty,
+                stage_output_qty = scaledOutputQty,
+                is_both = true,
+                is_stage_covered_by_sub = true,
+                nvl_ratio = nvlRatio
+            };
         }
     }
 }

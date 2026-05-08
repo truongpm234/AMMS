@@ -105,14 +105,47 @@ namespace AMMS.Application.Services
                         await _db.SaveChangesAsync();
                     }
 
-                    var hasTask = await _db.tasks
-                        .AsNoTracking()
-                        .AnyAsync(t => t.prod_id == prod.prod_id);
-
-                    if (hasTask)
+                    if (string.IsNullOrWhiteSpace(prod.prod_method))
                     {
+                        _logger.LogInformation(
+                            "Production method is not selected yet. Create production shell only. OrderId={OrderId}, ProdId={ProdId}",
+                            orderId,
+                            prod.prod_id);
+
                         await tx.CommitAsync();
                         return prod.prod_id;
+                    }
+
+                    var existingTasks = await _db.tasks
+    .Where(t => t.prod_id == prod.prod_id)
+    .OrderBy(t => t.seq_num)
+    .ThenBy(t => t.task_id)
+    .ToListAsync();
+
+                    if (existingTasks.Count > 0)
+                    {
+                        var hasProgressed = existingTasks.Any(t =>
+                            string.Equals(t.status, "Ready", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                            t.start_time != null ||
+                            t.end_time != null);
+
+                        if (hasProgressed)
+                        {
+                            await tx.CommitAsync();
+                            return prod.prod_id;
+                        }
+
+                        var existingTaskIds = existingTasks.Select(x => x.task_id).ToList();
+
+                        var logs = await _db.task_logs
+                            .Where(x => x.task_id.HasValue && existingTaskIds.Contains(x.task_id.Value))
+                            .ToListAsync();
+
+                        _db.task_logs.RemoveRange(logs);
+                        _db.tasks.RemoveRange(existingTasks);
+
+                        await _db.SaveChangesAsync();
                     }
 
                     var orderItems = await _db.order_items
@@ -346,6 +379,30 @@ namespace AMMS.Application.Services
                 }
             ).FirstOrDefaultAsync(ct);
 
+            var prodInfo = await _db.productions
+    .AsNoTracking()
+    .Where(x => x.order_id == orderId)
+    .OrderByDescending(x => x.prod_id)
+    .Select(x => new
+    {
+        x.prod_method,
+        x.sub_product_id,
+        x.sub_product_used_qty,
+        x.nvl_qty
+    })
+    .FirstOrDefaultAsync(ct);
+
+            string? subProductProcess = null;
+
+            if (prodInfo?.sub_product_id.HasValue == true)
+            {
+                subProductProcess = await _db.sub_products
+                    .AsNoTracking()
+                    .Where(x => x.id == prodInfo.sub_product_id.Value)
+                    .Select(x => x.product_process)
+                    .FirstOrDefaultAsync(ct);
+            }
+
             if (row == null || !row.order_request_id.HasValue)
                 return null;
 
@@ -378,6 +435,10 @@ namespace AMMS.Application.Services
                 QueueOrderKey = row.order_id,
                 WaveSheetsRequired = est?.wave_sheets_required ?? 0,
                 WaveSheetsUsed = est?.wave_sheets_used ?? 0,
+                ProductionMethod = prodInfo?.prod_method,
+                SubProductProcess = subProductProcess,
+                SubProductUsedQty = prodInfo?.sub_product_used_qty ?? 0,
+                NvlQty = prodInfo?.nvl_qty ?? 0,
             };
         }
 
@@ -660,19 +721,88 @@ namespace AMMS.Application.Services
             };
         }
 
-        private static decimal GetStageRequiredUnits(string processCode, PlanningContext ctx)
+        private static decimal GetStageRequiredUnits(
+    string processCode,
+    PlanningContext ctx,
+    int stageIndex,
+    IReadOnlyList<string?> routeCodes)
         {
             var pcode = ProductionProcessSelectionHelper.Norm(processCode);
 
+            decimal fullQty;
+
+            if (pcode == "RALO")
+            {
+                return Math.Max(1, ctx.NumberOfPlates);
+            }
+
             if (pcode == "DAN")
-                return SafeInt(ctx.OrderQty, 1);
+            {
+                fullQty = SafeInt(ctx.OrderQty, 1);
+            }
+            else if (pcode == "BOI" && ctx.WaveSheetsUsed > 0)
+            {
+                fullQty = ctx.WaveSheetsUsed;
+            }
+            else if (ctx.SheetsTotal > 0)
+            {
+                fullQty = ctx.SheetsTotal;
+            }
+            else if (ctx.SheetsRequired > 0)
+            {
+                fullQty = ctx.SheetsRequired;
+            }
+            else
+            {
+                fullQty = SafeInt(ctx.OrderQty, 1);
+            }
 
-            if (pcode == "BOI" && ctx.WaveSheetsUsed > 0)
-                return ctx.WaveSheetsUsed;
+            var isBoth = string.Equals(ctx.ProductionMethod, "BOTH", StringComparison.OrdinalIgnoreCase);
 
-            if (ctx.SheetsTotal > 0) return ctx.SheetsTotal;
-            if (ctx.SheetsRequired > 0) return ctx.SheetsRequired;
-            return SafeInt(ctx.OrderQty, 1);
+            if (!isBoth)
+                return fullQty;
+
+            var subCodes = ParseProcessCodesForScheduling(ctx.SubProductProcess);
+            var subLastIndex = -1;
+
+            for (var i = 0; i < routeCodes.Count; i++)
+            {
+                var code = ProductionProcessSelectionHelper.Norm(routeCodes[i]);
+                if (subCodes.Contains(code))
+                    subLastIndex = i;
+            }
+
+            if (subLastIndex < 0)
+                return fullQty;
+
+            var isCoveredBySub = stageIndex <= subLastIndex;
+
+            if (!isCoveredBySub)
+                return fullQty;
+
+            var orderQty = SafeInt(ctx.OrderQty, 1);
+            var nvlQty = ctx.NvlQty > 0
+                ? ctx.NvlQty
+                : Math.Max(orderQty - ctx.SubProductUsedQty, 0);
+
+            if (nvlQty <= 0)
+                return fullQty;
+
+            var ratio = Math.Clamp((decimal)nvlQty / orderQty, 0m, 1m);
+
+            return Math.Max(1m, Math.Ceiling(fullQty * ratio));
+        }
+
+        private static HashSet<string> ParseProcessCodesForScheduling(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            return csv
+                .Split(',', ';', '|', '/', '\\')
+                .Select(ProductionProcessSelectionHelper.Norm)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
 
         private static int GetSetupMinutes(string processCode, PlanningContext ctx)
@@ -827,6 +957,11 @@ namespace AMMS.Application.Services
             string? prevCode = null;
             DateTime? raloEnd = null;
 
+            var routeCodes = steps
+    .OrderBy(x => x.seq_num)
+    .Select(x => (string?)x.process_code)
+    .ToList();
+
             foreach (var step in steps.OrderBy(x => x.seq_num))
             {
                 var pcode = ProductionProcessSelectionHelper.Norm(step.process_code);
@@ -834,8 +969,12 @@ namespace AMMS.Application.Services
                     throw new Exception($"process_code missing for process_id={step.process_id}");
 
                 var unit = GetStageUnit(pcode);
-                var requiredUnits = GetStageRequiredUnits(pcode, ctx);
-
+                var stageIndex = result.Count;
+                var requiredUnits = GetStageRequiredUnits(
+                    pcode,
+                    ctx,
+                    stageIndex,
+                    routeCodes);
                 var candidates = await GetCandidateMachinesAsync(step, candidateCache, ct);
                 if (candidates.Count == 0)
                     throw new Exception($"No active machine found for process_code={pcode}");
