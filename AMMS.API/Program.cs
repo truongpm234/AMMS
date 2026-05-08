@@ -23,7 +23,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Twilio.Types;
-
+using QuestPDF.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
@@ -335,6 +335,8 @@ if (runEmailDispatcher)
 {
     builder.Services.AddHostedService<EmailDispatcherHostedService>();
 }
+
+QuestPDF.Settings.License = LicenseType.Community;
 
 var app = builder.Build();
 

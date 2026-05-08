@@ -814,11 +814,6 @@ namespace AMMS.Application.Services
             if (payment == null)
                 return null;
 
-            //if (!string.Equals(payment.status, "PAID", StringComparison.OrdinalIgnoreCase) &&
-            //    !string.Equals(payment.status, "SUCCESS", StringComparison.OrdinalIgnoreCase))
-            //{
-            //    throw new InvalidOperationException("Payment has not been completed yet.");
-            //}
             var receiptStatus = await ResolveReceiptPaymentStatusAsync(
     payment,
     payosRawJson: null,
@@ -954,9 +949,7 @@ namespace AMMS.Application.Services
                 BankName = _config["Receipt:BankName"] ?? ""
             };
 
-            var templatePath = ResolveReceiptTemplatePath();
-
-            var placeholders = PaymentReceiptDocxHelper.BuildPlaceholders(
+            var placeholders = PaymentReceiptPlaceholderHelper.BuildPlaceholders(
                 request,
                 payment,
                 order,
@@ -968,14 +961,8 @@ namespace AMMS.Application.Services
                 paidBeforeThisReceipt,
                 remainingAfterThisReceipt);
 
-            var templateBytes = await File.ReadAllBytesAsync(templatePath, ct);
-
-            // Tạo PDF từ template DOCX
-            var generatedPdfBytes = await PaymentReceiptDocxHelper.GeneratePdfAsync(
-                templateBytes,
-                placeholders,
-                _config["LibreOffice:BinaryPath"],
-                ct);
+            // Tạo PDF
+            var generatedPdfBytes = PaymentReceiptPdfHelper.GeneratePdf(placeholders);
 
             var fileName = $"phieu-thu-{payment.order_code}.pdf";
             var contentType = "application/pdf";
@@ -983,24 +970,7 @@ namespace AMMS.Application.Services
             return (generatedPdfBytes, fileName, contentType);
         }
 
-        private string ResolveReceiptTemplatePath()
-        {
-            var candidates = new[]
-            {
-        Path.Combine(_env.ContentRootPath, "Templates", "PhieuThuTemplate.docx"),
-        Path.Combine(AppContext.BaseDirectory, "Templates", "PhieuThuTemplate.docx")
-    };
-
-            foreach (var path in candidates)
-            {
-                if (File.Exists(path))
-                    return path;
-            }
-
-            throw new FileNotFoundException(
-                "Receipt template not found. Checked paths: " + string.Join(" | ", candidates));
-        }
-
+       
         private static bool IsSuccessfulPaymentStatus(string? status)
         {
             var st = (status ?? "").Trim().ToUpperInvariant();
