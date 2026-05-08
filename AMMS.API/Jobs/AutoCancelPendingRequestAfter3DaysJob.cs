@@ -80,7 +80,6 @@ namespace AMMS.API.Jobs
                             return false;
                         }
 
-                        // check lại để tránh race condition
                         if (!string.Equals(req.process_status, "Pending", StringComparison.OrdinalIgnoreCase))
                         {
                             await tx.RollbackAsync(ct);

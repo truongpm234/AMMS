@@ -227,7 +227,7 @@ CancellationToken ct)
                 });
             }
 
-            // Lấy thông tin hiện tại từ PayOS
+            // Lấy thông tin từ PayOS
             PayOsResultDto? info = null;
             try
             {

@@ -102,7 +102,6 @@ public class TasksController : ControllerBase
             stage_index = policy.stage_index,
             stage_count = policy.stage_count,
 
-            // Dễ hiểu hơn cho FE: số lượng output production đang dùng cho QR
             production_output_qty = policy.suggested_qty,
             production_output_unit = policy.qty_unit,
 
@@ -162,12 +161,10 @@ public class TasksController : ControllerBase
 
         if (isAuto)
         {
-            // Quan trọng:
-            // Không tự tính qty trong controller.
-            // Luôn lấy suggested_qty từ TaskRepository.GetQtyPolicyAsync().
+            // suggested_qty từ TaskRepository.GetQtyPolicyAsync().
             // suggested_qty đã được đồng bộ theo logic Production:
             // - RALO: number_of_plates
-            // - Từ CAT trở đi: sheets_total * n_up
+            // - Từ CAT: sheets_total * n_up
             qtyGood = policy.suggested_qty;
 
             if (qtyGood <= 0)

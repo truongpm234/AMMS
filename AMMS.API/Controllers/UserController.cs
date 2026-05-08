@@ -50,8 +50,6 @@ namespace AMMS.API.Controllers
         {
             var payload = await _googleAuthService.VerifyToken(req.id_token);
 
-            // TODO: check DB user theo payload.Email
-            // TODO: nếu chưa có → tạo user
             if (payload.EmailVerified)
             {
                 var token = _jwt.GenerateTokenForGoogle(
@@ -160,7 +158,6 @@ namespace AMMS.API.Controllers
 
             try
             {
-                // 🔥 detect loại file chuẩn
                 if (file.FileName.EndsWith(".xls"))
                 {
                     reader = ExcelDataReader.ExcelReaderFactory.CreateBinaryReader(stream);

@@ -25,7 +25,6 @@ namespace AMMS.API.Controllers
             return StatusCode(StatusCodes.Status201Created, result);
         }
 
-        // ✅ CHANGED: get all (paged)
         [HttpGet("orders")]
         public async Task<IActionResult> GetPurchaseOrders(
             [FromQuery] string? status = null,
@@ -56,7 +55,6 @@ namespace AMMS.API.Controllers
             if (purchaseId <= 0)
                 return BadRequest("purchaseId is required");
 
-            // body status bắt buộc
             if (body == null || string.IsNullOrWhiteSpace(body.status))
                 return BadRequest("Request body status is required");
 
@@ -64,7 +62,6 @@ namespace AMMS.API.Controllers
             return Ok(result);
         }
 
-        // ✅ CHANGED: pending (paged)
         [HttpGet("pending")]
         public async Task<IActionResult> GetPendingPurchases(
             [FromQuery] int page = 1,
