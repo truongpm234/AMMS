@@ -72,7 +72,7 @@ namespace AMMS.Infrastructure.Repositories
                 // Giữ đúng logic nghiệp vụ: chỉ tính missing cho order đang LayoutPending
                 var orderIds = await _db.orders.AsNoTracking()
                     .Where(o =>
-                        o.status == "LayoutPending" &&
+                        (o.status == "LayoutPending" || o.status == "Scheduled") &&
                         (o.is_enough == null || o.is_enough == false))
                     .Select(o => o.order_id)
                     .Distinct()
