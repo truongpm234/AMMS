@@ -177,5 +177,31 @@ namespace AMMS.Infrastructure.Repositories
                 .Select(x => x.phone_number)
                 .FirstOrDefaultAsync(ct);
         }
+
+        public async Task<user?> UpdateProfileAsync(int userId, UpdateProfileDto dto, CancellationToken ct = default)
+        {
+            var user = await _db.users
+                .FirstOrDefaultAsync(x => x.user_id == userId, ct);
+
+            if (user == null)
+                return null;
+
+            // field nào null hoặc rỗng -> giữ nguyên
+            if (!string.IsNullOrWhiteSpace(dto.full_name))
+                user.full_name = dto.full_name.Trim();
+
+            if (!string.IsNullOrWhiteSpace(dto.phone_number))
+                user.phone_number = dto.phone_number.Trim();
+
+            if (!string.IsNullOrWhiteSpace(dto.address))
+                user.address = dto.address.Trim();
+
+            if (!string.IsNullOrWhiteSpace(dto.email))
+                user.email = dto.email.Trim();
+
+            await _db.SaveChangesAsync(ct);
+
+            return user;
+        }
     }
 }
