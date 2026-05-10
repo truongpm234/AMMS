@@ -606,12 +606,10 @@ namespace AMMS.Application.Services
 
             await _requestRepo.SaveChangesAsync();
 
-            await _hub.Clients.Group(RealtimeGroups.ByRole("manager"))
-                .SendAsync("processing", new { message = $"Có yêu cầu #{req.order_request_id} cần duyệt" });
             //Khánh sửa signalr
             await _hub.Clients.Group(RealtimeGroups.ByRole("manager")).SendAsync("processing", new { message = $"Có yêu cầu #{req.order_request_id} cần duyệt" });
             await _hub.Clients.All.SendAsync("update-ui", new { message = "update UI" });
-            //Khánh sửa signalr
+            await _notificationService.CreateNotfi(3, $"Có yêu cầu #{req.order_request_id} cần duyệt", null, req.order_request_id, "Processing");
         }
 
         public async Task<RequestWithTwoEstimatesDto?> GetCompareQuotesAsync(int requestId, CancellationToken ct = default)
