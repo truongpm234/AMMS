@@ -288,5 +288,41 @@ namespace AMMS.API.Controllers
 
             return Ok("Upload thành công");
         }
+
+        [Authorize]
+        [HttpPut("/update-profile")]
+        public async Task<IActionResult> UpdateProfile(
+    [FromBody] UpdateProfileDto dto,
+    CancellationToken ct)
+        {
+            var userIdClaim = User.FindFirst("user_id")?.Value;
+
+            if (string.IsNullOrEmpty(userIdClaim))
+                return Unauthorized();
+
+            var userId = int.Parse(userIdClaim);
+
+            var updatedUser = await _userService.UpdateProfileAsync(userId, dto, ct);
+
+            if (updatedUser == null)
+                return NotFound(new
+                {
+                    message = "User không tồn tại"
+                });
+
+            return Ok(new
+            {
+                message = "Cập nhật profile thành công",
+                data = new
+                {
+                    updatedUser.user_id,
+                    updatedUser.full_name,
+                    updatedUser.phone_number,
+                    updatedUser.address,
+                    updatedUser.email,
+                    updatedUser.username
+                }
+            });
+        }
     }
 }

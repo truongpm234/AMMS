@@ -12,5 +12,6 @@ namespace AMMS.Application.Interfaces
         Task<List<user>> GetAllUser();
         Task ResetPasswordAsync(ResetPasswordRequest request);
         Task<user?> GetUserById(int user_id);
+        Task<user?> UpdateProfileAsync(int userId,UpdateProfileDto dto, CancellationToken ct = default);
     }
 }

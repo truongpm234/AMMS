@@ -121,5 +121,10 @@ namespace AMMS.Application.Services
             var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(input));
             return Convert.ToHexString(bytes);
         }
+
+        public async Task<user?> UpdateProfileAsync(int userId, UpdateProfileDto dto, CancellationToken ct = default)
+        {
+            return await _userRepository.UpdateProfileAsync(userId, dto, ct);
+        }
     }
 }
