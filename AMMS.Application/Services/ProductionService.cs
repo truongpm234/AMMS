@@ -844,14 +844,14 @@ namespace AMMS.Application.Services
                 ? "NO_CODE"
                 : source.order_code.Trim();
 
-            var fileName = $"phieu_nhap_kho_{safeOrderCode}_{source.prod_id}.docx";
+            var fileName = $"phieu_nhap_kho_{safeOrderCode}_{source.prod_id}.pdf";
 
             var tempFolder = Path.Combine(Path.GetTempPath(), "amms-import-receives");
             Directory.CreateDirectory(tempFolder);
 
             var tempFilePath = Path.Combine(tempFolder, fileName);
 
-            ImportReceiveDocxHelper.Generate(tempFilePath, source);
+            ImportReceivePdfHelper.Generate(tempFilePath, source);
 
             var publicId = $"import-receives/phieu_nhap_kho_{safeOrderCode}_{source.prod_id}";
 
