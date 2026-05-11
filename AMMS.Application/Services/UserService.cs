@@ -134,5 +134,10 @@ namespace AMMS.Application.Services
 
             return await _userRepository.AddAddressAsync(userId, address);
         }
+
+        public async Task<bool> DeleteAddressAsync(int userId, int index)
+        {
+            return await _userRepository.DeleteAddressAsync(userId, index);
+        }
     }
 }

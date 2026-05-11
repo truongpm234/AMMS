@@ -225,5 +225,23 @@ namespace AMMS.Infrastructure.Repositories
 
             return true;
         }
+
+        public async Task<bool> DeleteAddressAsync(int userId, int index)
+        {
+            var user = await _db.users
+                .FirstOrDefaultAsync(x => x.user_id == userId);
+
+            if (user == null || user.address == null)
+                return false;
+
+            if (index < 0 || index >= user.address.Count)
+                return false;
+
+            user.address.RemoveAt(index);
+
+            await _db.SaveChangesAsync();
+
+            return true;
+        }
     }
 }

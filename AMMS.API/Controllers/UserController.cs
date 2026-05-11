@@ -347,5 +347,38 @@ namespace AMMS.API.Controllers
                 message = "Thêm địa chỉ thành công"
             });
         }
+
+        [Authorize]
+        [HttpDelete("delete-address")]
+        public async Task<IActionResult> DeleteAddress([FromBody] DeleteAddressDto dto)
+        {
+            var userIdClaim = User.FindFirst("user_id")?.Value;
+
+            if (string.IsNullOrWhiteSpace(userIdClaim))
+            {
+                return Unauthorized(new
+                {
+                    message = "User not found"
+                });
+            }
+
+            var success = await _userService.DeleteAddressAsync(
+                int.Parse(userIdClaim),
+                dto.index
+            );
+
+            if (!success)
+            {
+                return BadRequest(new
+                {
+                    message = "Invalid address index"
+                });
+            }
+
+            return Ok(new
+            {
+                message = "Delete address successfully"
+            });
+        }
     }
 }

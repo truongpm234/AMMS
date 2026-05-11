@@ -17,5 +17,6 @@ namespace AMMS.Infrastructure.Interfaces
         Task<string?> GetPhoneNumberByUserIdAsync(int userId, CancellationToken ct = default);
         Task<user?> UpdateProfileAsync(int userId, UpdateProfileDto dto, CancellationToken ct = default);
         Task<bool> AddAddressAsync(int userId, string address);
+        Task<bool> DeleteAddressAsync(int userId, int index);
     }
 }
