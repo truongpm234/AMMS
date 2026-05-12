@@ -748,6 +748,10 @@ public partial class AppDbContext : DbContext
                 .WithMany(x => x.prod_orders)
                 .HasForeignKey(x => x.prod_id);
 
+            entity.Property(x => x.created_at)
+                .HasColumnType("timestamp without time zone")
+                .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
             entity.HasOne(x => x.order)
                 .WithMany()
                 .HasForeignKey(x => x.order_id);
@@ -760,7 +764,12 @@ public partial class AppDbContext : DbContext
         modelBuilder.Entity<task_link>(entity =>
         {
             entity.ToTable("task_links", "AMMS_DB");
+
             entity.HasKey(x => x.id);
+
+            entity.Property(x => x.created_at)
+                .HasColumnType("timestamp without time zone")
+                .HasDefaultValueSql("CURRENT_TIMESTAMP");
 
             entity.HasIndex(x => new { x.group_task_id, x.single_task_id })
                 .IsUnique();
@@ -769,6 +778,11 @@ public partial class AppDbContext : DbContext
         modelBuilder.Entity<task_qty>(entity =>
         {
             entity.ToTable("task_qtys", "AMMS_DB");
+
+            entity.Property(x => x.created_at)
+                .HasColumnType("timestamp without time zone")
+                .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
             entity.HasKey(x => x.id);
         });
 
