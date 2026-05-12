@@ -6,6 +6,7 @@ using AMMS.Shared.DTOs.Productions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using System.Security.Claims;
+using System.Text.Json;
 
 [ApiController]
 [Route("api/[controller]")]
@@ -17,6 +18,7 @@ public class TasksController : ControllerBase
     private readonly ITaskService _taskService;
     private readonly AppDbContext _db;
     private readonly IHubContext<RealtimeHub> _hub;
+    private readonly ICloudinaryFileStorageService _fileStorage;
 
     public TasksController(
         AppDbContext db,
@@ -24,7 +26,8 @@ public class TasksController : ControllerBase
         ITaskRepository taskRepo,
         ITaskQrTokenService tokenSvc,
         ITaskScanService scanSvc,
-        ITaskService taskService)
+        ITaskService taskService,
+        ICloudinaryFileStorageService fileStorage)
     {
         _db = db;
         _taskRepo = taskRepo;
@@ -32,6 +35,7 @@ public class TasksController : ControllerBase
         _scanSvc = scanSvc;
         _taskService = taskService;
         _hub = hub;
+        _fileStorage = fileStorage;
     }
 
     private int? GetCurrentUserId()
@@ -270,54 +274,125 @@ public class TasksController : ControllerBase
     }
 
     [HttpPost("finish")]
-    public async Task<ActionResult<ScanTaskResult>> Finish([FromBody] ScanTaskRequest req)
+    [Consumes("multipart/form-data")]
+    [RequestSizeLimit(30 * 1024 * 1024)]
+    public async Task<ActionResult<ScanTaskResult>> Finish(
+    [FromForm] FinishTaskFormRequest req,
+    CancellationToken ct)
     {
         if (req == null || string.IsNullOrWhiteSpace(req.token))
         {
             return BadRequest(new
             {
-                message = "Invalid request or missing token."
+                message = "Missing token."
             });
         }
 
         try
         {
+            var imageUrls = await UploadTaskReportImagesAsync(req.images, ct);
+
+            var scanReq = new ScanTaskRequest
+            {
+                token = req.token.Trim(),
+                reason = string.IsNullOrWhiteSpace(req.reason)
+                    ? null
+                    : req.reason.Trim(),
+
+                // Lưu nhiều link cách nhau bằng dấu phẩy.
+                // Không ảnh thì null.
+                report_image_url = imageUrls.Count == 0
+                    ? null
+                    : string.Join(",", imageUrls)
+            };
+
             var scannedByUserId = GetCurrentUserId();
 
             var res = await _scanSvc.ScanFinishAsync(
-                req,
-                scannedByUserId);
+                scanReq,
+                scannedByUserId,
+                ct);
 
             return Ok(res);
         }
         catch (ArgumentOutOfRangeException ex)
         {
-            return BadRequest(new
-            {
-                message = ex.Message
-            });
+            return BadRequest(new { message = ex.Message });
         }
         catch (ArgumentException ex)
         {
-            return BadRequest(new
-            {
-                message = ex.Message
-            });
+            return BadRequest(new { message = ex.Message });
         }
         catch (InvalidOperationException ex)
         {
-            return BadRequest(new
-            {
-                message = ex.Message
-            });
+            return BadRequest(new { message = ex.Message });
         }
         catch (Exception ex)
         {
-            return BadRequest(new
-            {
-                message = ex.Message
-            });
+            return BadRequest(new { message = ex.Message });
         }
+    }
+
+    private async Task<List<string>> UploadTaskReportImagesAsync(
+    List<IFormFile>? images,
+    CancellationToken ct)
+    {
+        var files = (images ?? new List<IFormFile>())
+            .Where(x => x != null && x.Length > 0)
+            .ToList();
+
+        var urls = new List<string>();
+
+        if (files.Count == 0)
+            return urls;
+
+        const int maxImageCount = 10;
+        const long maxEachImageBytes = 5 * 1024 * 1024;
+        const long maxTotalImageBytes = 30 * 1024 * 1024;
+
+        if (files.Count > maxImageCount)
+        {
+            throw new InvalidOperationException(
+                $"Chỉ được upload tối đa {maxImageCount} ảnh cho một lần báo cáo.");
+        }
+
+        var totalBytes = files.Sum(x => x.Length);
+        if (totalBytes > maxTotalImageBytes)
+        {
+            throw new InvalidOperationException(
+                "Tổng dung lượng ảnh upload không được vượt quá 30MB.");
+        }
+
+        foreach (var image in files)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (string.IsNullOrWhiteSpace(image.ContentType) ||
+                !image.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"File {image.FileName} không phải là ảnh.");
+            }
+
+            if (image.Length > maxEachImageBytes)
+            {
+                throw new InvalidOperationException(
+                    $"Ảnh {image.FileName} không được vượt quá 5MB.");
+            }
+
+            await using var stream = image.OpenReadStream();
+
+            var url = await _fileStorage.UploadAsync(
+                stream,
+                image.FileName,
+                image.ContentType,
+                "task-reports");
+
+            if (!string.IsNullOrWhiteSpace(url))
+                urls.Add(url.Trim());
+        }
+
+        return urls;
     }
 
     [HttpPut("ready")]

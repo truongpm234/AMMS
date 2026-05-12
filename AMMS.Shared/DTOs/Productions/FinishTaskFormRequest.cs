@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Microsoft.AspNetCore.Http;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -6,10 +7,10 @@ using System.Threading.Tasks;
 
 namespace AMMS.Shared.DTOs.Productions
 {
-    public class ScanTaskRequest
+    public class FinishTaskFormRequest
     {
-        public string token { get; set; } = null!;
+        public string token { get; set; } = "";
         public string? reason { get; set; }
-        public string? report_image_url { get; set; }
+        public List<IFormFile>? images { get; set; } = new();
     }
 }

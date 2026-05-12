@@ -21,6 +21,8 @@ public partial class task_log
 
     public DateTime? log_time { get; set; }
 
+    public string? report_image_url { get; set; }
+
     public string? reason { get; set; }
 
     [Column(TypeName = "jsonb")]

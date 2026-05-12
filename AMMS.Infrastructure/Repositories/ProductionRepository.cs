@@ -565,23 +565,28 @@ namespace AMMS.Infrastructure.Repositories
             var taskIds = tasks.Select(x => x.task_id).ToList();
 
             var logs = await _db.task_logs.AsNoTracking()
-    .Where(l => l.task_id != null && taskIds.Contains(l.task_id.Value))
-    .OrderBy(l => l.log_time)
-    .Select(l => new TaskLogDto
-    {
-        log_id = l.log_id,
-        task_id = l.task_id!.Value,
-        action_type = l.action_type,
-        qty_good = l.qty_good ?? 0,
-        log_time = l.log_time,
-        scanned_code = l.scanned_code,
-        scanned_by_user_id = l.scanned_by_user_id,
-        material_usage_json = l.material_usage_json
-    })
-    .ToListAsync(ct);
+                 .Where(l => l.task_id != null && taskIds.Contains(l.task_id.Value))
+                 .OrderBy(l => l.log_time)
+                 .Select(l => new TaskLogDto
+                 {
+                     log_id = l.log_id,
+                     task_id = l.task_id!.Value,
+                     action_type = l.action_type,
+                     qty_good = l.qty_good ?? 0,
+                     log_time = l.log_time,
+                     scanned_code = l.scanned_code,
+                     scanned_by_user_id = l.scanned_by_user_id,
+                     reason = l.reason,
+                     report_image_url = l.report_image_url,
+
+                     material_usage_json = l.material_usage_json
+                 })
+                 .ToListAsync(ct);
 
             foreach (var log in logs)
             {
+                log.report_image_urls = SplitImageUrls(log.report_image_url);
+
                 if (!string.IsNullOrWhiteSpace(log.material_usage_json))
                 {
                     try
@@ -706,6 +711,19 @@ namespace AMMS.Infrastructure.Repositories
 
             dto.stages = stages;
             return dto;
+        }
+
+        private static List<string> SplitImageUrls(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         public async Task<ProductionWasteReportDto?> GetProductionWasteAsync(int prodId, CancellationToken ct = default)

@@ -32,6 +32,8 @@ public partial class task
 
     public string? reason { get; set; }
 
+    public string input_mode { get; set; } = "ESTIMATE";
+
     public virtual product_type_process? process { get; set; }
 
     public virtual production? prod { get; set; }

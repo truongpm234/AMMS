@@ -140,11 +140,12 @@ namespace AMMS.Application.Services
                     qty_good = qtyGood,
                     log_time = now,
                     scanned_by_user_id = scannedByUserId,
-                    material_usage_json = materialUsageJson
+                    material_usage_json = materialUsageJson,
+                    reason = NormalizeNullableText(req.reason, 1000),
+                    report_image_url = NormalizeNullableText(req.report_image_url, 8000)
                 };
                 await _logRepo.AddAsync(finishLog);
 
-                // hoàn kho từ dữ liệu đã nhúng trong QR
                 foreach (var item in materialUsageSnapshot)
                 {
                     if (item.quantity_left > 0 && item.is_stock)
@@ -251,6 +252,19 @@ namespace AMMS.Application.Services
             }
 
             return result;
+        }
+
+        private static string? NormalizeNullableText(string? value, int maxLength)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            var text = value.Trim();
+
+            if (maxLength > 0 && text.Length > maxLength)
+                text = text[..maxLength];
+
+            return text;
         }
 
         private static void ValidateMaterialUsageInput(
@@ -420,13 +434,17 @@ namespace AMMS.Application.Services
     string fallbackCode,
     string fallbackName,
     string unit,
-    material? resolvedMaterial)
+    material? resolvedMaterial,
+    bool ceilWhenBothRatio = false)
             {
                 if (bothScale.ShouldScale)
                     estimatedQty = estimatedQty * bothScale.Ratio;
 
                 if (estimatedQty <= 0)
                     return;
+
+                if (bothScale.ShouldScale && ceilWhenBothRatio)
+                    estimatedQty = Math.Ceiling(estimatedQty);
 
                 var normalizedFallbackCode = NormalizeMaterialCode(
                     !string.IsNullOrWhiteSpace(fallbackCode) ? fallbackCode : fallbackName);
@@ -469,7 +487,8 @@ namespace AMMS.Application.Services
                             fallbackCode: est.paper_code ?? "PAPER",
                             fallbackName: est.paper_name ?? "Giấy thô",
                             unit: "tờ",
-                            resolvedMaterial: paperMat);
+                            resolvedMaterial: paperMat,
+                            ceilWhenBothRatio: true);
                         break;
                     }
 
@@ -483,7 +502,8 @@ namespace AMMS.Application.Services
                             fallbackCode: est.paper_code ?? "PAPER",
                             fallbackName: est.paper_name ?? "Giấy in",
                             unit: "tờ",
-                            resolvedMaterial: paperMat);
+                            resolvedMaterial: paperMat,
+                            ceilWhenBothRatio: true);
 
                         // 2. Mực in
                         var inkMat = await ResolveMaterialByCodesOrNamesAsync(

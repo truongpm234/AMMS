@@ -16,7 +16,10 @@ namespace AMMS.Shared.DTOs.Productions
         public DateTime? log_time { get; set; }
         public string? scanned_code { get; set; }
         public int? scanned_by_user_id { get; set; }
-
+        public string? reason { get; set; }
+        public string? comment { get; set; }
+        public string? report_image_url { get; set; }
+        public List<string> report_image_urls { get; set; } = new();
         [JsonIgnore]
         public string? material_usage_json { get; set; }
 

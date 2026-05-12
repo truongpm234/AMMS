@@ -1359,6 +1359,8 @@ namespace AMMS.Application.Services
                     qty_good = qtyGood,
                     log_time = now,
                     scanned_by_user_id = null,
+                    reason = null,
+                    report_image_url = null,
                     material_usage_json = null
                 }, ct);
             }
