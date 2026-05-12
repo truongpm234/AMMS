@@ -34,10 +34,6 @@ public partial class AppDbContext : DbContext
 
     public virtual DbSet<production> productions { get; set; }
 
-    public virtual DbSet<purchase> purchases { get; set; }
-
-    public virtual DbSet<purchase_item> purchase_items { get; set; }
-
     public virtual DbSet<quote> quotes { get; set; }
 
     public virtual DbSet<role> roles { get; set; }
@@ -267,49 +263,7 @@ public partial class AppDbContext : DbContext
                 .HasConstraintName("fk_productions_sub_product");
         });
 
-        modelBuilder.Entity<purchase>(entity =>
-        {
-            entity.HasKey(e => e.purchase_id).HasName("purchases_pkey");
-
-            entity.HasIndex(e => e.code, "purchases_code_key").IsUnique();
-
-            entity.Property(e => e.code).HasMaxLength(20);
-            entity.Property(e => e.created_at)
-                  .HasDefaultValueSql("CURRENT_TIMESTAMP")
-                  .HasColumnType("timestamp without time zone");
-
-            entity.Property(e => e.status)
-                  .HasMaxLength(20)
-                  .HasDefaultValueSql("'Pending'::character varying");
-
-            entity.Property(e => e.created_by).HasColumnName("created_by");
-
-            entity.HasOne(d => d.created_byNavigation)
-                  .WithMany(u => u.purchases)
-                  .HasForeignKey(d => d.created_by)
-                  .HasConstraintName("purchases_created_by_fkey");
-
-            entity.HasOne(d => d.supplier).WithMany(p => p.purchases)
-                  .HasForeignKey(d => d.supplier_id)
-                  .HasConstraintName("purchases_supplier_id_fkey");
-        });
-
-        modelBuilder.Entity<purchase_item>(entity =>
-        {
-            entity.HasKey(e => e.id).HasName("purchase_items_pkey");
-
-            entity.Property(e => e.price).HasPrecision(15, 2);
-            entity.Property(e => e.qty_ordered).HasPrecision(10, 2);
-
-            entity.HasOne(d => d.material).WithMany(p => p.purchase_items)
-                .HasForeignKey(d => d.material_id)
-                .HasConstraintName("purchase_items_material_id_fkey");
-
-            entity.HasOne(d => d.purchase).WithMany(p => p.purchase_items)
-                .HasForeignKey(d => d.purchase_id)
-                .HasConstraintName("purchase_items_purchase_id_fkey");
-        });
-
+      
         modelBuilder.Entity<quote>(entity =>
         {
             entity.HasKey(e => e.quote_id).HasName("quotes_pkey");
@@ -356,10 +310,6 @@ public partial class AppDbContext : DbContext
                 .HasForeignKey(d => d.user_id)
                 .HasConstraintName("stock_moves_user_id_fkey");
 
-            entity.HasOne(d => d.purchase)
-                .WithMany(p => p.stock_moves)
-                .HasForeignKey(d => d.purchase_id)
-                .HasConstraintName("stock_moves_purchase_id_fkey");
             entity.HasIndex(e => new { e.type, e.ref_doc })
                 .IsUnique()
                 .HasDatabaseName("ux_stock_moves_type_ref_doc");

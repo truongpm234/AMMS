@@ -17,7 +17,6 @@ namespace AMMS.API.Controllers
     public class OrdersController : ControllerBase
     {
         private readonly IOrderService _service;
-        private readonly IMaterialPurchaseRequestService _materialPurchaseService;
         private readonly IDealService _dealService;
         private readonly ILogger<OrdersController> _logger;
         private readonly IPaymentsService _paymentsService;
@@ -25,12 +24,11 @@ namespace AMMS.API.Controllers
         private readonly IPayOsService _payos;
         private readonly IConfiguration _config;
         private readonly IHubContext<RealtimeHub> _hub;
-        public OrdersController(IHubContext<RealtimeHub> hub, IOrderService service, IMaterialPurchaseRequestService materialPurchaseService, IDealService dealService, ILogger<OrdersController> logger,
+        public OrdersController(IHubContext<RealtimeHub> hub, IOrderService service, IDealService dealService, ILogger<OrdersController> logger,
             IPaymentsService paymentsService, AppDbContext appDbContext, IPayOsService payos, IConfiguration config)
         {
             _hub = hub;
             _service = service;
-            _materialPurchaseService = materialPurchaseService;
             _dealService = dealService;
             _logger = logger;
             _paymentsService = paymentsService;
@@ -67,32 +65,6 @@ namespace AMMS.API.Controllers
 
             return Ok(dto);
         }
-
-        [HttpPost("{orderId:int}/auto-purchase")]
-        public async Task<IActionResult> CreateAutoPurchase(
-            int orderId,
-            [FromBody] AutoPurchaseFromOrderRequest req,
-            CancellationToken ct)
-        {
-            try
-            {
-                var result = await _materialPurchaseService.CreateFromOrderAsync(
-                    orderId,
-                    req.ManagerId,
-                    ct);
-
-                return Ok(result);
-            }
-            catch (KeyNotFoundException ex)
-            {
-                return NotFound(new { message = ex.Message });
-            }
-            catch (InvalidOperationException ex)
-            {
-                return BadRequest(new { message = ex.Message });
-            }
-        }
-
         [HttpGet("missing-materials")]
         public async Task<IActionResult> GetAllMissingMaterials(
             [FromQuery] int page = 1,

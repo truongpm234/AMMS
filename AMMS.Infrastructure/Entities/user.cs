@@ -31,8 +31,6 @@ public partial class user
 
     public virtual ICollection<production> productions { get; set; } = new List<production>();
 
-    public virtual ICollection<purchase> purchases { get; set; } = new List<purchase>();
-
     public virtual role? role { get; set; }
 
     public virtual ICollection<stock_move> stock_moves { get; set; } = new List<stock_move>();

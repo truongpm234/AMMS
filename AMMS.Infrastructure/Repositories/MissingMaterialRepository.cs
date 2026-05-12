@@ -69,7 +69,7 @@ namespace AMMS.Infrastructure.Repositories
                 _db.missing_materials.RemoveRange(_db.missing_materials);
                 await _db.SaveChangesAsync(ct);
 
-                // Giữ đúng logic nghiệp vụ: chỉ tính missing cho order đang LayoutPending
+                // Chỉ tính missing cho order đang cần kiểm tra vật tư
                 var orderIds = await _db.orders.AsNoTracking()
                     .Where(o =>
                         (o.status == "LayoutPending" || o.status == "Scheduled") &&
@@ -81,7 +81,11 @@ namespace AMMS.Infrastructure.Repositories
                 if (orderIds.Count == 0)
                 {
                     await tx.CommitAsync(ct);
-                    return new { insertedRows = 0, message = "No target orders to recalculate." };
+                    return new
+                    {
+                        insertedRows = 0,
+                        message = "No target orders to recalculate."
+                    };
                 }
 
                 var bomLines = await (
@@ -110,14 +114,21 @@ namespace AMMS.Infrastructure.Repositories
                 if (bomLines.Count == 0)
                 {
                     await tx.CommitAsync(ct);
-                    return new { insertedRows = 0, message = "No BOM lines found." };
+                    return new
+                    {
+                        insertedRows = 0,
+                        message = "No BOM lines found."
+                    };
                 }
 
                 var today = AppTime.NowVnUnspecified().Date;
                 var historyStart = today.AddDays(-30);
                 var historyEndExclusive = today.AddDays(1);
 
-                var materialIdsInBom = bomLines.Select(x => x.MaterialId).Distinct().ToList();
+                var materialIdsInBom = bomLines
+                    .Select(x => x.MaterialId)
+                    .Distinct()
+                    .ToList();
 
                 var usageLast30 = await _db.stock_moves.AsNoTracking()
                     .Where(s =>
@@ -136,38 +147,25 @@ namespace AMMS.Infrastructure.Repositories
 
                 var usageDict = usageLast30.ToDictionary(
                     x => x.MaterialId,
-                    x => Math.Round(x.Usage, 4));
-
-                var orderedOutstandingList = await (
-                    from pi in _db.purchase_items.AsNoTracking()
-                    join p in _db.purchases.AsNoTracking() on pi.purchase_id equals p.purchase_id
-                    where p.status == "Ordered"
-                          && pi.material_id != null
-                          && materialIdsInBom.Contains(pi.material_id.Value)
-                    group pi by pi.material_id!.Value into g
-                    select new
-                    {
-                        MaterialId = g.Key,
-                        QtyOrdered = g.Sum(x => x.qty_ordered ?? 0m)
-                    }
-                ).ToListAsync(ct);
-
-                var orderedOutstandingDict = orderedOutstandingList.ToDictionary(
-                    x => x.MaterialId,
-                    x => Math.Round(x.QtyOrdered, 4)
+                    x => Math.Round(x.Usage, 4)
                 );
 
                 var now = AppTime.NowVnUnspecified();
 
                 var insertRows = bomLines
-                    .GroupBy(x => new { x.MaterialId, x.MaterialName, x.Unit })
+                    .GroupBy(x => new
+                    {
+                        x.MaterialId,
+                        x.MaterialName,
+                        x.Unit
+                    })
                     .Select(g =>
                     {
                         decimal requiredQty = 0m;
 
                         foreach (var r in g)
                         {
-                            decimal lineRequired = 0m;
+                            decimal lineRequired;
 
                             // Ưu tiên qty_total nếu BOM đã lưu sẵn tổng lượng cần
                             if (r.QtyTotal.HasValue && r.QtyTotal.Value > 0m)
@@ -182,37 +180,39 @@ namespace AMMS.Infrastructure.Repositories
                             }
                             else
                             {
-                                // Không lấy mặc định = 0 gây sai lệch như code cũ
                                 continue;
                             }
 
-                            if (lineRequired < 0m) lineRequired = 0m;
+                            if (lineRequired < 0m)
+                                lineRequired = 0m;
+
                             requiredQty += lineRequired;
                         }
 
                         usageDict.TryGetValue(g.Key.MaterialId, out var usage30);
+
                         var safetyQty = Math.Round(usage30 * 0.30m, 4);
 
-                        var needed = Math.Round(requiredQty + safetyQty, 0, MidpointRounding.AwayFromZero);
+                        var needed = Math.Round(
+                            requiredQty + safetyQty,
+                            0,
+                            MidpointRounding.AwayFromZero
+                        );
+
                         var available = Math.Round(g.Max(x => x.StockQty), 4);
 
-                        var baseMissing = needed - available;
-                        if (baseMissing < 0m) baseMissing = 0m;
-
-                        orderedOutstandingDict.TryGetValue(g.Key.MaterialId, out var orderedOutstanding);
-                        var remaining = baseMissing - orderedOutstanding;
-                        if (remaining < 0m) remaining = 0m;
+                        var missingQty = needed - available;
+                        if (missingQty < 0m)
+                            missingQty = 0m;
 
                         var unitPrice = Math.Round(g.Max(x => x.CostPrice), 2);
-                        var totalPrice = Math.Round(remaining * unitPrice, 2);
+                        var totalPrice = Math.Round(missingQty * unitPrice, 2);
 
                         var requestDateValue = g
                             .Select(x => x.DeliveryDate)
                             .Where(d => d != null)
                             .OrderBy(d => d)
                             .FirstOrDefault();
-
-                        var isBuy = baseMissing > 0m && remaining == 0m;
 
                         return new missing_material
                         {
@@ -222,13 +222,16 @@ namespace AMMS.Infrastructure.Repositories
                             request_date = requestDateValue,
                             needed = needed,
                             available = available,
-                            quantity = remaining,
+                            quantity = missingQty,
                             total_price = totalPrice,
-                            is_buy = isBuy,
+
+                            // Không còn purchase nữa nên mặc định là chưa mua
+                            is_buy = false,
+
                             created_at = now
                         };
                     })
-                    .Where(x => x.needed > x.available)
+                    .Where(x => x.quantity > 0m)
                     .ToList();
 
                 await _db.missing_materials.AddRangeAsync(insertRows, ct);
@@ -239,7 +242,7 @@ namespace AMMS.Infrastructure.Repositories
                 return new
                 {
                     insertedRows = insertRows.Count,
-                    message = "Recalculated & saved missing materials successfully."
+                    message = "Recalculated & saved missing materials successfully. Purchase was not created."
                 };
             });
         }

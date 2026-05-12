@@ -776,8 +776,7 @@ namespace AMMS.Infrastructure.Repositories
                     ref_doc = $"BUY-MATERIAL-{materialId}",
                     user_id = managerUserId,
                     move_date = now,
-                    note = "Buy material via API",
-                    purchase_id = null
+                    note = "Buy material via API"
                 }, ct);
 
                 await _db.SaveChangesAsync(ct);

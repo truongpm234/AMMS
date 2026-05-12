@@ -22,6 +22,5 @@ public partial class supplier
     [Column(TypeName = "numeric(3,2)")]
     public decimal rating { get; set; } = 0;
 
-    public virtual ICollection<purchase> purchases { get; set; } = new List<purchase>();
     public virtual ICollection<supplier_material> supplier_materials { get; set; } = new List<supplier_material>();
 }

@@ -22,11 +22,8 @@ public partial class stock_move
 
     public string? note { get; set; }
 
-    public int? purchase_id { get; set; }
-
     public virtual material? material { get; set; }
 
     public virtual user? user { get; set; }
 
-    public virtual purchase? purchase { get; set; }
 }

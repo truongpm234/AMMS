@@ -1961,8 +1961,7 @@ namespace AMMS.Infrastructure.Repositories
                     ref_doc = refDoc,
                     user_id = prod.manager_id,
                     move_date = now,
-                    note = $"Consume material when production starts. prod_id={prod.prod_id}, order_id={orderId}",
-                    purchase_id = null
+                    note = $"Consume material when production starts. prod_id={prod.prod_id}, order_id={orderId}"
                 }, ct);
             }
         }
