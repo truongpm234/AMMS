@@ -41,6 +41,8 @@ public partial class production
 
     public string? mgr_note { get; set; }
 
+    public string? gm_proposed_method { get; set; }
+
     public int nvl_qty { get; set; } = 0;
 
     public string prod_kind { get; set; } = "SINGLE";

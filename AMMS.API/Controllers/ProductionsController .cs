@@ -153,12 +153,22 @@ namespace AMMS.API.Controllers
     [FromBody] ConfirmProductionReadyRequest req,
     CancellationToken ct)
         {
+            if (req == null)
+            {
+                return BadRequest(new
+                {
+                    message = "Request body is required.",
+                    order_id = orderId
+                });
+            }
+
             try
             {
                 var ok = await _service.SetProductionReadyAsync(
                     orderId,
                     req.is_production_ready,
                     req.gm_note,
+                    req.GetProposedMethod(),
                     ct);
 
                 if (!ok)
@@ -188,6 +198,8 @@ namespace AMMS.API.Controllers
                         is_production_ready = true,
                         production_method = "NVL",
                         need_manager_approval = false,
+                        gm_proposed_method = state.gm_proposed_method,
+                        proposed_production_method = state.proposed_production_method,
                         message = "Auto confirmed production by NVL and scheduled tasks."
                     });
                 }
@@ -210,7 +222,11 @@ namespace AMMS.API.Controllers
                     order_id = orderId,
                     is_production_ready = false,
                     need_manager_approval = true,
+
                     gm_note = req.gm_note,
+                    gm_proposed_method = state?.gm_proposed_method,
+                    proposed_production_method = state?.proposed_production_method,
+
                     message = "Sent production method approval request to manager."
                 });
             }

@@ -258,6 +258,9 @@ namespace AMMS.Application.Services
                 is_full_process = prod?.is_full_process,
                 production_method = prod?.prod_method,
 
+                gm_proposed_method = prod?.gm_proposed_method,
+                proposed_production_method = prod?.gm_proposed_method,
+
                 gm_note = prod?.gm_note,
                 mgr_note = prod?.mgr_note,
 
@@ -280,6 +283,7 @@ namespace AMMS.Application.Services
     int orderId,
     bool isProductionReady,
     string? gmNote = null,
+    string? proposedProductionMethod = null,
     CancellationToken ct = default)
         {
             var shouldAutoSchedule = false;
@@ -315,12 +319,16 @@ namespace AMMS.Application.Services
 
                 prod.gm_note = NormalizeNote(gmNote);
 
+                var proposedMethod = NormalizeProductionMethodOrNull(proposedProductionMethod);
+                prod.gm_proposed_method = proposedMethod;
+
                 if (!isProductionReady)
                 {
                     ord.is_production_ready = false;
                     ord.is_enough = false;
 
                     prod.prod_method = null;
+                    prod.gm_proposed_method = null;
                     prod.is_full_process = null;
                     prod.nvl_qty = 0;
 
@@ -402,8 +410,28 @@ namespace AMMS.Application.Services
                         "Order chưa đủ điều kiện sản xuất: thiếu NVL, thiếu bán thành phẩm hoặc chưa có đủ máy rảnh.");
                 }
 
-                // option đó là NVL => General Manager auto confirm
-                if (optionCount == 1 && canUseNvl)
+                // Validate method GM đề xuất, nếu có gửi.
+                if (proposedMethod == "NVL" && !canUseNvl)
+                {
+                    throw new InvalidOperationException(
+                        "Không thể đề xuất NVL vì chưa đủ NVL hoặc chưa có máy phù hợp.");
+                }
+
+                if (proposedMethod == "SUB" && !canUseSub)
+                {
+                    throw new InvalidOperationException(
+                        "Không thể đề xuất SUB vì chưa có bán thành phẩm phù hợp hoặc chưa đủ số lượng.");
+                }
+
+                if (proposedMethod == "BOTH" && !canUseBoth)
+                {
+                    throw new InvalidOperationException(
+                        "Không thể đề xuất BOTH vì chưa đủ điều kiện dùng bán thành phẩm kết hợp NVL.");
+                }
+
+                // CASE 1: GM đề xuất NVL.
+                // Nếu NVL hợp lệ thì auto duyệt như flow cũ.
+                if (proposedMethod == "NVL")
                 {
                     ord.is_enough = true;
                     ord.is_production_ready = true;
@@ -422,7 +450,46 @@ namespace AMMS.Application.Services
                     return true;
                 }
 
-                // manager duyệt method, chưa tạo task.
+                // CASE 2: GM đề xuất SUB/BOTH.
+                // Chỉ lưu đề xuất, gửi manager duyệt.
+                if (proposedMethod is "SUB" or "BOTH")
+                {
+                    ord.is_production_ready = false;
+
+                    // Method thật chưa được manager duyệt.
+                    prod.prod_method = null;
+                    prod.is_full_process = null;
+                    prod.nvl_qty = 0;
+
+                    await _db.SaveChangesAsync(ct);
+                    await tx.CommitAsync(ct);
+
+                    return true;
+                }
+
+                // CASE 3: FE cũ không gửi gm_proposed_method.
+                // Giữ logic cũ: nếu chỉ có NVL thì auto duyệt.
+                if (proposedMethod == null && optionCount == 1 && canUseNvl)
+                {
+                    ord.is_enough = true;
+                    ord.is_production_ready = true;
+
+                    prod.prod_method = "NVL";
+                    prod.is_full_process = true;
+                    prod.sub_product_id = null;
+                    prod.sub_product_used_qty = 0;
+                    prod.nvl_qty = orderQty;
+
+                    shouldAutoSchedule = true;
+
+                    await _db.SaveChangesAsync(ct);
+                    await tx.CommitAsync(ct);
+
+                    return true;
+                }
+
+                // CASE 4: Không gửi proposed method hoặc có nhiều option.
+                // Chờ manager duyệt method.
                 ord.is_production_ready = false;
 
                 prod.prod_method = null;
@@ -442,6 +509,19 @@ namespace AMMS.Application.Services
             }
 
             return result;
+        }
+
+        private static string? NormalizeProductionMethodOrNull(string? method)
+        {
+            if (string.IsNullOrWhiteSpace(method))
+                return null;
+
+            var value = method.Trim().ToUpperInvariant();
+
+            if (value is not ("NVL" or "SUB" or "BOTH"))
+                throw new InvalidOperationException("proposed_production_method must be NVL | SUB | BOTH.");
+
+            return value;
         }
 
         private async Task SendProductionReadyNotificationAsync(int orderId)

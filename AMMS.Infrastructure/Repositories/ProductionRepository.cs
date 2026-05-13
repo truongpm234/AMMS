@@ -85,6 +85,8 @@ namespace AMMS.Infrastructure.Repositories
                     nvl_qty = pr.nvl_qty,
                     gm_note = pr.gm_note,
                     mgr_note = pr.mgr_note,
+                    prod_kind = pr.prod_kind,
+                    production_code = pr.code,
                     first_item_product_name = _db.order_items.AsNoTracking()
                         .Where(i => i.order_id == o.order_id)
                         .OrderBy(i => i.item_id)
@@ -122,7 +124,91 @@ namespace AMMS.Infrastructure.Repositories
                 };
             }
 
-            var prodIds = baseRows.Select(x => x.prod_id).ToList();
+            var prodIds = baseRows
+                .Select(x => x.prod_id)
+                .Distinct()
+                .ToList();
+
+            var orderIds = baseRows
+                .Select(x => x.order_id)
+                .Distinct()
+                .ToList();
+
+            var groupLinkRows = await (
+                from po in _db.prod_orders.AsNoTracking()
+                join gp in _db.productions.AsNoTracking()
+                    on po.prod_id equals gp.prod_id
+                join o in _db.orders.AsNoTracking()
+                    on po.order_id equals o.order_id into oj
+                from o in oj.DefaultIfEmpty()
+                where orderIds.Contains(po.order_id)
+                      && gp.prod_kind == "GROUP"
+                select new
+                {
+                    prod_order_id = po.id,
+
+                    group_prod_id = po.prod_id,
+                    group_code = gp.code,
+                    group_status = gp.status,
+                    group_process_codes = gp.group_process_codes,
+                    group_total_qty = gp.group_total_qty,
+                    group_product_type_id = gp.product_type_id,
+                    group_created_at = gp.created_at,
+                    group_planned_start_date = gp.planned_start_date,
+                    group_actual_start_date = gp.actual_start_date,
+                    group_end_date = gp.end_date,
+
+                    po.order_id,
+                    order_code = o != null ? o.code : null,
+                    po.single_prod_id,
+                    po.qty,
+                    po.product_type_id,
+                    po.product_process,
+                    prod_order_status = po.status,
+                    prod_order_created_at = po.created_at
+                }
+            ).ToListAsync(ct);
+
+            var groupProdIds = groupLinkRows
+                .Select(x => x.group_prod_id)
+                .Distinct()
+                .ToList();
+
+            var allGroupMembers = groupProdIds.Count == 0 ? new List<ProdOrderInfoDto>() : await (
+                from po in _db.prod_orders.AsNoTracking()
+                join o in _db.orders.AsNoTracking()
+                    on po.order_id equals o.order_id into oj
+                from o in oj.DefaultIfEmpty()
+                where groupProdIds.Contains(po.prod_id)
+                orderby po.prod_id, po.order_id
+                select new ProdOrderInfoDto
+                {
+                    prod_order_id = po.id,
+                    group_prod_id = po.prod_id,
+                    order_id = po.order_id,
+                    order_code = o != null ? o.code : null,
+                    single_prod_id = po.single_prod_id,
+                    qty = po.qty,
+                    product_type_id = po.product_type_id,
+                    product_process = po.product_process,
+                    status = po.status,
+                    created_at = po.created_at
+                }
+            ).ToListAsync(ct);
+
+            var groupMembersByGroupProdId = allGroupMembers
+                .GroupBy(x => x.group_prod_id)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.ToList()
+                );
+
+            var groupLinksByOrderId = groupLinkRows
+                .GroupBy(x => x.order_id)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.ToList()
+                );
 
             var taskRows = await _db.tasks.AsNoTracking().Where(t => t.prod_id != null && prodIds.Contains(t.prod_id.Value))
                 .Select(t => new TaskRow
@@ -275,8 +361,51 @@ namespace AMMS.Infrastructure.Repositories
                     .Where(s => !string.IsNullOrWhiteSpace(s))
                     .ToList();
 
+                groupLinksByOrderId.TryGetValue(r.order_id, out var orderGroupLinks);
+                orderGroupLinks ??= new();
+
+                var groupInfos = orderGroupLinks
+                    .GroupBy(x => x.group_prod_id)
+                    .Select(g =>
+                    {
+                        var first = g.First();
+
+                        groupMembersByGroupProdId.TryGetValue(first.group_prod_id, out var members);
+                        members ??= new List<ProdOrderInfoDto>();
+
+                        var currentProdOrder = members.FirstOrDefault(x => x.order_id == r.order_id);
+
+                        var isActiveGroup =
+                            string.Equals(currentProdOrder?.status, "Active", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(first.group_status, "Cancelled", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(first.group_status, "Completed", StringComparison.OrdinalIgnoreCase);
+
+                        return new ProductionGroupInfoDto
+                        {
+                            group_id = first.group_prod_id,
+                            group_prod_id = first.group_prod_id,
+                            group_code = first.group_code,
+                            group_status = first.group_status,
+                            group_process_codes = first.group_process_codes,
+                            group_total_qty = first.group_total_qty,
+                            product_type_id = first.group_product_type_id,
+                            group_created_at = first.group_created_at,
+                            group_planned_start_date = first.group_planned_start_date,
+                            group_actual_start_date = first.group_actual_start_date,
+                            group_end_date = first.group_end_date,
+                            is_active_group = isActiveGroup,
+                            current_prod_order = currentProdOrder,
+                            prod_orders = members
+                        };
+                    })
+                    .OrderByDescending(x => x.is_active_group)
+                    .ThenByDescending(x => x.group_prod_id)
+                    .ToList();
+
+                var activeGroup = groupInfos.FirstOrDefault(x => x.is_active_group);
+
                 var progress = ComputeProgressByStages(visibleSteps, currentSeq, visibleTasks);
-                var ord = await _db.orders.SingleOrDefaultAsync(o => o.order_id == r.order_id);
+                var ord = await _db.orders.SingleOrDefaultAsync(o => o.order_id == r.order_id, ct);
                 result.Add(new ProducingOrderCardDto
                 {
                     order_id = r.order_id,
@@ -290,7 +419,7 @@ namespace AMMS.Infrastructure.Repositories
 
                     status = r.order_status,
                     production_status = r.production_status,
-                    is_production_ready = ord.is_production_ready,
+                    is_production_ready = ord?.is_production_ready,
                     production_method = r.production_method,
                     is_full_process = r.is_full_process,
                     sub_product_id = r.sub_product_id,
@@ -298,7 +427,24 @@ namespace AMMS.Infrastructure.Repositories
                     nvl_qty = r.nvl_qty,
                     gm_note = r.gm_note,
                     mgr_note = r.mgr_note,
+                    prod_id = r.prod_id,
 
+                    group_id = activeGroup?.group_id,
+                    group_prod_id = activeGroup?.group_prod_id,
+                    group_code = activeGroup?.group_code,
+                    group_status = activeGroup?.group_status,
+                    group_process_codes = activeGroup?.group_process_codes,
+                    group_total_qty = activeGroup?.group_total_qty,
+
+                    is_grouped = groupInfos.Count > 0,
+                    is_active_grouped = activeGroup != null,
+
+                    group_prod_ids = groupInfos
+                        .Select(x => x.group_prod_id)
+                        .Distinct()
+                        .ToList(),
+
+                    group_productions = groupInfos,
                     stage_status = currentStageStatus,
                     stages = stages,
                     stage_statuses = stageStatuses
