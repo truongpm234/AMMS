@@ -91,7 +91,7 @@ namespace AMMS.API.Controllers
             return Ok(await _userService.AdminCreateUpdateNewUser(update_user, user_id));
         }
 
-        [Authorize(Policy = "admin, manager")]
+        [Authorize(Policy = "admin,manager")]
         [HttpGet("/get-all-user")]
         public async Task<IActionResult> AdminGetAllUser()
         {

@@ -1,5 +1,4 @@
-﻿using AMMS.API;
-using AMMS.API.Jobs;
+﻿using AMMS.API.Jobs;
 using AMMS.Application.Helpers;
 using AMMS.Application.Interfaces;
 using AMMS.Application.Services;
@@ -16,7 +15,6 @@ using Hangfire.PostgreSql;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using Npgsql;
@@ -24,7 +22,6 @@ using QuestPDF.Infrastructure;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Twilio.Types;
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
@@ -179,6 +176,8 @@ builder.Services.AddAuthorization(options =>
         policy.RequireClaim("roleid", "5"));
     options.AddPolicy("staff", policy =>
         policy.RequireClaim("roleid", "6"));
+    options.AddPolicy("admin, manager", policy =>
+        policy.RequireClaim("roleid", "1", "3"));
 });
 
 
