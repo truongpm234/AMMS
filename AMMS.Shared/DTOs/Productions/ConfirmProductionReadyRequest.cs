@@ -9,12 +9,26 @@ namespace AMMS.Shared.DTOs.Productions
     public class ConfirmProductionReadyRequest
     {
         public bool is_production_ready { get; set; }
+
         public string? gm_note { get; set; }
+
+        public string? gm_proposed_method { get; set; }
+
+        public string? proposed_production_method { get; set; }
+
+        public string? GetProposedMethod()
+        {
+            return !string.IsNullOrWhiteSpace(gm_proposed_method)
+                ? gm_proposed_method
+                : proposed_production_method;
+        }
     }
 
     public class ProductionReadyCheckResponse
     {
         public int order_id { get; set; }
+        public string? gm_proposed_method { get; set; }
+        public string? proposed_production_method { get; set; }
         public bool is_production_ready { get; set; }
         public bool has_enough_material { get; set; }
         public bool has_free_machine { get; set; }

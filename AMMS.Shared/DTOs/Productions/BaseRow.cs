@@ -27,5 +27,7 @@ namespace AMMS.Shared.DTOs.Productions
         public int nvl_qty { get; set; }
         public string? gm_note { get; set; }
         public string? mgr_note { get; set; }
+        public string? prod_kind { get; set; }
+        public string? production_code { get; set; }
     }
 }

@@ -39,6 +39,9 @@ namespace AMMS.Application.Services
             if (selectedCodes.Count > 0)
                 GroupProductionHelper.EnsureShareableCodes(selectedCodes);
 
+            var today = AppTime.NowVnUnspecified().Date;
+            var minDeliveryDate = today.AddDays(7);
+
             var rows = await (
                 from o in _db.orders.AsNoTracking()
                 join pr in _db.productions.AsNoTracking()
@@ -46,8 +49,18 @@ namespace AMMS.Application.Services
                 where pr.prod_kind == "SINGLE"
                       && o.layout_confirmed
                       && o.is_production_ready
+
+                      // Business rule:Chỉ order có delivery_date cách ngày hiện tại ít nhất 7 ngày
+                      && o.delivery_date != null
+                      && o.delivery_date >= minDeliveryDate
+
                       && o.status != "Delivery"
                       && o.status != "Completed"
+                      && o.status != "Importing"
+                      && o.status != "InProcessing"
+                      && o.status != "Finished"
+
+                      // Không hiện order đã nằm trong production GROUP active.
                       && !_db.prod_orders.Any(po =>
                             po.order_id == o.order_id &&
                             po.status == "Active" &&
@@ -113,7 +126,6 @@ namespace AMMS.Application.Services
                     process_key = processKey,
                     delivery_date = row.delivery_date,
 
-                    // Không cần full route giống nhau.
                     can_group = hasAllSelectedCodes,
 
                     reason = hasAllSelectedCodes
@@ -181,6 +193,26 @@ namespace AMMS.Application.Services
                 if (rows.Count != orderIds.Count)
                     throw new InvalidOperationException("Một số order không tồn tại hoặc chưa có production riêng.");
 
+                var today = AppTime.NowVnUnspecified().Date;
+                var minDeliveryDate = today.AddDays(7);
+
+                var invalidDeliveryOrders = rows
+                    .Where(x => x.order.delivery_date == null || x.order.delivery_date < minDeliveryDate)
+                    .Select(x => new
+                    {
+                        x.order.order_id,
+                        x.order.delivery_date
+                    })
+                    .ToList();
+
+                if (invalidDeliveryOrders.Count > 0)
+                {
+                    var invalidText = string.Join(", ", invalidDeliveryOrders.Select(x =>
+                        $"{x.order_id}({(x.delivery_date.HasValue ? x.delivery_date.Value.ToString("yyyy-MM-dd") : "null")})"));
+
+                    throw new InvalidOperationException(
+                        $"Chỉ được ghép các order có delivery_date cách ngày hiện tại ít nhất 7 ngày. Order không hợp lệ: {invalidText}");
+                }
                 if (rows.Any(x => x.item == null))
                     throw new InvalidOperationException("Một số order chưa có order_item.");
 

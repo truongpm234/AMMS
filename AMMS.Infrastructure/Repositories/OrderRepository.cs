@@ -38,21 +38,21 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             var orders = await (
-    from o in _db.orders.AsNoTracking()
+                from o in _db.orders.AsNoTracking()
 
-    join q in _db.quotes.AsNoTracking()
-        on o.quote_id equals q.quote_id into qj
-    from q in qj.DefaultIfEmpty()
+                join q in _db.quotes.AsNoTracking()
+                    on o.quote_id equals q.quote_id into qj
+                from q in qj.DefaultIfEmpty()
 
-    join r in _db.order_requests.AsNoTracking()
-        on o.order_id equals r.order_id into rj
-    from r in rj.DefaultIfEmpty()
+                join r in _db.order_requests.AsNoTracking()
+                    on o.order_id equals r.order_id into rj
+                from r in rj.DefaultIfEmpty()
 
-    join p in _db.productions.AsNoTracking()
-        on o.production_id equals p.prod_id into pj
-    from p in pj.DefaultIfEmpty()
+                join p in _db.productions.AsNoTracking()
+                    on o.production_id equals p.prod_id into pj
+                from p in pj.DefaultIfEmpty()
 
-    orderby o.order_date descending, o.order_id descending
+                orderby o.order_date descending, o.order_id descending
 
     select new
     {
@@ -67,6 +67,7 @@ namespace AMMS.Infrastructure.Repositories
         import_recieve_path = p != null ? p.import_recieve_path : null,
         production_method = p != null ? p.prod_method : null,
         sub_product_id = p != null ? p.sub_product_id : null,
+        layout_confirmed = o.layout_confirmed,
         sub_product_used_qty = p != null ? p.sub_product_used_qty : 0,
         nvl_qty = p != null ? p.nvl_qty : 0,
         FirstItem = _db.order_items.AsNoTracking()
@@ -241,6 +242,7 @@ namespace AMMS.Infrastructure.Repositories
                     production_method = o.production_method,
                     sub_product_id = o.sub_product_id,
                     sub_product_used_qty = o.sub_product_used_qty,
+                    layout_confirmed = o.layout_confirmed,
                     nvl_qty = o.nvl_qty,
                     missing_materials = canFulfill == false
                         ? (missingMaterials ?? new List<MissingMaterialDto>())

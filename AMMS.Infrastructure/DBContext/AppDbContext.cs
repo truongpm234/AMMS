@@ -257,6 +257,10 @@ public partial class AppDbContext : DbContext
     .HasColumnType("text");
             entity.Property(e => e.sub_product_id);
 
+            entity.Property(e => e.gm_proposed_method)
+                .HasColumnName("gm_proposed_method")
+                .HasMaxLength(10);
+
             entity.HasOne(d => d.sub_product)
                 .WithMany()
                 .HasForeignKey(d => d.sub_product_id)
