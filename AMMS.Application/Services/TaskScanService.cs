@@ -65,7 +65,9 @@ namespace AMMS.Application.Services
 
             var isGroupTask = await IsGroupTaskAsync(taskId, ct);
 
-            var manualMode = payload.use_manual_input || await ShouldUseManualReportInputAsync(taskId, req, ct);
+            var manualMode =
+                payload.use_manual_input ||
+                await ShouldUseManualReportInputAsync(taskId, req, ct);
 
             List<TaskMaterialUsageLogItemDto> materialUsageSnapshot;
 
@@ -84,11 +86,15 @@ namespace AMMS.Application.Services
 
                 var expectedMaterials = await GetConsumableMaterialsForTaskAsync(taskId, ct);
 
-                var qrMaterials = BuildReportMaterialUsageInputs(expectedMaterials, rawQrMaterials);
+                var qrMaterials = BuildReportMaterialUsageInputs(
+                    expectedMaterials,
+                    rawQrMaterials);
 
                 ValidateMaterialUsageInput(expectedMaterials, qrMaterials);
 
-                materialUsageSnapshot = BuildMaterialUsageSnapshot(expectedMaterials, qrMaterials);
+                materialUsageSnapshot = BuildMaterialUsageSnapshot(
+                    expectedMaterials,
+                    qrMaterials);
             }
 
             var materialUsageJson = materialUsageSnapshot.Count == 0
@@ -146,12 +152,18 @@ namespace AMMS.Application.Services
                 if (!t.prod_id.HasValue || !t.seq_num.HasValue)
                     throw new Exception("Task missing prod_id/seq_num");
 
-                var flowTasks = await _taskRepo.GetTasksByProductionWithProcessAsync(t.prod_id.Value, innerCt);
+                var flowTasks = await _taskRepo.GetTasksByProductionWithProcessAsync(
+                    t.prod_id.Value,
+                    innerCt);
+
                 var currentFlow = flowTasks.FirstOrDefault(x => x.task_id == t.task_id)
                     ?? throw new Exception("Task flow info not found");
 
                 var currentCode = ProductionFlowHelper.Norm(currentFlow.process?.process_code);
-                var hasRalo = flowTasks.Any(x => ProductionFlowHelper.IsRalo(x.process?.process_code));
+
+                var hasRalo = flowTasks.Any(x =>
+                    ProductionFlowHelper.IsRalo(x.process?.process_code));
+
                 var raloFinished = !hasRalo || flowTasks.Any(x =>
                     ProductionFlowHelper.IsRalo(x.process?.process_code) &&
                     string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase));
@@ -159,8 +171,13 @@ namespace AMMS.Application.Services
                 if (!hasRalo)
                 {
                     var prev = await _taskRepo.GetPrevTaskAsync(t.prod_id.Value, t.seq_num.Value);
-                    if (prev != null && !string.Equals(prev.status, "Finished", StringComparison.OrdinalIgnoreCase))
-                        throw new Exception($"Previous step (task_id={prev.task_id}, seq={prev.seq_num}) is not Finished");
+
+                    if (prev != null &&
+                        !string.Equals(prev.status, "Finished", StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new Exception(
+                            $"Previous step (task_id={prev.task_id}, seq={prev.seq_num}) is not Finished");
+                    }
                 }
                 else
                 {
@@ -179,6 +196,7 @@ namespace AMMS.Application.Services
                 t.status = "Finished";
                 t.start_time ??= now;
                 t.end_time = now;
+
                 var processCodeForOutput = currentFlow.process?.process_code;
                 var processNameForOutput = currentFlow.process?.process_name;
 
@@ -201,12 +219,16 @@ namespace AMMS.Application.Services
                     qty_good = qtyGood,
                     log_time = now,
                     scanned_by_user_id = scannedByUserId,
+
                     material_usage_json = materialUsageJson,
+
                     reason = NormalizeNullableText(payload.reason, 1000),
                     report_image_url = NormalizeNullableText(payload.report_image_url, 8000),
+
                     reference_input_json = referenceInputJson,
                     output_json = outputJson
                 };
+
                 await _logRepo.AddAsync(finishLog);
 
                 if (manualMode && isGroupTask)
@@ -228,68 +250,61 @@ namespace AMMS.Application.Services
                         innerCt);
                 }
 
+                /*
+                 * Save trước để finishLog có log_id.
+                 * Sau đó MirrorGroupFinishToSingleTasksAsync có thể dùng groupLog.log_id
+                 * để lưu task_qtys.task_log_id.
+                 */
                 await _taskRepo.SaveChangesAsync(innerCt);
 
-                await MirrorGroupFinishToSingleTasksAsync(t, finishLog, qtyGood, normalizedOutputs, scannedByUserId, now, innerCt);
+                /*
+                 * Nếu task thuộc production GROUP:
+                 * - Mirror kết quả về các single_task tương ứng.
+                 * - Set single_task = Finished.
+                 * - Tạo task_log FinishedByGroup.
+                 * - Gọi TryCloseProductionIfCompletedAsync cho từng single production.
+                 */
+                await MirrorGroupFinishToSingleTasksAsync(
+                    t,
+                    finishLog,
+                    qtyGood,
+                    normalizedOutputs,
+                    scannedByUserId,
+                    now,
+                    innerCt);
 
+                /*
+                 * Đóng production hiện tại nếu tất cả task đã Finished.
+                 *
+                 * Với SINGLE:
+                 * - production.status = Importing
+                 * - order.status = Importing
+                 * - order_request.process_status = Importing
+                 *
+                 * Với GROUP:
+                 * - group production.status = Importing
+                 * - ProductionRepository sẽ kiểm tra từng member trong prod_orders
+                 *   để sync order/request tương ứng nếu single production của order đó cũng đã xong.
+                 */
                 if (t.prod_id.HasValue)
-                    await _prodRepo.TryCloseProductionIfCompletedAsync(t.prod_id.Value, now, innerCt);
-
-                production? prod = null;
-                order? ord = null;
-
-                if (t.prod_id.HasValue)
-                    prod = await _prodRepo.GetByIdForUpdateAsync(t.prod_id.Value, innerCt);
-
-                if (prod != null
-                    && string.Equals(prod.status, "Importing", StringComparison.OrdinalIgnoreCase)
-                    && prod.order_id.HasValue)
                 {
-                    ord = await _orderRepo.GetByIdForUpdateAsync(prod.order_id.Value, innerCt);
+                    var changedToImporting = await _prodRepo.TryCloseProductionIfCompletedAsync(
+                        t.prod_id.Value,
+                        now,
+                        innerCt);
 
-                    if (ord != null &&
-                        !string.Equals(ord.status, "Importing", StringComparison.OrdinalIgnoreCase))
+                    if (changedToImporting)
                     {
-                        ord.status = "Importing";
-                        var request = await _db.order_requests.FirstOrDefaultAsync(o => o.order_id == ord.order_id, innerCt);
-
-                        await _hub.Clients.All.SendAsync("finishedProduction",
-                            new { message = $"Đơn hàng {prod.order_id} đã được sản xuất xong" }, innerCt);
-
-                        if (request != null)
-                        {
-                            //await _hub.Clients.Group(RealtimeGroups.ByRole("warehouse manager")).SendAsync(
-                            //    "Importing",
-                            //    new { message = $"Đơn hàng {ord.order_id} đã được sản xuất xong, chờ nhập kho" },
-                            //    innerCt);
-                            await _hub.Clients.Group(RealtimeGroups.ByRole("general manager")).SendAsync(
-                                "Importing",
-                                new { message = $"Đơn hàng {ord.order_id} đã được sản xuất xong, chờ nhập kho" },
-                                innerCt);
-
-                            await _noti.CreateNotfi(
-                                4,
-                                $"Đơn hàng {ord.order_id} đã được sản xuất xong, chờ nhập kho",
-                                null,
-                                request.order_request_id,
-                                "Importing");
-                            await _noti.CreateNotfi(
-                                18,
-                                $"Đơn hàng {ord.order_id} đã được sản xuất xong, chờ nhập kho",
-                                null,
-                                request.order_request_id,
-                                "Importing");
-                        }
-                    }
-
-                    if (ord != null)
-                    {
-                        await _orderRequestRepo.MarkProcessStatusImportingByOrderAsync(ord.order_id, ord.quote_id, innerCt);
-                        await _orderRequestRepo.MarkProcessStatusImportingByOrderAsync(ord.order_id, null, innerCt);
+                        await NotifyImportingForProductionAsync(
+                            t.prod_id.Value,
+                            innerCt);
                     }
                 }
 
-                await _hub.Clients.All.SendAsync("update-ui", new { message = "update UI" }, innerCt);
+                await _hub.Clients.All.SendAsync(
+                    "update-ui",
+                    new { message = "update UI" },
+                    innerCt);
 
                 return new ScanTaskResult
                 {
@@ -299,17 +314,114 @@ namespace AMMS.Application.Services
                 };
             }, ct);
 
-            if (result.prod_id.HasValue)
+            /*
+             * Không gửi finishedProduction ở đây nữa.
+             * NotifyImportingForProductionAsync đã xử lý cả SINGLE và GROUP bên trong transaction.
+             * Nếu giữ block cũ ở đây sẽ bị gửi thông báo trùng.
+             */
+            return result;
+        }
+
+        private async Task NotifyImportingForProductionAsync(
+    int prodId,
+    CancellationToken ct)
+        {
+            var prod = await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.prod_id == prodId, ct);
+
+            if (prod == null)
+                return;
+
+            if (!string.Equals(prod.status, "Importing", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var orderIds = new List<int>();
+
+            var isGroupProduction = string.Equals(
+                prod.prod_kind,
+                "GROUP",
+                StringComparison.OrdinalIgnoreCase);
+
+            if (isGroupProduction)
             {
-                var prod = await _prodRepo.GetByIdForUpdateAsync(result.prod_id.Value, ct);
-                if (prod?.order_id != null)
-                {
-                    await _hub.Clients.All.SendAsync("finishedProduction",
-                        new { message = $"Đơn hàng {prod.order_id} đã được sản xuất xong" }, ct);
-                }
+                orderIds = await _db.prod_orders
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.prod_id == prod.prod_id &&
+                        x.status == "Active")
+                    .Select(x => x.order_id)
+                    .Distinct()
+                    .ToListAsync(ct);
+            }
+            else if (prod.order_id.HasValue)
+            {
+                orderIds.Add(prod.order_id.Value);
             }
 
-            return result;
+            foreach (var orderId in orderIds.Distinct())
+            {
+                var ord = await _db.orders
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.order_id == orderId, ct);
+
+                if (ord == null)
+                    continue;
+
+                /*
+                 * ProductionRepository là nơi quyết định order nào thật sự được chuyển Importing.
+                 * Nếu order vẫn chưa Importing thì không gửi thông báo, tránh báo sai.
+                 *
+                 * Ví dụ:
+                 * - Group xong PHU,CAN,BOI,BE,DUT
+                 * - Nhưng order A còn DAN riêng chưa xong
+                 * => order A vẫn InProcessing
+                 * => không gửi notify Importing cho order A.
+                 */
+                if (!string.Equals(ord.status, "Importing", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var requests = await _db.order_requests
+                    .AsNoTracking()
+                    .Where(x => x.order_id == orderId)
+                    .OrderByDescending(x => x.order_request_id)
+                    .ToListAsync(ct);
+
+                var latestRequest = requests.FirstOrDefault();
+
+                await _hub.Clients.All.SendAsync(
+                    "finishedProduction",
+                    new
+                    {
+                        message = $"Đơn hàng {orderId} đã được sản xuất xong"
+                    },
+                    ct);
+
+                await _hub.Clients.Group(RealtimeGroups.ByRole("general manager")).SendAsync(
+                    "Importing",
+                    new
+                    {
+                        message = $"Đơn hàng {orderId} đã được sản xuất xong, chờ nhập kho"
+                    },
+                    ct);
+
+                if (latestRequest != null)
+                {
+                    await _noti.CreateNotfi(
+                        4,
+                        $"Đơn hàng {orderId} đã được sản xuất xong, chờ nhập kho",
+                        null,
+                        latestRequest.order_request_id,
+                        "Importing");
+
+                    await _noti.CreateNotfi(
+                        18,
+                        $"Đơn hàng {orderId} đã được sản xuất xong, chờ nhập kho",
+                        null,
+                        latestRequest.order_request_id,
+                        "Importing");
+                }
+            }
         }
 
         private async Task ConsumeManualMaterialsOnFinishAsync(

@@ -83,7 +83,7 @@ namespace AMMS.Infrastructure.Repositories
 
                 var designType = (req.is_send_design == true)
                     ? "Tự gửi file thiết kế"
-                    : "Sử dụng bản thiết kế của doanh nghiệp";
+                    : "Doanh nghiệp";
 
                 var materialCost = est.paper_cost + est.ink_cost + est.coating_glue_cost + est.mounting_glue_cost + est.lamination_cost;
 

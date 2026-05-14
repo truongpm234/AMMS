@@ -1276,48 +1276,195 @@ namespace AMMS.Infrastructure.Repositories
             return prodId.HasValue;
         }
 
-        public async Task<bool> TryCloseProductionIfCompletedAsync(int prodId, DateTime now, CancellationToken ct = default)
+        public async Task<bool> TryCloseProductionIfCompletedAsync(
+    int prodId,
+    DateTime now,
+    CancellationToken ct = default)
         {
-            var prod = await _db.productions.FirstOrDefaultAsync(p => p.prod_id == prodId, ct);
-            if (prod == null) return false;
+            var prod = await _db.productions
+                .FirstOrDefaultAsync(p => p.prod_id == prodId, ct);
+
+            if (prod == null)
+                return false;
 
             var tasks = await _db.tasks
                 .Where(t => t.prod_id == prodId)
-                .Select(t => new { t.status, t.end_time, t.seq_num })
+                .Select(t => new
+                {
+                    t.status,
+                    t.end_time,
+                    t.seq_num
+                })
                 .ToListAsync(ct);
 
-            if (tasks.Count == 0) return false;
+            if (tasks.Count == 0)
+                return false;
 
-            bool allFinished = tasks.All(t =>
-                string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase)
-                || t.end_time != null);
+            var allFinished = tasks.All(t =>
+                string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                t.end_time != null);
 
-            if (!allFinished) return false;
+            if (!allFinished)
+                return false;
 
-            var finishedAt = tasks.Where(t => t.end_time != null)
+            var finishedAt = tasks
+                .Where(t => t.end_time != null)
                 .Select(t => t.end_time!.Value)
                 .DefaultIfEmpty(now)
                 .Max();
 
-            if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
-            {
-                prod.end_date = finishedAt;
-                prod.status = "Importing";
-
-                if (prod.actual_start_date == null)
-                    prod.actual_start_date = finishedAt;
-
-                await _db.SaveChangesAsync(ct);
-                return true;
-            }
-
             prod.end_date = finishedAt;
             prod.status = "Importing";
+
             if (prod.actual_start_date == null)
                 prod.actual_start_date = finishedAt;
 
+            var isGroupProduction = string.Equals(
+                prod.prod_kind,
+                "GROUP",
+                StringComparison.OrdinalIgnoreCase);
+
+            if (isGroupProduction)
+            {
+                await SyncGroupMemberOrdersToImportingAsync(
+                    prod,
+                    finishedAt,
+                    ct);
+            }
+            else
+            {
+                await SyncSingleProductionOrderToImportingAsync(
+                    prod,
+                    finishedAt,
+                    ct);
+            }
+
             await _db.SaveChangesAsync(ct);
             return true;
+        }
+
+        private async Task SyncSingleProductionOrderToImportingAsync(
+    production prod,
+    DateTime finishedAt,
+    CancellationToken ct)
+        {
+            if (!prod.order_id.HasValue)
+                return;
+
+            await SyncOrderAndRequestsToImportingAsync(
+                prod.order_id.Value,
+                ct);
+        }
+
+        private async Task SyncGroupMemberOrdersToImportingAsync(
+    production groupProd,
+    DateTime finishedAt,
+    CancellationToken ct)
+        {
+            var members = await _db.prod_orders
+                .Where(x =>
+                    x.prod_id == groupProd.prod_id &&
+                    x.status == "Active")
+                .ToListAsync(ct);
+
+            foreach (var member in members)
+            {
+                var canMoveOrderToImporting = true;
+
+                if (member.single_prod_id.HasValue)
+                {
+                    var singleProd = await _db.productions
+                        .FirstOrDefaultAsync(x => x.prod_id == member.single_prod_id.Value, ct);
+
+                    if (singleProd != null)
+                    {
+                        var singleAllFinished = await AreAllProductionTasksFinishedAsync(
+                            singleProd.prod_id,
+                            ct);
+
+                        if (singleAllFinished)
+                        {
+                            singleProd.status = "Importing";
+                            singleProd.end_date ??= finishedAt;
+
+                            if (singleProd.actual_start_date == null)
+                                singleProd.actual_start_date = finishedAt;
+                        }
+
+                        canMoveOrderToImporting =
+                            singleAllFinished ||
+                            string.Equals(singleProd.status, "Importing", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(singleProd.status, "Completed", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(singleProd.status, "Delivery", StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+
+                if (!canMoveOrderToImporting)
+                    continue;
+
+                await SyncOrderAndRequestsToImportingAsync(
+                    member.order_id,
+                    ct);
+            }
+        }
+
+        private async Task<bool> AreAllProductionTasksFinishedAsync(
+    int prodId,
+    CancellationToken ct)
+        {
+            var tasks = await _db.tasks
+                .AsNoTracking()
+                .Where(x => x.prod_id == prodId)
+                .Select(x => new
+                {
+                    x.status,
+                    x.end_time
+                })
+                .ToListAsync(ct);
+
+            if (tasks.Count == 0)
+                return false;
+
+            return tasks.All(x =>
+                string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                x.end_time != null);
+        }
+
+        private async Task SyncOrderAndRequestsToImportingAsync(
+    int orderId,
+    CancellationToken ct)
+        {
+            var order = await _db.orders
+                .FirstOrDefaultAsync(x => x.order_id == orderId, ct);
+
+            if (order == null)
+                return;
+
+            if (!string.Equals(order.status, "Completed", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(order.status, "Delivery", StringComparison.OrdinalIgnoreCase))
+            {
+                order.status = "Importing";
+            }
+
+            var quoteId = order.quote_id;
+
+            var requests = await _db.order_requests
+                .Where(x =>
+                    x.order_id == orderId ||
+                    (quoteId.HasValue && x.quote_id == quoteId.Value))
+                .ToListAsync(ct);
+
+            foreach (var req in requests)
+            {
+                if (string.Equals(req.process_status, "Completed", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(req.process_status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(req.process_status, "Cancel", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                req.process_status = "Importing";
+            }
         }
 
         public async Task<bool> SetProductionDeliveryByOrderIdAsync(int orderId, CancellationToken ct = default)

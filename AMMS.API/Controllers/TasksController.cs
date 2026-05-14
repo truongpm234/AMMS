@@ -560,43 +560,28 @@ public class TasksController : ControllerBase
     }
 
     [HttpPost("finish")]
-    public async Task<ActionResult<ScanTaskResult>> Finish(CancellationToken ct)
+    [Consumes("application/json")]
+    public async Task<ActionResult<ScanTaskResult>> Finish(
+    [FromBody] FinishTaskTokenRequest req,
+    CancellationToken ct)
     {
+        if (req == null || string.IsNullOrWhiteSpace(req.token))
+        {
+            return BadRequest(new
+            {
+                message = "Missing token."
+            });
+        }
+
         try
         {
-            string? token = null;
-
-            if (Request.HasFormContentType)
-            {
-                token = Request.Form["token"].ToString();
-            }
-            else
-            {
-                var req = await JsonSerializer.DeserializeAsync<FinishTaskTokenRequest>(
-                    Request.Body,
-                    new JsonSerializerOptions
-                    {
-                        PropertyNameCaseInsensitive = true
-                    },
-                    ct);
-
-                token = req?.token;
-            }
-
-            if (string.IsNullOrWhiteSpace(token))
-            {
-                return BadRequest(new
-                {
-                    message = "Missing token."
-                });
-            }
-
             var scanReq = new ScanTaskRequest
             {
-                token = token.Trim()
+                token = req.token.Trim()
 
                 // Không set reason/images/materials ở đây nữa.
-                // Tất cả nằm trong token.
+                // Tất cả reason, ảnh, materials, reference_inputs, outputs
+                // đã được nhét vào token ở API POST /api/Tasks/qr.
             };
 
             var scannedByUserId = GetCurrentUserId();
@@ -619,13 +604,6 @@ public class TasksController : ControllerBase
         catch (InvalidOperationException ex)
         {
             return BadRequest(new { message = ex.Message });
-        }
-        catch (JsonException)
-        {
-            return BadRequest(new
-            {
-                message = "Invalid JSON body."
-            });
         }
         catch (Exception ex)
         {

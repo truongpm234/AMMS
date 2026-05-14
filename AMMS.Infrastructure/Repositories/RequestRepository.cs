@@ -183,17 +183,42 @@ namespace AMMS.Infrastructure.Repositories
             }
         }
 
-        public async Task MarkProcessStatusImportingByOrderAsync(int orderId, int? quoteId, CancellationToken ct = default)
+        public async Task MarkProcessStatusImportingByOrderAsync(
+    int orderId,
+    int? quoteId,
+    CancellationToken ct = default)
         {
-            var req = await _db.order_requests
-                .FirstOrDefaultAsync(x => x.order_id == orderId, ct);
-            var order = await _db.orders.FirstOrDefaultAsync(o => o.order_id == orderId, ct);
-            if (req != null && order != null)
+            var order = await _db.orders
+                .FirstOrDefaultAsync(o => o.order_id == orderId, ct);
+
+            if (order == null)
+                return;
+
+            if (!string.Equals(order.status, "Completed", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(order.status, "Delivery", StringComparison.OrdinalIgnoreCase))
             {
                 order.status = "Importing";
-                req.process_status = "Importing";
-                await _db.SaveChangesAsync(ct);
             }
+
+            var requests = await _db.order_requests
+                .Where(x =>
+                    x.order_id == orderId ||
+                    (quoteId.HasValue && x.quote_id == quoteId.Value))
+                .ToListAsync(ct);
+
+            foreach (var req in requests)
+            {
+                if (string.Equals(req.process_status, "Completed", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(req.process_status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(req.process_status, "Cancel", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                req.process_status = "Importing";
+            }
+
+            await _db.SaveChangesAsync(ct);
         }
 
         public Task<int> CountAsync()
@@ -322,136 +347,183 @@ namespace AMMS.Infrastructure.Repositories
 
         public async Task<RequestPagedDto?> GetByOrderIdAsync(int orderId)
         {
-            var requestQuery = _db.order_requests.AsNoTracking();
             var requireRemainingBeforeDelivery = await _db.estimate_config
-    .AsNoTracking()
-    .Where(x =>
-        x.config_group == "deliveryPayment" &&
-        x.config_key == "require_remaining_before_delivery")
-    .OrderByDescending(x => x.updated_at)
-    .Select(x => x.value_bool)
-    .FirstOrDefaultAsync() ?? true;
-            return await (
-                from r in requestQuery
-                where r.order_id == orderId
+                .AsNoTracking()
+                .Where(x =>
+                    x.config_group == "deliveryPayment" &&
+                    x.config_key == "require_remaining_before_delivery")
+                .OrderByDescending(x => x.updated_at)
+                .Select(x => x.value_bool)
+                .FirstOrDefaultAsync() ?? true;
 
-                join ce in _db.cost_estimates.AsNoTracking()
-                    on r.order_request_id equals ce.order_request_id into ceJoin
-                from ce in ceJoin
-                    .OrderByDescending(x => x.estimate_id)
-                    .Take(1)
-                    .DefaultIfEmpty()
+            var r = await _db.order_requests
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderByDescending(x => x.order_request_id)
+                .FirstOrDefaultAsync();
 
-                join pr in _db.productions.AsNoTracking() 
-                on r.order_id equals pr.order_id into prj
-                from pr in prj
+            if (r == null)
+                return null;
+
+            var ce = await _db.cost_estimates
+                .AsNoTracking()
+                .Where(x => x.order_request_id == r.order_request_id)
+                .OrderByDescending(x => x.is_active)
+                .ThenByDescending(x => x.estimate_id)
+                .FirstOrDefaultAsync();
+
+            var pr = await _db.productions
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderByDescending(x => x.prod_id)
+                .FirstOrDefaultAsync();
+
+            // Nếu production GROUP không có order_id thì lấy qua bảng prod_orders
+            if (pr == null)
+            {
+                var groupProdId = await _db.prod_orders
+                    .AsNoTracking()
+                    .Where(x => x.order_id == orderId)
                     .OrderByDescending(x => x.prod_id)
-                    .Take(1)
-                    .DefaultIfEmpty()
-                select new RequestPagedDto
+                    .Select(x => x.prod_id)
+                    .FirstOrDefaultAsync();
+
+                if (groupProdId > 0)
                 {
-                    order_request_id = r.order_request_id,
-                    actual_consultant_user_id = r.actual_consultant_user_id,
-                    customer_name = r.customer_name ?? "",
-                    customer_phone = r.customer_phone ?? "",
-                    customer_email = r.customer_email,
-                    delivery_date = r.delivery_date,
-                    product_name = r.product_name,
-                    quantity = r.quantity,
-                    description = r.description,
-                    design_file_path = r.design_file_path,
-                    order_request_date = r.order_request_date,
-                    detail_address = r.detail_address,
-                    process_status = r.process_status,
-                    product_type = r.product_type,
-                    number_of_plates = r.number_of_plates,
-                    order_id = r.order_id,
-                    production_method = pr != null ? pr.prod_method : null,
-                    is_full_process = pr != null ? pr.is_full_process : null,
-                    sub_product_id = pr != null ? pr.sub_product_id : null,
-                    sub_product_used_qty = pr != null ? pr.sub_product_used_qty : 0,
-                    nvl_qty = pr != null ? pr.nvl_qty : 0,
-                    gm_note = pr != null ? pr.gm_note : null,
-                    mgr_note = pr != null ? pr.mgr_note : null,
-                    quote_id = r.quote_id,
-                    product_length_mm = r.product_length_mm,
-                    product_width_mm = r.product_width_mm,
-                    product_height_mm = r.product_height_mm,
-                    glue_tab_mm = r.glue_tab_mm,
-                    bleed_mm = r.bleed_mm,
-                    is_one_side_box = r.is_one_side_box,
-                    print_width_mm = r.print_width_mm,
-                    print_length_mm = r.print_length_mm,
-                    is_send_design = r.is_send_design,
-                    reason = r.reason,
-                    note = r.note,
-                    accepted_estimate_id = r.accepted_estimate_id,
-                    consultant_note = r.consultant_note,
-                    verified_at = r.verified_at,
-                    quote_expire_at = r.quote_expires_at,
-                    message_to_customer = r.message_to_customer,
-                    preliminary_estimated_price = r.preliminary_estimated_price,
-                    assigned_consultant = r.assigned_consultant,
-                    assigned_at = r.assigned_at,
-                    delivery_note = r.delivery_note,
-                    print_ready_file = r.print_ready_file,
-                    estimate_finish_date = r.estimate_finish_date,
-                    estimate_id = ce != null ? ce.estimate_id : null,
-                    base_cost = ce != null ? ce.base_cost : null,
-                    is_rush = ce != null ? ce.is_rush : null,
-                    rush_percent = ce != null ? ce.rush_percent : null,
-                    rush_amount = ce != null ? ce.rush_amount : null,
-                    estimated_finish_date = ce != null ? ce.estimated_finish_date : null,
-                    desired_delivery_date = ce != null ? ce.desired_delivery_date : null,
-                    estimate_created_at = ce != null ? ce.created_at : null,
-                    paper_cost = ce != null ? ce.paper_cost : null,
-                    ink_cost = ce != null ? ce.ink_cost : null,
-                    coating_glue_cost = ce != null ? ce.coating_glue_cost : null,
-                    mounting_glue_cost = ce != null ? ce.mounting_glue_cost : null,
-                    lamination_cost = ce != null ? ce.lamination_cost : null,
-                    material_cost = ce != null ? ce.material_cost : null,
-                    sheets_required = ce != null ? ce.sheets_required : null,
-                    sheets_waste = ce != null ? ce.sheets_waste : null,
-                    sheets_total = ce != null ? ce.sheets_total : null,
-                    total_area_m2 = ce != null ? ce.total_area_m2 : null,
-                    final_total_cost = ce != null ? ce.final_total_cost : null,
-                    cost_note = ce != null ? ce.cost_note : null,
-                    paper_sheets_used = ce != null ? ce.paper_sheets_used : null,
-                    paper_unit_price = ce != null ? ce.paper_unit_price : null,
-                    ink_weight_kg = ce != null ? ce.ink_weight_kg : null,
-                    ink_rate_per_m2 = ce != null ? ce.ink_rate_per_m2 : null,
-                    coating_glue_weight_kg = ce != null ? ce.coating_glue_weight_kg : null,
-                    coating_glue_rate_per_m2 = ce != null ? ce.coating_glue_rate_per_m2 : null,
-                    coating_type = ce != null ? ce.coating_type : null,
-                    mounting_glue_weight_kg = ce != null ? ce.mounting_glue_weight_kg : null,
-                    mounting_glue_rate_per_m2 = ce != null ? ce.mounting_glue_rate_per_m2 : null,
-                    lamination_weight_kg = ce != null ? ce.lamination_weight_kg : null,
-                    lamination_rate_per_m2 = ce != null ? ce.lamination_rate_per_m2 : null,
-                    days_early = ce != null ? ce.days_early : null,
-                    subtotal = ce != null ? ce.subtotal : null,
-                    discount_percent = ce != null ? ce.discount_percent : null,
-                    discount_amount = ce != null ? ce.discount_amount : null,
-                    deposit_amount = ce != null ? ce.deposit_amount : null,
-                    design_cost = ce != null ? ce.design_cost : null,
-                    n_up = ce != null ? ce.n_up : null,
-                    is_active = ce != null ? ce.is_active : null,
-                    paper_code = ce != null ? ce.paper_code : null,
-                    paper_name = ce != null ? ce.paper_name : null,
-                    wave_type = ce != null ? ce.wave_type : null,
-                    production_processes = ce != null ? ce.production_processes : null,
-                    previous_estimate_id = ce != null ? ce.previous_estimate_id : null,
-                    consultant_contract_path = ce != null ? ce.consultant_contract_path : null,
-                    customer_signed_contract_path = ce != null ? ce.customer_signed_contract_path : null,
-                    wave_sheets_used = ce != null ? ce.wave_sheets_used : null,
-                    paper_alternative = ce != null ? ce.paper_alternative : null,
-                    wave_alternative = ce != null ? ce.wave_alternative : null,
-                    assign_name = _db.users.AsNoTracking().Where(u => u.user_id == r.assigned_consultant).Select(u => u.full_name).FirstOrDefault(),
-                    lamination_material_id = ce != null ? ce.lamination_material_id : null,
-                    lamination_material_code = ce != null ? ce.lamination_material_code : null,
-                    lamination_material_name = ce != null ? ce.lamination_material_name : null,
-                    require_remaining_before_delivery = requireRemainingBeforeDelivery
+                    pr = await _db.productions
+                        .AsNoTracking()
+                        .Where(x => x.prod_id == groupProdId)
+                        .FirstOrDefaultAsync();
                 }
-            ).FirstOrDefaultAsync();
+            }
+
+            var assignName = r.assigned_consultant.HasValue
+                ? await _db.users
+                    .AsNoTracking()
+                    .Where(u => u.user_id == r.assigned_consultant.Value)
+                    .Select(u => u.full_name)
+                    .FirstOrDefaultAsync()
+                : null;
+
+            return new RequestPagedDto
+            {
+                order_request_id = r.order_request_id,
+                actual_consultant_user_id = r.actual_consultant_user_id,
+                customer_name = r.customer_name ?? "",
+                customer_phone = r.customer_phone ?? "",
+                customer_email = r.customer_email,
+                delivery_date = r.delivery_date,
+                delivery_date_change_reason = r.delivery_date_change_reason,
+                product_name = r.product_name,
+                quantity = r.quantity,
+                description = r.description,
+                design_file_path = r.design_file_path,
+                order_request_date = r.order_request_date,
+                detail_address = r.detail_address,
+                process_status = r.process_status,
+                product_type = r.product_type,
+                number_of_plates = r.number_of_plates,
+                order_id = r.order_id,
+
+                production_method = pr != null ? pr.prod_method : null,
+                is_full_process = pr != null ? pr.is_full_process : null,
+                sub_product_id = pr != null ? pr.sub_product_id : null,
+                sub_product_used_qty = pr != null ? pr.sub_product_used_qty : 0,
+                nvl_qty = pr != null ? pr.nvl_qty : 0,
+                gm_note = pr != null ? pr.gm_note : null,
+                mgr_note = pr != null ? pr.mgr_note : null,
+
+                quote_id = r.quote_id,
+                product_length_mm = r.product_length_mm,
+                product_width_mm = r.product_width_mm,
+                product_height_mm = r.product_height_mm,
+                glue_tab_mm = r.glue_tab_mm,
+                bleed_mm = r.bleed_mm,
+                is_one_side_box = r.is_one_side_box,
+                print_width_mm = r.print_width_mm,
+                print_length_mm = r.print_length_mm,
+                is_send_design = r.is_send_design,
+                reason = r.reason,
+                note = r.note,
+                accepted_estimate_id = r.accepted_estimate_id,
+                consultant_note = r.consultant_note,
+                verified_at = r.verified_at,
+                quote_expire_at = r.quote_expires_at,
+                message_to_customer = r.message_to_customer,
+                preliminary_estimated_price = r.preliminary_estimated_price,
+                assigned_consultant = r.assigned_consultant,
+                assigned_at = r.assigned_at,
+                delivery_note = r.delivery_note,
+                print_ready_file = r.print_ready_file,
+                estimate_finish_date = r.estimate_finish_date,
+                assign_name = assignName,
+
+                estimate_id = ce != null ? ce.estimate_id : null,
+                base_cost = ce != null ? ce.base_cost : null,
+                is_rush = ce != null ? ce.is_rush : null,
+                rush_percent = ce != null ? ce.rush_percent : null,
+                rush_amount = ce != null ? ce.rush_amount : null,
+                estimated_finish_date = ce != null ? ce.estimated_finish_date : null,
+                desired_delivery_date = ce != null ? ce.desired_delivery_date : null,
+                estimate_created_at = ce != null ? ce.created_at : null,
+
+                paper_cost = ce != null ? ce.paper_cost : null,
+                ink_cost = ce != null ? ce.ink_cost : null,
+                coating_glue_cost = ce != null ? ce.coating_glue_cost : null,
+                mounting_glue_cost = ce != null ? ce.mounting_glue_cost : null,
+                lamination_cost = ce != null ? ce.lamination_cost : null,
+                material_cost = ce != null ? ce.material_cost : null,
+
+                sheets_required = ce != null ? ce.sheets_required : null,
+                sheets_waste = ce != null ? ce.sheets_waste : null,
+                sheets_total = ce != null ? ce.sheets_total : null,
+                total_area_m2 = ce != null ? ce.total_area_m2 : null,
+                final_total_cost = ce != null ? ce.final_total_cost : null,
+                cost_note = ce != null ? ce.cost_note : null,
+
+                paper_sheets_used = ce != null ? ce.paper_sheets_used : null,
+                paper_unit_price = ce != null ? ce.paper_unit_price : null,
+                ink_weight_kg = ce != null ? ce.ink_weight_kg : null,
+                ink_rate_per_m2 = ce != null ? ce.ink_rate_per_m2 : null,
+
+                coating_glue_weight_kg = ce != null ? ce.coating_glue_weight_kg : null,
+                coating_glue_rate_per_m2 = ce != null ? ce.coating_glue_rate_per_m2 : null,
+                coating_type = ce != null ? ce.coating_type : null,
+
+                mounting_glue_weight_kg = ce != null ? ce.mounting_glue_weight_kg : null,
+                mounting_glue_rate_per_m2 = ce != null ? ce.mounting_glue_rate_per_m2 : null,
+
+                lamination_weight_kg = ce != null ? ce.lamination_weight_kg : null,
+                lamination_rate_per_m2 = ce != null ? ce.lamination_rate_per_m2 : null,
+
+                days_early = ce != null ? ce.days_early : null,
+                subtotal = ce != null ? ce.subtotal : null,
+                discount_percent = ce != null ? ce.discount_percent : null,
+                discount_amount = ce != null ? ce.discount_amount : null,
+                deposit_amount = ce != null ? ce.deposit_amount : null,
+                design_cost = ce != null ? ce.design_cost : null,
+                n_up = ce != null ? ce.n_up : null,
+                is_active = ce != null ? ce.is_active : null,
+
+                paper_code = ce != null ? ce.paper_code : null,
+                paper_name = ce != null ? ce.paper_name : null,
+                wave_type = ce != null ? ce.wave_type : null,
+                production_processes = ce != null ? ce.production_processes : null,
+                previous_estimate_id = ce != null ? ce.previous_estimate_id : null,
+
+                consultant_contract_path = ce != null ? ce.consultant_contract_path : null,
+                customer_signed_contract_path = ce != null ? ce.customer_signed_contract_path : null,
+
+                wave_sheets_used = ce != null ? ce.wave_sheets_used : null,
+                paper_alternative = ce != null ? ce.paper_alternative : null,
+                wave_alternative = ce != null ? ce.wave_alternative : null,
+
+                lamination_material_id = ce != null ? ce.lamination_material_id : null,
+                lamination_material_code = ce != null ? ce.lamination_material_code : null,
+                lamination_material_name = ce != null ? ce.lamination_material_name : null,
+
+                require_remaining_before_delivery = requireRemainingBeforeDelivery
+            };
         }
 
         public Task<bool> AnyOrderLinkedAsync(int requestId)
