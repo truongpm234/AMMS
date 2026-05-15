@@ -2,11 +2,6 @@
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Orders;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace AMMS.Application.Services
 {
@@ -19,28 +14,36 @@ namespace AMMS.Application.Services
             _repo = repo;
         }
 
-        public async Task<PagedResultLite<MissingMaterialDto>> GetPagedAsync(int page, int pageSize, CancellationToken ct = default)
+        public async Task<PagedResultLite<MissingMaterialDto>> GetPagedAsync(
+            int page,
+            int pageSize,
+            CancellationToken ct = default)
         {
             await _repo.RecalculateAndSaveAsync(ct);
 
             var result = await _repo.GetPagedFromDbAsync(page, pageSize, ct);
-            if (result.Data == null || result.Data.Count == 0) return result;
+            if (result.Data == null || result.Data.Count == 0)
+                return result;
 
-            static decimal RoundUpToTens(decimal value)
+            static decimal RoundUpToHundreds(decimal value)
             {
-                if (value <= 0m) return 0m;
-                return Math.Ceiling(value / 10m) * 10m;
+                if (value <= 0m)
+                    return 0m;
+
+                return Math.Ceiling(value / 100m) * 100m;
             }
 
             foreach (var x in result.Data)
             {
                 var baseQty = x.quantity;
-                if (baseQty < 0m) baseQty = 0m;
 
-                var withBuffer = baseQty * 1.10m;
-                var roundedQty = RoundUpToTens(withBuffer);
+                if (baseQty < 0m)
+                    baseQty = 0m;
+
+                var roundedQty = RoundUpToHundreds(baseQty);
 
                 decimal unitPrice = 0m;
+
                 if (baseQty > 0m && x.total_price > 0m)
                     unitPrice = x.total_price / baseQty;
 
