@@ -390,17 +390,17 @@ namespace AMMS.API.Controllers
                 if (!ok)
                     return NotFound(new { message = "Production not found for this orderId" });
 
-                try
-                {
-                    _backgroundJobClient.Enqueue<DeliveryHandoverEmailJob>(
-                        x => x.RunAsync(orderId, CancellationToken.None));
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex,
-                        "Failed to enqueue DeliveryHandoverEmailJob. orderId={OrderId}",
-                        orderId);
-                }
+                //try
+                //{
+                //    _backgroundJobClient.Enqueue<DeliveryHandoverEmailJob>(
+                //        x => x.RunAsync(orderId, CancellationToken.None));
+                //}
+                //catch (Exception ex)
+                //{
+                //    _logger.LogError(ex,
+                //        "Failed to enqueue DeliveryHandoverEmailJob. orderId={OrderId}",
+                //        orderId);
+                //}
 
                 return Ok(new
                 {

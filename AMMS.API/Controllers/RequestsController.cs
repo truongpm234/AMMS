@@ -1,4 +1,5 @@
-﻿using AMMS.Application.Helpers;
+﻿using AMMS.API.Jobs;
+using AMMS.Application.Helpers;
 using AMMS.Application.Interfaces;
 using AMMS.Application.Services;
 using AMMS.Infrastructure.DBContext;
@@ -9,6 +10,7 @@ using AMMS.Shared.DTOs.PayOS;
 using AMMS.Shared.DTOs.Requests;
 using AMMS.Shared.DTOs.Socket;
 using AMMS.Shared.Helpers;
+using Hangfire;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
@@ -30,6 +32,7 @@ namespace AMMS.API.Controllers
         private readonly IDealService _dealService;
         private readonly IPaymentsService _paymentService;
         private readonly IProductionSchedulingService _schedulingService;
+        private readonly IBackgroundJobClient _backgroundJobClient;
         private readonly AppDbContext _db;
         private readonly ISmsOtpService _smsOtp;
         private readonly IConfiguration _config;
@@ -53,7 +56,8 @@ namespace AMMS.API.Controllers
     IConfiguration config,
     IPayOsService payos,
     ILogger<RequestsController> logger,
-    IServiceScopeFactory scopeFactory)
+    IServiceScopeFactory scopeFactory,
+    IBackgroundJobClient backgroundJobClient)
         {
             _hub = hub;
             _notiService = notiService;
@@ -68,6 +72,7 @@ namespace AMMS.API.Controllers
             _payos = payos;
             _logger = logger;
             _scopeFactory = scopeFactory;
+            _backgroundJobClient = backgroundJobClient;
         }
 
         [HttpPost("create-request-by-consultant")]
@@ -1084,6 +1089,7 @@ namespace AMMS.API.Controllers
             }
             return NotFound("Not payment yet");
         }
+
         [HttpPut("confirm-importing")]
         public async Task<IActionResult> ConfirmImportProduction([FromBody] int order_id)
         {
@@ -1106,6 +1112,18 @@ namespace AMMS.API.Controllers
             catch (Exception e)
             {
                 return BadRequest(e);
+            }
+
+            try
+            {
+                _backgroundJobClient.Enqueue<DeliveryHandoverEmailJob>(
+                    x => x.RunAsync(order_id, CancellationToken.None));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Failed to enqueue DeliveryHandoverEmailJob. orderId={OrderId}",
+                    order_id);
             }
             return BadRequest();
         }
