@@ -1,4 +1,5 @@
 ﻿using AMMS.Infrastructure.DBContext;
+using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Entities.AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Common;
@@ -88,71 +89,305 @@ namespace AMMS.Infrastructure.Repositories
                     };
                 }
 
-                var bomLines = await (
-                    from oi in _db.order_items.AsNoTracking()
-                    join b in _db.boms.AsNoTracking() on oi.item_id equals b.order_item_id
-                    join o in _db.orders.AsNoTracking() on oi.order_id equals o.order_id
-                    join m in _db.materials.AsNoTracking() on b.material_id equals m.material_id
-                    where oi.order_id != null && orderIds.Contains(oi.order_id.Value)
-                    select new
+                var orderRequests = await _db.order_requests.AsNoTracking()
+                    .Where(r => r.order_id != null && orderIds.Contains(r.order_id.Value))
+                    .Select(r => new
                     {
-                        MaterialId = m.material_id,
-                        MaterialName = m.name,
-                        Unit = m.unit,
-                        StockQty = m.stock_qty ?? 0m,
-                        CostPrice = m.cost_price ?? 0m,
+                        r.order_request_id,
+                        r.order_id,
+                        r.accepted_estimate_id,
+                        r.delivery_date
+                    })
+                    .ToListAsync(ct);
 
-                        DeliveryDate = o.delivery_date,
-
-                        OrderQty = oi.quantity,
-                        QtyTotal = b.qty_total,
-                        QtyPerProduct = b.qty_per_product,
-                        WastagePercent = b.wastage_percent
-                    }
-                ).ToListAsync(ct);
-
-                if (bomLines.Count == 0)
+                if (orderRequests.Count == 0)
                 {
                     await tx.CommitAsync(ct);
                     return new
                     {
                         insertedRows = 0,
-                        message = "No BOM lines found."
+                        message = "No order request found."
                     };
                 }
 
-                var today = AppTime.NowVnUnspecified().Date;
-                var historyStart = today.AddDays(-30);
-                var historyEndExclusive = today.AddDays(1);
-
-                var materialIdsInBom = bomLines
-                    .Select(x => x.MaterialId)
+                var orderRequestIds = orderRequests
+                    .Select(x => x.order_request_id)
                     .Distinct()
                     .ToList();
 
-                var usageLast30 = await _db.stock_moves.AsNoTracking()
-                    .Where(s =>
-                        s.type == "OUT" &&
-                        s.move_date >= historyStart &&
-                        s.move_date < historyEndExclusive &&
-                        s.material_id != null &&
-                        materialIdsInBom.Contains(s.material_id.Value))
-                    .GroupBy(s => s.material_id!.Value)
-                    .Select(g => new
+                var acceptedEstimateIds = orderRequests
+                    .Where(x => x.accepted_estimate_id != null)
+                    .Select(x => x.accepted_estimate_id!.Value)
+                    .Distinct()
+                    .ToList();
+
+                var estimates = await _db.cost_estimates.AsNoTracking()
+                    .Where(e =>
+                        orderRequestIds.Contains(e.order_request_id) &&
+                        (
+                            e.is_active == true ||
+                            acceptedEstimateIds.Contains(e.estimate_id)
+                        ))
+                    .Select(e => new
                     {
-                        MaterialId = g.Key,
-                        Usage = g.Sum(x => x.qty ?? 0m)
+                        e.estimate_id,
+                        e.order_request_id,
+                        e.created_at,
+                        e.desired_delivery_date,
+
+                        e.sheets_total,
+                        e.paper_code,
+                        e.paper_name,
+                        e.paper_alternative,
+
+                        e.ink_weight_kg,
+
+                        e.coating_glue_weight_kg,
+                        e.coating_type,
+
+                        e.mounting_glue_weight_kg,
+
+                        e.wave_type,
+                        e.wave_sheets_required,
+                        e.wave_alternative,
+
+                        e.lamination_weight_kg,
+                        e.lamination_material_id,
+                        e.lamination_material_code,
+                        e.lamination_material_name
                     })
                     .ToListAsync(ct);
 
-                var usageDict = usageLast30.ToDictionary(
-                    x => x.MaterialId,
-                    x => Math.Round(x.Usage, 4)
-                );
+                if (estimates.Count == 0)
+                {
+                    await tx.CommitAsync(ct);
+                    return new
+                    {
+                        insertedRows = 0,
+                        message = "No cost estimate found."
+                    };
+                }
+
+                var materials = await _db.materials.AsNoTracking()
+                    .ToListAsync(ct);
+
+                static string Norm(string? value)
+                {
+                    return string.IsNullOrWhiteSpace(value)
+                        ? ""
+                        : value.Trim().ToUpperInvariant();
+                }
+
+                static decimal RoundQty(decimal value)
+                {
+                    return Math.Round(value, 4, MidpointRounding.AwayFromZero);
+                }
+
+                material? FindById(int? materialId)
+                {
+                    if (materialId == null || materialId <= 0)
+                        return null;
+
+                    return materials.FirstOrDefault(x => x.material_id == materialId.Value);
+                }
+
+                material? FindByCodeOrName(string? value)
+                {
+                    var key = Norm(value);
+                    if (string.IsNullOrWhiteSpace(key))
+                        return null;
+
+                    var exactCode = materials.FirstOrDefault(x => Norm(x.code) == key);
+                    if (exactCode != null)
+                        return exactCode;
+
+                    var exactName = materials.FirstOrDefault(x => Norm(x.name) == key);
+                    if (exactName != null)
+                        return exactName;
+
+                    return materials.FirstOrDefault(x =>
+                        Norm(x.code).Contains(key) ||
+                        Norm(x.name).Contains(key));
+                }
+
+                material? FindByClassOrType(params string[] keys)
+                {
+                    foreach (var rawKey in keys)
+                    {
+                        var key = Norm(rawKey);
+                        if (string.IsNullOrWhiteSpace(key))
+                            continue;
+
+                        var exactClass = materials.FirstOrDefault(x => Norm(x.material_class) == key);
+                        if (exactClass != null)
+                            return exactClass;
+
+                        var exactType = materials.FirstOrDefault(x => Norm(x.type) == key);
+                        if (exactType != null)
+                            return exactType;
+
+                        var contains = materials.FirstOrDefault(x =>
+                            Norm(x.material_class).Contains(key) ||
+                            Norm(x.type).Contains(key) ||
+                            Norm(x.code).Contains(key) ||
+                            Norm(x.name).Contains(key));
+
+                        if (contains != null)
+                            return contains;
+                    }
+
+                    return null;
+                }
+
+                var demandLines = new List<MaterialDemandLine>();
+
+                void AddDemand(material? mat, decimal qty, DateTime? requestDate)
+                {
+                    qty = RoundQty(qty);
+
+                    if (qty <= 0m)
+                        return;
+
+                    if (mat == null)
+                        return;
+
+                    demandLines.Add(new MaterialDemandLine
+                    {
+                        MaterialId = mat.material_id,
+                        MaterialName = mat.name ?? "",
+                        Unit = mat.unit ?? "",
+                        StockQty = mat.stock_qty ?? 0m,
+                        CostPrice = mat.cost_price ?? 0m,
+                        NeededQty = qty,
+                        RequestDate = requestDate
+                    });
+                }
+
+                foreach (var request in orderRequests)
+                {
+                    var estimate = request.accepted_estimate_id != null
+                        ? estimates.FirstOrDefault(e => e.estimate_id == request.accepted_estimate_id.Value)
+                        : estimates
+                            .Where(e => e.order_request_id == request.order_request_id)
+                            .OrderByDescending(e => e.created_at)
+                            .ThenByDescending(e => e.estimate_id)
+                            .FirstOrDefault();
+
+                    if (estimate == null)
+                        continue;
+
+                    DateTime? requestDate = request.delivery_date ?? estimate.desired_delivery_date;
+
+                    // 1. Giấy: sheets_total theo paper_alternative hoặc paper_code
+                    var paperKey = !string.IsNullOrWhiteSpace(estimate.paper_alternative)
+                        ? estimate.paper_alternative
+                        : estimate.paper_code;
+
+                    var paperMaterial = FindByCodeOrName(paperKey);
+
+                    AddDemand(
+                        paperMaterial,
+                        estimate.sheets_total,
+                        requestDate
+                    );
+
+                    // 2. Mực: ink_weight_kg
+                    var inkMaterial =
+                        FindByClassOrType("INK", "MUC", "MỰC") ??
+                        FindByCodeOrName("MUC_IN");
+
+                    AddDemand(
+                        inkMaterial,
+                        estimate.ink_weight_kg,
+                        requestDate
+                    );
+
+                    // 3. Keo phủ: coating_glue_weight_kg, chỉ tính nếu coating_type có giá trị
+                    var coatingType = Norm(estimate.coating_type);
+
+                    var hasCoating =
+                        !string.IsNullOrWhiteSpace(coatingType) &&
+                        coatingType != "NONE" &&
+                        coatingType != "NO" &&
+                        coatingType != "KHONG" &&
+                        coatingType != "KHÔNG";
+
+                    if (hasCoating)
+                    {
+                        var coatingGlueMaterial =
+                            FindByCodeOrName(estimate.coating_type) ??
+                            FindByClassOrType(
+                                "COATING_GLUE",
+                                "COATING",
+                                "KEO_PHU",
+                                "KEO PHU",
+                                "KEO PHỦ",
+                                "PHU",
+                                "PHỦ"
+                            );
+
+                        AddDemand(
+                            coatingGlueMaterial,
+                            estimate.coating_glue_weight_kg,
+                            requestDate
+                        );
+                    }
+
+                    // 4. Keo bồi: mounting_glue_weight_kg
+                    var mountingGlueMaterial =
+                        FindByClassOrType(
+                            "MOUNTING_GLUE",
+                            "MOUNTING",
+                            "KEO_BOI",
+                            "KEO BOI",
+                            "KEO BỒI",
+                            "BOI",
+                            "BỒI"
+                        );
+
+                    AddDemand(
+                        mountingGlueMaterial,
+                        estimate.mounting_glue_weight_kg,
+                        requestDate
+                    );
+
+                    // 5. Sóng: wave_sheets_required theo wave_alternative hoặc wave_type
+                    var waveKey = !string.IsNullOrWhiteSpace(estimate.wave_alternative)
+                        ? estimate.wave_alternative
+                        : estimate.wave_type;
+
+                    var waveMaterial = FindByCodeOrName(waveKey);
+
+                    AddDemand(
+                        waveMaterial,
+                        estimate.wave_sheets_required ?? 0,
+                        requestDate
+                    );
+
+                    // 6. Màng cán: lamination_weight_kg, ưu tiên lamination_material_id
+                    var laminationMaterial =
+                        FindById(estimate.lamination_material_id) ??
+                        FindByCodeOrName(estimate.lamination_material_code) ??
+                        FindByCodeOrName(estimate.lamination_material_name) ??
+                        FindByClassOrType(
+                            "LAMINATION",
+                            "MANG",
+                            "MÀNG",
+                            "CAN_MANG",
+                            "CAN MANG",
+                            "CÁN MÀNG"
+                        );
+
+                    AddDemand(
+                        laminationMaterial,
+                        estimate.lamination_weight_kg   ,
+                        requestDate
+                    );
+                }
 
                 var now = AppTime.NowVnUnspecified();
 
-                var insertRows = bomLines
+                var insertRows = demandLines
                     .GroupBy(x => new
                     {
                         x.MaterialId,
@@ -161,45 +396,8 @@ namespace AMMS.Infrastructure.Repositories
                     })
                     .Select(g =>
                     {
-                        decimal requiredQty = 0m;
-
-                        foreach (var r in g)
-                        {
-                            decimal lineRequired;
-
-                            // Ưu tiên qty_total nếu BOM đã lưu sẵn tổng lượng cần
-                            if (r.QtyTotal.HasValue && r.QtyTotal.Value > 0m)
-                            {
-                                lineRequired = Math.Round(r.QtyTotal.Value, 4);
-                            }
-                            else if (r.QtyPerProduct.HasValue && r.QtyPerProduct.Value > 0m)
-                            {
-                                var baseQty = Math.Round(r.OrderQty * r.QtyPerProduct.Value, 4);
-                                var factor = Math.Round(1m + ((r.WastagePercent ?? 0m) / 100m), 4);
-                                lineRequired = Math.Round(baseQty * factor, 4);
-                            }
-                            else
-                            {
-                                continue;
-                            }
-
-                            if (lineRequired < 0m)
-                                lineRequired = 0m;
-
-                            requiredQty += lineRequired;
-                        }
-
-                        usageDict.TryGetValue(g.Key.MaterialId, out var usage30);
-
-                        var safetyQty = Math.Round(usage30 * 0.30m, 4);
-
-                        var needed = Math.Round(
-                            requiredQty + safetyQty,
-                            0,
-                            MidpointRounding.AwayFromZero
-                        );
-
-                        var available = Math.Round(g.Max(x => x.StockQty), 4);
+                        var needed = RoundQty(g.Sum(x => x.NeededQty));
+                        var available = RoundQty(g.Max(x => x.StockQty));
 
                         var missingQty = needed - available;
                         if (missingQty < 0m)
@@ -209,7 +407,7 @@ namespace AMMS.Infrastructure.Repositories
                         var totalPrice = Math.Round(missingQty * unitPrice, 2);
 
                         var requestDateValue = g
-                            .Select(x => x.DeliveryDate)
+                            .Select(x => x.RequestDate)
                             .Where(d => d != null)
                             .OrderBy(d => d)
                             .FirstOrDefault();
@@ -220,14 +418,13 @@ namespace AMMS.Infrastructure.Repositories
                             material_name = g.Key.MaterialName ?? "",
                             unit = g.Key.Unit ?? "",
                             request_date = requestDateValue,
+
                             needed = needed,
                             available = available,
                             quantity = missingQty,
                             total_price = totalPrice,
 
-                            // Không còn purchase nữa nên mặc định là chưa mua
                             is_buy = false,
-
                             created_at = now
                         };
                     })
@@ -245,6 +442,17 @@ namespace AMMS.Infrastructure.Repositories
                     message = "Recalculated & saved missing materials successfully. Purchase was not created."
                 };
             });
+        }
+
+        private sealed class MaterialDemandLine
+        {
+            public int MaterialId { get; set; }
+            public string MaterialName { get; set; } = "";
+            public string Unit { get; set; } = "";
+            public decimal StockQty { get; set; }
+            public decimal CostPrice { get; set; }
+            public decimal NeededQty { get; set; }
+            public DateTime? RequestDate { get; set; }
         }
     }
 }
