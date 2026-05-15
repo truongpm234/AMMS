@@ -183,6 +183,14 @@ namespace AMMS.Infrastructure.Repositories
                     return Math.Round(value, 4, MidpointRounding.AwayFromZero);
                 }
 
+                static decimal RoundUpToHundreds(decimal value)
+                {
+                    if (value <= 0m)
+                        return 0m;
+
+                    return Math.Ceiling(value / 100m) * 100m;
+                }
+
                 material? FindById(int? materialId)
                 {
                     if (materialId == null || materialId <= 0)
@@ -388,48 +396,53 @@ namespace AMMS.Infrastructure.Repositories
                 var now = AppTime.NowVnUnspecified();
 
                 var insertRows = demandLines
-                    .GroupBy(x => new
-                    {
-                        x.MaterialId,
-                        x.MaterialName,
-                        x.Unit
-                    })
-                    .Select(g =>
-                    {
-                        var needed = RoundQty(g.Sum(x => x.NeededQty));
-                        var available = RoundQty(g.Max(x => x.StockQty));
+    .GroupBy(x => new
+    {
+        x.MaterialId,
+        x.MaterialName,
+        x.Unit
+    })
+    .Select(g =>
+    {
+        var needed = RoundQty(g.Sum(x => x.NeededQty));
+        var available = RoundQty(g.Max(x => x.StockQty));
 
-                        var missingQty = needed - available;
-                        if (missingQty < 0m)
-                            missingQty = 0m;
+        var missingQty = needed - available;
+        if (missingQty < 0m)
+            missingQty = 0m;
 
-                        var unitPrice = Math.Round(g.Max(x => x.CostPrice), 2);
-                        var totalPrice = Math.Round(missingQty * unitPrice, 2);
+        var roundedMissingQty = RoundUpToHundreds(missingQty);
 
-                        var requestDateValue = g
-                            .Select(x => x.RequestDate)
-                            .Where(d => d != null)
-                            .OrderBy(d => d)
-                            .FirstOrDefault();
+        var unitPrice = Math.Round(g.Max(x => x.CostPrice), 2);
+        var totalPrice = Math.Round(roundedMissingQty * unitPrice, 2);
 
-                        return new missing_material
-                        {
-                            material_id = g.Key.MaterialId,
-                            material_name = g.Key.MaterialName ?? "",
-                            unit = g.Key.Unit ?? "",
-                            request_date = requestDateValue,
+        var requestDateValue = g
+            .Select(x => x.RequestDate)
+            .Where(d => d != null)
+            .OrderBy(d => d)
+            .FirstOrDefault();
 
-                            needed = needed,
-                            available = available,
-                            quantity = missingQty,
-                            total_price = totalPrice,
+        return new missing_material
+        {
+            material_id = g.Key.MaterialId,
+            material_name = g.Key.MaterialName ?? "",
+            unit = g.Key.Unit ?? "",
+            request_date = requestDateValue,
 
-                            is_buy = false,
-                            created_at = now
-                        };
-                    })
-                    .Where(x => x.quantity > 0m)
-                    .ToList();
+            needed = needed,
+            available = available,
+
+            // quantity luôn làm tròn lên hàng trăm
+            quantity = roundedMissingQty,
+
+            total_price = totalPrice,
+
+            is_buy = false,
+            created_at = now
+        };
+    })
+    .Where(x => x.quantity > 0m)
+    .ToList();
 
                 await _db.missing_materials.AddRangeAsync(insertRows, ct);
                 await _db.SaveChangesAsync(ct);
