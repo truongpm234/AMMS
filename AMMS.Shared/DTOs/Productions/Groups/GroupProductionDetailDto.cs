@@ -22,9 +22,14 @@ namespace AMMS.Shared.DTOs.Productions.Groups
 
         public string? process_codes { get; set; }
 
+        public GroupProductionTaskContextDto? task_context { get; set; }
+
         public List<GroupProductionOrderDto> orders { get; set; } = new();
 
         public List<GroupProductionStageDto> stages { get; set; } = new();
+
+        public GroupProductionPreviousStageContextDto? previous_stage_context { get; set; }
+
     }
 
     public class GroupProductionOrderDto
@@ -59,6 +64,8 @@ namespace AMMS.Shared.DTOs.Productions.Groups
         public decimal estimated_output_qty { get; set; }
 
         public decimal actual_output_qty { get; set; }
+
+        public List<string> report_image_urls { get; set; } = new();
 
         public List<GroupStageMaterialDto> input_materials { get; set; } = new();
 
@@ -101,6 +108,9 @@ namespace AMMS.Shared.DTOs.Productions.Groups
         public string? material_usage_json { get; set; }
 
         public string? output_json { get; set; }
+        public string? report_image_url { get; set; }
+
+        public List<string> report_image_urls { get; set; } = new();
     }
 
     public class GroupTaskAllocationDto

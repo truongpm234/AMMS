@@ -50,15 +50,12 @@ namespace AMMS.Application.Services
                       && o.layout_confirmed
                       && o.is_production_ready
 
-                      // Business rule:Chỉ order có delivery_date cách ngày hiện tại ít nhất 7 ngày
+                      // Rule mới: chỉ order Scheduled mới được ghép.
+                      && o.status == "Scheduled"
+
+                      // Giữ rule 7 ngày nếu bạn vẫn cần.
                       && o.delivery_date != null
                       && o.delivery_date >= minDeliveryDate
-
-                      && o.status != "Delivery"
-                      && o.status != "Completed"
-                      && o.status != "Importing"
-                      && o.status != "InProcessing"
-                      && o.status != "Finished"
 
                       // Không hiện order đã nằm trong production GROUP active.
                       && !_db.prod_orders.Any(po =>
@@ -125,9 +122,7 @@ namespace AMMS.Application.Services
                     production_process = row.item.production_process,
                     process_key = processKey,
                     delivery_date = row.delivery_date,
-
                     can_group = hasAllSelectedCodes,
-
                     reason = hasAllSelectedCodes
                         ? null
                         : "Order không có đủ các công đoạn được chọn để ghép."
@@ -142,9 +137,9 @@ namespace AMMS.Application.Services
         }
 
         public async Task<CreateGroupProductionResponse> CreateAsync(
-            CreateGroupProductionRequest req,
-            int? managerUserId,
-            CancellationToken ct = default)
+    CreateGroupProductionRequest req,
+    int? managerUserId,
+    CancellationToken ct = default)
         {
             if (req == null)
                 throw new InvalidOperationException("Request body is required.");
@@ -164,7 +159,7 @@ namespace AMMS.Application.Services
                 .ToList();
 
             if (selectedCodes.Count == 0)
-                throw new InvalidOperationException("Cần chọn ít nhất 1 công đoạn sản xuất chung.");
+                throw new InvalidOperationException("Cần chọn ít nhất 1 công đoạn để tạo lệnh sản xuất ghép/tách.");
 
             GroupProductionHelper.EnsureShareableCodes(selectedCodes);
 
@@ -174,53 +169,30 @@ namespace AMMS.Application.Services
             {
                 await using var tx = await _db.Database.BeginTransactionAsync(ct);
 
-                var rows = await (
-                    from o in _db.orders
-                    join pr in _db.productions on o.order_id equals pr.order_id
-                    where orderIds.Contains(o.order_id)
-                          && pr.prod_kind == "SINGLE"
-                    select new
-                    {
-                        order = o,
-                        singleProd = pr,
-                        item = _db.order_items
-                            .Where(i => i.order_id == o.order_id)
-                            .OrderBy(i => i.item_id)
-                            .FirstOrDefault()
-                    }
-                ).ToListAsync(ct);
+                var rows = await LoadGroupOrderRowsAsync(orderIds, ct);
 
                 if (rows.Count != orderIds.Count)
                     throw new InvalidOperationException("Một số order không tồn tại hoặc chưa có production riêng.");
 
-                var today = AppTime.NowVnUnspecified().Date;
-                var minDeliveryDate = today.AddDays(7);
-
-                var invalidDeliveryOrders = rows
-                    .Where(x => x.order.delivery_date == null || x.order.delivery_date < minDeliveryDate)
-                    .Select(x => new
-                    {
-                        x.order.order_id,
-                        x.order.delivery_date
-                    })
-                    .ToList();
-
-                if (invalidDeliveryOrders.Count > 0)
-                {
-                    var invalidText = string.Join(", ", invalidDeliveryOrders.Select(x =>
-                        $"{x.order_id}({(x.delivery_date.HasValue ? x.delivery_date.Value.ToString("yyyy-MM-dd") : "null")})"));
-
-                    throw new InvalidOperationException(
-                        $"Chỉ được ghép các order có delivery_date cách ngày hiện tại ít nhất 7 ngày. Order không hợp lệ: {invalidText}");
-                }
-                if (rows.Any(x => x.item == null))
+                if (rows.Any(x => x.Item == null))
                     throw new InvalidOperationException("Một số order chưa có order_item.");
 
-                if (rows.Any(x => !x.order.layout_confirmed || !x.order.is_production_ready))
+                var invalidStatusOrders = rows
+                    .Where(x => !string.Equals(x.Order.status, "Scheduled", StringComparison.OrdinalIgnoreCase))
+                    .Select(x => $"{x.Order.order_id}({x.Order.status})")
+                    .ToList();
+
+                if (invalidStatusOrders.Count > 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Chỉ order có status Scheduled mới được ghép. Order không hợp lệ: {string.Join(", ", invalidStatusOrders)}");
+                }
+
+                if (rows.Any(x => !x.Order.layout_confirmed || !x.Order.is_production_ready))
                     throw new InvalidOperationException("Tất cả order phải xác nhận layout và sẵn sàng sản xuất.");
 
                 var productTypeIds = rows
-                    .Select(x => x.item!.product_type_id)
+                    .Select(x => x.Item.product_type_id)
                     .Distinct()
                     .ToList();
 
@@ -228,21 +200,6 @@ namespace AMMS.Application.Services
                     throw new InvalidOperationException("Các order phải cùng product_type.");
 
                 var productTypeId = productTypeIds[0]!.Value;
-
-                foreach (var row in rows)
-                {
-                    var orderCodes = GroupProductionHelper.ParseCodes(row.item!.production_process);
-
-                    var missing = selectedCodes
-                        .Where(x => !orderCodes.Contains(x, StringComparer.OrdinalIgnoreCase))
-                        .ToList();
-
-                    if (missing.Count > 0)
-                    {
-                        throw new InvalidOperationException(
-                            $"Order {row.order.order_id} thiếu công đoạn: {string.Join(",", missing)}");
-                    }
-                }
 
                 var alreadyGroupedOrderIds = await _db.prod_orders
                     .Where(x => orderIds.Contains(x.order_id) && x.status == "Active")
@@ -258,116 +215,460 @@ namespace AMMS.Application.Services
                 if (alreadyGroupedOrderIds.Count > 0)
                 {
                     throw new InvalidOperationException(
-                        $"Một số order đã nằm trong lệnh sản xuất ghép khác: {string.Join(",", alreadyGroupedOrderIds)}");
+                        $"Một số order đã nằm trong production ghép active: {string.Join(",", alreadyGroupedOrderIds)}");
                 }
+
+                var plan = BuildDepartmentProductionPlan(
+                    rows,
+                    selectedCodes,
+                    out var warnings);
+
+                if (plan.Count == 0)
+                    throw new InvalidOperationException("Không có công đoạn hợp lệ để tạo lệnh sản xuất.");
 
                 var now = AppTime.NowVnUnspecified();
 
-                var groupProd = new production
-                {
-                    code = $"GRP-{now:yyyyMMddHHmmss}",
-                    order_id = null,
-                    manager_id = managerUserId,
-                    created_at = now,
-                    planned_start_date = req.planned_start_date ?? now,
-                    status = "Unassigned",
-                    product_type_id = productTypeId,
-                    note = req.note,
-                    prod_kind = "GROUP",
-                    prod_method = "GROUP",
-                    group_process_codes = string.Join(",", selectedCodes),
-                    group_total_qty = rows.Sum(x => x.item!.quantity)
-                };
+                var allSteps = await _db.product_type_processes
+                    .Where(x => x.product_type_id == productTypeId && (x.is_active ?? true))
+                    .OrderBy(x => x.seq_num)
+                    .ToListAsync(ct);
 
-                await _db.productions.AddAsync(groupProd, ct);
-                await _db.SaveChangesAsync(ct);
+                var createdGroupProdIds = new List<int>();
+                var createdSplitProdIds = new List<int>();
 
-                foreach (var row in rows)
+                foreach (var segment in plan)
                 {
-                    await _db.prod_orders.AddAsync(new prod_order
+                    if (segment.IsGroup)
                     {
-                        prod_id = groupProd.prod_id,
-                        order_id = row.order.order_id,
-                        single_prod_id = row.singleProd.prod_id,
-                        qty = row.item!.quantity,
-                        product_type_id = productTypeId,
-                        product_process = row.item.production_process,
-                        status = "Active",
-                        created_at = now
-                    }, ct);
+                        var groupProd = await CreateDepartmentGroupProductionAsync(
+                            segment,
+                            productTypeId,
+                            managerUserId,
+                            req.planned_start_date ?? now,
+                            req.note,
+                            allSteps,
+                            ct);
+
+                        createdGroupProdIds.Add(groupProd.prod_id);
+                    }
+                    else
+                    {
+                        var splitProd = await CreateSplitProductionAsync(
+                            segment,
+                            productTypeId,
+                            managerUserId,
+                            req.planned_start_date ?? now,
+                            req.note,
+                            allSteps,
+                            ct);
+
+                        createdSplitProdIds.Add(splitProd.prod_id);
+                    }
                 }
 
-                var allSteps = await _db.product_type_processes
-    .Where(x => x.product_type_id == productTypeId && (x.is_active ?? true))
-    .OrderBy(x => x.seq_num)
-    .ToListAsync(ct);
+                await _db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
 
+                var firstGroupId = createdGroupProdIds.FirstOrDefault();
+
+                var firstGroupCode = firstGroupId > 0
+                    ? await _db.productions.AsNoTracking()
+                        .Where(x => x.prod_id == firstGroupId)
+                        .Select(x => x.code)
+                        .FirstOrDefaultAsync(ct)
+                    : null;
+
+                return new CreateGroupProductionResponse
+                {
+                    group_prod_id = firstGroupId,
+                    code = firstGroupCode,
+
+                    group_prod_ids = createdGroupProdIds,
+                    split_prod_ids = createdSplitProdIds,
+                    all_created_prod_ids = createdGroupProdIds
+                        .Concat(createdSplitProdIds)
+                        .Distinct()
+                        .ToList(),
+                    order_ids = orderIds,
+                    warnings = warnings,
+                    message = "Đã tạo production theo phòng ban, path công đoạn và điều kiện NVL."
+                };
+            });
+        }
+
+        private async Task<production> CreateDepartmentGroupProductionAsync(
+    ProductionPlanSegment segment,
+    int productTypeId,
+    int? managerUserId,
+    DateTime plannedStart,
+    string? note,
+    List<product_type_process> allSteps,
+    CancellationToken ct)
+        {
+            var now = AppTime.NowVnUnspecified();
+            var codesCsv = string.Join(",", segment.ProcessCodes);
+
+            var groupProd = new production
+            {
+                code = $"GRP-{segment.DepartmentCode}-{now:yyyyMMddHHmmssfff}",
+                order_id = null,
+                manager_id = managerUserId,
+                created_at = now,
+                planned_start_date = plannedStart,
+                status = "Unassigned",
+                product_type_id = productTypeId,
+                note = string.IsNullOrWhiteSpace(note)
+                    ? $"Group {segment.DepartmentName}: {codesCsv}"
+                    : $"{note} | Group {segment.DepartmentName}: {codesCsv}",
+                prod_kind = "GROUP",
+                prod_method = "GROUP",
+                group_process_codes = codesCsv,
+                group_total_qty = segment.Members.Sum(x => x.Item.quantity)
+            };
+
+            await _db.productions.AddAsync(groupProd, ct);
+            await _db.SaveChangesAsync(ct);
+
+            foreach (var member in segment.Members)
+            {
+                await _db.prod_orders.AddAsync(new prod_order
+                {
+                    prod_id = groupProd.prod_id,
+                    order_id = member.Order.order_id,
+                    single_prod_id = member.SingleProd.prod_id,
+                    qty = member.Item.quantity,
+                    product_type_id = productTypeId,
+                    product_process = member.Item.production_process,
+                    status = "Active",
+                    created_at = now
+                }, ct);
+            }
+
+            var stepRows = allSteps
+                .Where(x => segment.ProcessCodes.Contains(
+                    GroupProductionHelper.Norm(x.process_code),
+                    StringComparer.OrdinalIgnoreCase))
+                .OrderBy(x => x.seq_num)
+                .ToList();
+
+            if (stepRows.Count != segment.ProcessCodes.Count)
+            {
+                var foundCodes = stepRows
+                    .Select(x => GroupProductionHelper.Norm(x.process_code))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                var missing = segment.ProcessCodes
+                    .Where(x => !foundCodes.Contains(x))
+                    .ToList();
+
+                throw new InvalidOperationException(
+                    $"Không tìm thấy đủ process trong product_type_processes. Thiếu: {string.Join(",", missing)}");
+            }
+
+            var groupTasks = new List<task>();
+            var seq = 1;
+
+            foreach (var step in stepRows)
+            {
+                var groupTask = new task
+                {
+                    prod_id = groupProd.prod_id,
+                    name = $"GROUP-{segment.DepartmentCode}-{step.process_name ?? step.process_code}",
+                    seq_num = seq++,
+                    status = "Unassigned",
+                    machine = step.machine,
+                    process_id = step.process_id,
+                    input_mode = "MANUAL",
+                    reason = $"Task thuộc production ghép phòng ban {segment.DepartmentName}, nhập tay input/output khi báo cáo."
+                };
+
+                await _db.tasks.AddAsync(groupTask, ct);
+                groupTasks.Add(groupTask);
+            }
+
+            await _db.SaveChangesAsync(ct);
+
+            await LinkSingleTasksAsync(
+                groupProd,
+                groupTasks,
+                segment.Members.Select(x => new SingleRow
+                {
+                    OrderId = x.Order.order_id,
+                    SingleProdId = x.SingleProd.prod_id,
+                    Qty = x.Item.quantity
+                }).ToList(),
+                ct);
+
+            await _db.SaveChangesAsync(ct);
+
+            return groupProd;
+        }
+
+        private async Task<production> CreateSplitProductionAsync(
+    ProductionPlanSegment segment,
+    int productTypeId,
+    int? managerUserId,
+    DateTime plannedStart,
+    string? note,
+    List<product_type_process> allSteps,
+    CancellationToken ct)
+        {
+            var member = segment.Members.First();
+            var now = AppTime.NowVnUnspecified();
+            var codesCsv = string.Join(",", segment.ProcessCodes);
+
+            var splitProd = new production
+            {
+                code = $"SPL-{member.Order.order_id}-{segment.DepartmentCode}-{now:yyyyMMddHHmmssfff}",
+                order_id = member.Order.order_id,
+                manager_id = managerUserId,
+                created_at = now,
+                planned_start_date = plannedStart,
+                status = "Unassigned",
+                product_type_id = productTypeId,
+                note = string.IsNullOrWhiteSpace(note)
+                    ? $"Split {segment.DepartmentName}: {codesCsv}"
+                    : $"{note} | Split {segment.DepartmentName}: {codesCsv}",
+                prod_kind = "SPLIT",
+                prod_method = "SPLIT",
+                group_process_codes = codesCsv,
+                group_total_qty = member.Item.quantity
+            };
+
+            await _db.productions.AddAsync(splitProd, ct);
+            await _db.SaveChangesAsync(ct);
+
+            /*
+             * Move task từ SINGLE sang SPLIT để tránh trùng lệnh sản xuất.
+             * Ví dụ order 2 có DAN riêng:
+             * - DAN được move khỏi SINGLE order 2
+             * - DAN nằm trong production SPLIT order 2
+             */
+            var existingTasks = await _db.tasks
+                .Include(x => x.process)
+                .Where(x => x.prod_id == member.SingleProd.prod_id)
+                .ToListAsync(ct);
+
+            var movedCount = 0;
+
+            foreach (var task in existingTasks)
+            {
+                var taskCode = GroupProductionHelper.Norm(task.process?.process_code);
+
+                if (!segment.ProcessCodes.Contains(taskCode, StringComparer.OrdinalIgnoreCase))
+                    continue;
+
+                task.prod_id = splitProd.prod_id;
+                task.seq_num = segment.ProcessCodes.FindIndex(x =>
+                    string.Equals(x, taskCode, StringComparison.OrdinalIgnoreCase)) + 1;
+
+                task.status = "Unassigned";
+                task.start_time = null;
+                task.end_time = null;
+                task.reason = $"Task được tách sang production {splitProd.code} theo phòng ban {segment.DepartmentName}.";
+
+                movedCount++;
+            }
+
+            if (movedCount == 0)
+            {
                 var stepRows = allSteps
-                    .Where(x => selectedCodes.Contains(
+                    .Where(x => segment.ProcessCodes.Contains(
                         GroupProductionHelper.Norm(x.process_code),
                         StringComparer.OrdinalIgnoreCase))
                     .OrderBy(x => x.seq_num)
                     .ToList();
 
-                if (stepRows.Count != selectedCodes.Count)
-                {
-                    var foundCodes = stepRows
-                        .Select(x => GroupProductionHelper.Norm(x.process_code))
-                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-                    var missing = selectedCodes
-                        .Where(x => !foundCodes.Contains(x))
-                        .ToList();
-
-                    throw new InvalidOperationException(
-                        $"Không tìm thấy đủ process trong product_type_processes. Thiếu: {string.Join(",", missing)}");
-                }
-
-                var groupTasks = new List<task>();
                 var seq = 1;
 
                 foreach (var step in stepRows)
                 {
-                    var groupTask = new task
+                    await _db.tasks.AddAsync(new task
                     {
-                        prod_id = groupProd.prod_id,
-                        name = $"GROUP-{step.process_name ?? step.process_code}",
+                        prod_id = splitProd.prod_id,
+                        name = $"SPLIT-{step.process_name ?? step.process_code}",
                         seq_num = seq++,
                         status = "Unassigned",
                         machine = step.machine,
                         process_id = step.process_id,
                         input_mode = "MANUAL",
-                        reason = "Task thuộc production ghép, nhập tay input/output khi báo cáo."
-                    };
+                        reason = $"Task SPLIT theo phòng ban {segment.DepartmentName}."
+                    }, ct);
+                }
+            }
 
-                    await _db.tasks.AddAsync(groupTask, ct);
-                    groupTasks.Add(groupTask);
+            await _db.SaveChangesAsync(ct);
+
+            return splitProd;
+        }
+
+        public async Task<List<SuggestedGroupProductionDto>> SuggestAsync(
+    int? productTypeId,
+    CancellationToken ct = default)
+        {
+            var candidates = await GetCandidatesAsync(productTypeId, null, ct);
+
+            var orderIds = candidates
+                .Select(x => x.order_id)
+                .Distinct()
+                .ToList();
+
+            if (orderIds.Count < 2)
+                return new List<SuggestedGroupProductionDto>();
+
+            var rows = await LoadGroupOrderRowsAsync(orderIds, ct);
+
+            if (productTypeId.HasValue)
+            {
+                rows = rows
+                    .Where(x => x.Item.product_type_id == productTypeId.Value)
+                    .ToList();
+            }
+
+            var suggestions = new List<SuggestedGroupProductionDto>();
+
+            var allPossibleCodes = rows
+                .SelectMany(x => x.RouteCodes)
+                .Where(x => !IsDept1(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => DepartmentOrder(ResolveDepartmentCode(x)))
+                .ThenBy(x => GetGlobalRouteIndex(rows, x))
+                .ToList();
+
+            foreach (var processCode in allPossibleCodes)
+            {
+                var rowsWithProcess = rows
+                    .Where(x => x.RouteCodes.Contains(processCode, StringComparer.OrdinalIgnoreCase))
+                    .ToList();
+
+                if (rowsWithProcess.Count < 2)
+                    continue;
+
+                if (RequiresSameMaterialKey(processCode))
+                {
+                    var materialGroups = rowsWithProcess
+                        .GroupBy(x => ResolveMaterialGroupKey(processCode, x))
+                        .Where(g => g.Count() >= 2)
+                        .ToList();
+
+                    foreach (var mg in materialGroups)
+                    {
+                        suggestions.Add(new SuggestedGroupProductionDto
+                        {
+                            suggest_order = mg.Select(x => x.Order.order_id).Distinct().OrderBy(x => x).ToList(),
+                            suggest_process = new List<string> { processCode },
+                            department_code = ResolveDepartmentCode(processCode),
+                            department_name = ResolveDepartmentName(ResolveDepartmentCode(processCode)),
+                            material_key = mg.Key,
+                            reason = $"Các order cùng công đoạn {processCode} và cùng mã NVL/cấu hình vật tư."
+                        });
+                    }
+                }
+                else
+                {
+                    suggestions.Add(new SuggestedGroupProductionDto
+                    {
+                        suggest_order = rowsWithProcess
+                            .Select(x => x.Order.order_id)
+                            .Distinct()
+                            .OrderBy(x => x)
+                            .ToList(),
+
+                        suggest_process = new List<string> { processCode },
+
+                        department_code = ResolveDepartmentCode(processCode),
+                        department_name = ResolveDepartmentName(ResolveDepartmentCode(processCode)),
+
+                        material_key = null,
+
+                        reason = $"Các order cùng công đoạn {processCode}."
+                    });
+                }
+            }
+
+            return MergeSuggestions(suggestions);
+        }
+
+        public async Task<GroupProductionTaskContextDto?> GetTaskContextAsync(
+    int taskId,
+    CancellationToken ct = default)
+        {
+            var current = await _db.tasks
+                .AsNoTracking()
+                .Include(x => x.process)
+                .Include(x => x.prod)
+                .FirstOrDefaultAsync(x => x.task_id == taskId, ct);
+
+            if (current == null)
+                return null;
+
+            task? previous = null;
+
+            if (current.prod_id.HasValue)
+            {
+                var currentSeq = current.seq_num ?? int.MaxValue;
+
+                previous = await _db.tasks
+                    .AsNoTracking()
+                    .Include(x => x.process)
+                    .Where(x =>
+                        x.prod_id == current.prod_id.Value &&
+                        x.task_id != current.task_id &&
+                        (x.seq_num ?? int.MaxValue) < currentSeq)
+                    .OrderByDescending(x => x.seq_num)
+                    .ThenByDescending(x => x.task_id)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            return new GroupProductionTaskContextDto
+            {
+                task_id = current.task_id,
+                prod_id = current.prod_id,
+                prod_kind = current.prod?.prod_kind,
+                process_code = current.process?.process_code,
+                process_name = current.process?.process_name,
+                status = current.status,
+
+                previous_task = previous == null
+                    ? null
+                    : new TaskPreviousInfoDto
+                    {
+                        task_id = previous.task_id,
+                        prod_id = previous.prod_id,
+                        seq_num = previous.seq_num,
+                        process_code = previous.process?.process_code,
+                        process_name = previous.process?.process_name,
+                        status = previous.status,
+                        start_time = previous.start_time,
+                        end_time = previous.end_time
+                    }
+            };
+        }
+
+        private static List<SuggestedGroupProductionDto> MergeSuggestions(
+            List<SuggestedGroupProductionDto> suggestions)
+        {
+            var result = new List<SuggestedGroupProductionDto>();
+
+            foreach (var item in suggestions)
+            {
+                var last = result.LastOrDefault();
+
+                if (last != null &&
+                    last.department_code == item.department_code &&
+                    string.Equals(last.material_key, item.material_key, StringComparison.OrdinalIgnoreCase) &&
+                    last.suggest_order.SequenceEqual(item.suggest_order))
+                {
+                    last.suggest_process.AddRange(item.suggest_process);
+                    continue;
                 }
 
-                await _db.SaveChangesAsync(ct);
+                result.Add(item);
+            }
 
-                await LinkSingleTasksAsync(groupProd, groupTasks, rows.Select(x => new SingleRow
-                {
-                    OrderId = x.order.order_id,
-                    SingleProdId = x.singleProd.prod_id,
-                    Qty = x.item!.quantity
-                }).ToList(), ct);
-
-                await _db.SaveChangesAsync(ct);
-                await tx.CommitAsync(ct);
-
-                return new CreateGroupProductionResponse
-                {
-                    group_prod_id = groupProd.prod_id,
-                    group_code = groupProd.code,
-                    product_type_id = productTypeId,
-                    total_qty = groupProd.group_total_qty,
-                    order_ids = orderIds,
-                    process_codes = selectedCodes,
-                    group_task_ids = groupTasks.Select(x => x.task_id).ToList(),
-                    message = "Đã tạo production ghép. RALO/CAT/IN vẫn giữ ở production riêng của từng order."
-                };
-            });
+            return result
+                .Where(x => x.suggest_order.Count >= 2 && x.suggest_process.Count > 0)
+                .ToList();
         }
 
         public async Task StartAsync(int groupProdId, CancellationToken ct = default)
@@ -376,35 +677,41 @@ namespace AMMS.Application.Services
                 .FirstOrDefaultAsync(x => x.prod_id == groupProdId, ct);
 
             if (prod == null)
-                throw new KeyNotFoundException("Group production not found.");
+                throw new KeyNotFoundException("Production not found.");
 
-            if (!string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Production này không phải production ghép.");
+            if (!string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("API này chỉ dùng cho production GROUP/SPLIT.");
+            }
 
-            var orderCount = await _db.prod_orders
-                .CountAsync(x => x.prod_id == groupProdId && x.status == "Active", ct);
+            var dep = await ProductionDependencyValidator.CheckProductionCanStartAsync(
+                _db,
+                groupProdId,
+                ct);
 
-            if (orderCount < 2)
-                throw new InvalidOperationException("Production ghép cần ít nhất 2 order.");
+            if (!dep.can_start)
+            {
+                throw new InvalidOperationException(
+                    "Chưa thể bắt đầu production vì công đoạn trước đó chưa hoàn thành. " +
+                    dep.message);
+            }
 
             var now = AppTime.NowVnUnspecified();
 
             prod.status = "InProcessing";
             prod.actual_start_date ??= now;
 
-            var orderIds = await _db.prod_orders
-                .Where(x => x.prod_id == groupProdId && x.status == "Active")
-                .Select(x => x.order_id)
+            var tasks = await _db.tasks
+                .Where(x => x.prod_id == groupProdId)
+                .OrderBy(x => x.seq_num)
+                .ThenBy(x => x.task_id)
                 .ToListAsync(ct);
 
-            var orders = await _db.orders
-                .Where(x => orderIds.Contains(x.order_id))
-                .ToListAsync(ct);
-
-            foreach (var order in orders)
+            foreach (var task in tasks)
             {
-                if (!string.Equals(order.status, "InProcessing", StringComparison.OrdinalIgnoreCase))
-                    order.status = "InProcessing";
+                if (string.Equals(task.status, "GroupedWaiting", StringComparison.OrdinalIgnoreCase))
+                    task.status = "Unassigned";
             }
 
             await _db.SaveChangesAsync(ct);
@@ -467,11 +774,19 @@ namespace AMMS.Application.Services
                     qty_good = x.qty_good ?? 0,
                     log_time = x.log_time,
                     reason = x.reason,
+
+                    report_image_url = x.report_image_url,
+
                     reference_input_json = x.reference_input_json,
                     material_usage_json = x.material_usage_json,
                     output_json = x.output_json
                 })
                 .ToListAsync(ct);
+
+            foreach (var log in logs)
+            {
+                log.report_image_urls = SplitImageUrls(log.report_image_url);
+            }
 
             var allocations = await (
                 from tq in _db.task_qtys.AsNoTracking()
@@ -529,8 +844,15 @@ namespace AMMS.Application.Services
                     status = task.status,
                     start_time = task.start_time,
                     end_time = task.end_time,
+
                     estimated_output_qty = io.estimatedOutputQty,
                     actual_output_qty = actualOutput,
+
+                    report_image_urls = taskLogs
+                        .SelectMany(x => x.report_image_urls)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList(),
+
                     input_materials = io.inputs,
                     outputs = io.outputs,
                     logs = taskLogs,
@@ -540,6 +862,12 @@ namespace AMMS.Application.Services
                 previousOutputQty = actualOutput > 0 ? actualOutput : io.estimatedOutputQty;
                 previousOutputName = io.outputs.FirstOrDefault()?.name ?? $"BTP sau {task.process?.process_code}";
             }
+
+            var previousStageContext = await BuildPreviousStageContextForGroupAsync(
+                prod,
+                tasks,
+                orderRows,
+                ct);
 
             return new GroupProductionDetailDto
             {
@@ -551,8 +879,332 @@ namespace AMMS.Application.Services
                 total_qty = prod.group_total_qty,
                 process_codes = prod.group_process_codes,
                 orders = orderRows,
-                stages = stages
+                stages = stages,
+                previous_stage_context = previousStageContext
             };
+        }
+
+        private static List<string> SplitImageUrls(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private async Task<GroupProductionPreviousStageContextDto?> BuildPreviousStageContextForGroupAsync(
+    production groupProd,
+    List<task> groupTasks,
+    List<GroupProductionOrderDto> orderRows,
+    CancellationToken ct)
+        {
+            var firstGroupTask = groupTasks
+                .OrderBy(x => x.seq_num ?? int.MaxValue)
+                .ThenBy(x => x.task_id)
+                .FirstOrDefault();
+
+            if (firstGroupTask == null)
+                return null;
+
+            var currentCode = GroupProductionHelper.Norm(firstGroupTask.process?.process_code);
+
+            if (string.IsNullOrWhiteSpace(currentCode))
+                return null;
+
+            var result = new GroupProductionPreviousStageContextDto
+            {
+                current_group_task_id = firstGroupTask.task_id,
+                current_group_prod_id = groupProd.prod_id,
+                current_process_code = firstGroupTask.process?.process_code,
+                current_process_name = firstGroupTask.process?.process_name,
+                previous_process_code = null,
+                all_previous_finished = true
+            };
+
+            foreach (var orderRow in orderRows)
+            {
+                var route = await GetOrderRouteCodesAsync(orderRow.order_id, ct);
+
+                var previousCode = ResolvePreviousProcessCode(route, currentCode);
+
+                if (!string.IsNullOrWhiteSpace(previousCode))
+                    result.previous_process_code ??= previousCode;
+
+                if (string.IsNullOrWhiteSpace(previousCode))
+                {
+                    result.previous_tasks.Add(new GroupProductionPreviousTaskByOrderDto
+                    {
+                        order_id = orderRow.order_id,
+                        order_code = orderRow.order_code,
+                        previous_process_code = null,
+                        is_finished = true,
+                        message = $"Order {orderRow.order_id}: công đoạn {currentCode} là công đoạn đầu tiên trong path, không có công đoạn trước."
+                    });
+
+                    continue;
+                }
+
+                var previousTask = await FindPreviousProcessTaskForOrderAsync(
+                    orderRow.order_id,
+                    previousCode,
+                    ct);
+
+                if (previousTask == null)
+                {
+                    result.all_previous_finished = false;
+
+                    result.previous_tasks.Add(new GroupProductionPreviousTaskByOrderDto
+                    {
+                        order_id = orderRow.order_id,
+                        order_code = orderRow.order_code,
+                        previous_process_code = previousCode,
+                        previous_task_status = null,
+                        is_finished = false,
+                        message = $"Order {orderRow.order_id}: không tìm thấy task công đoạn trước {previousCode}."
+                    });
+
+                    continue;
+                }
+
+                var isFinished = IsTaskFinished(
+                    previousTask.status,
+                    previousTask.end_time);
+
+                if (!isFinished)
+                    result.all_previous_finished = false;
+
+                result.previous_tasks.Add(new GroupProductionPreviousTaskByOrderDto
+                {
+                    order_id = orderRow.order_id,
+                    order_code = orderRow.order_code,
+
+                    previous_task_id = previousTask.task_id,
+                    previous_prod_id = previousTask.prod_id,
+                    previous_prod_kind = previousTask.prod_kind,
+                    previous_seq_num = previousTask.seq_num,
+
+                    previous_process_code = previousTask.process_code,
+                    previous_process_name = previousTask.process_name,
+
+                    previous_task_status = previousTask.status,
+                    previous_start_time = previousTask.start_time,
+                    previous_end_time = previousTask.end_time,
+
+                    is_finished = isFinished,
+
+                    message = isFinished
+                        ? $"Order {orderRow.order_id}: công đoạn trước {previousCode} đã Finished."
+                        : $"Order {orderRow.order_id}: công đoạn trước {previousCode} chưa Finished."
+                });
+            }
+
+            return result;
+        }
+
+        private async Task<List<string>> GetOrderRouteCodesAsync(
+    int orderId,
+    CancellationToken ct)
+        {
+            var processCsv = await _db.order_items
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderBy(x => x.item_id)
+                .Select(x => x.production_process)
+                .FirstOrDefaultAsync(ct);
+
+            return ParseProcessCodes(processCsv);
+        }
+
+        private static string? ResolvePreviousProcessCode(
+            List<string> routeCodes,
+            string currentProcessCode)
+        {
+            if (routeCodes == null || routeCodes.Count == 0)
+                return null;
+
+            var current = GroupProductionHelper.Norm(currentProcessCode);
+
+            var currentIndex = routeCodes.FindIndex(x =>
+                string.Equals(
+                    GroupProductionHelper.Norm(x),
+                    current,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (currentIndex <= 0)
+                return null;
+
+            return routeCodes[currentIndex - 1];
+        }
+
+        private sealed class PreviousProcessTaskRef
+        {
+            public int task_id { get; set; }
+
+            public int? prod_id { get; set; }
+
+            public string? prod_kind { get; set; }
+
+            public int? seq_num { get; set; }
+
+            public string? process_code { get; set; }
+
+            public string? process_name { get; set; }
+
+            public string? status { get; set; }
+
+            public DateTime? start_time { get; set; }
+
+            public DateTime? end_time { get; set; }
+        }
+
+        private async Task<PreviousProcessTaskRef?> FindPreviousProcessTaskForOrderAsync(
+    int orderId,
+    string previousProcessCode,
+    CancellationToken ct)
+        {
+            var previousCode = GroupProductionHelper.Norm(previousProcessCode);
+
+            /*
+             * 1. Tìm trong tất cả production direct của order:
+             * - SINGLE
+             * - SPLIT
+             *
+             * Với GROUP, khi group task finish thì MirrorGroupFinishToSingleTasksAsync
+             * sẽ set single_task tương ứng trong SINGLE production thành Finished.
+             * Vì vậy tìm theo production direct của order vẫn bắt được status sau khi group mirror.
+             */
+            var directTasks = await (
+                from t in _db.tasks.AsNoTracking()
+
+                join p in _db.productions.AsNoTracking()
+                    on t.prod_id equals p.prod_id
+
+                join pp in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                where p.order_id == orderId
+                      && p.status != "Cancelled"
+
+                select new PreviousProcessTaskRef
+                {
+                    task_id = t.task_id,
+                    prod_id = t.prod_id,
+                    prod_kind = p.prod_kind,
+                    seq_num = t.seq_num,
+                    process_code = pp != null ? pp.process_code : null,
+                    process_name = pp != null ? pp.process_name : null,
+                    status = t.status,
+                    start_time = t.start_time,
+                    end_time = t.end_time
+                }
+            ).ToListAsync(ct);
+
+            var matchedDirect = directTasks
+                .Where(x => string.Equals(
+                    GroupProductionHelper.Norm(x.process_code),
+                    previousCode,
+                    StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(x => IsTaskFinished(x.status, x.end_time))
+                .ThenByDescending(x => x.end_time ?? DateTime.MinValue)
+                .ThenByDescending(x => x.task_id)
+                .FirstOrDefault();
+
+            if (matchedDirect != null)
+                return matchedDirect;
+
+            /*
+             * 2. Fallback: nếu không tìm thấy trong direct task,
+             * tìm qua task_links để biết công đoạn trước nằm ở GROUP production khác.
+             */
+            var linkedTasks = await (
+                from tl in _db.task_links.AsNoTracking()
+
+                join gt in _db.tasks.AsNoTracking()
+                    on tl.group_task_id equals gt.task_id
+
+                join gp in _db.productions.AsNoTracking()
+                    on tl.group_prod_id equals gp.prod_id
+
+                join pp in _db.product_type_processes.AsNoTracking()
+                    on gt.process_id equals pp.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                where tl.order_id == orderId
+                      && gp.status != "Cancelled"
+
+                select new PreviousProcessTaskRef
+                {
+                    task_id = gt.task_id,
+                    prod_id = gt.prod_id,
+                    prod_kind = gp.prod_kind,
+                    seq_num = gt.seq_num,
+                    process_code = pp != null ? pp.process_code : tl.process_code,
+                    process_name = pp != null ? pp.process_name : null,
+                    status = gt.status,
+                    start_time = gt.start_time,
+                    end_time = gt.end_time
+                }
+            ).ToListAsync(ct);
+
+            var matchedLinked = linkedTasks
+                .Where(x => string.Equals(
+                    GroupProductionHelper.Norm(x.process_code),
+                    previousCode,
+                    StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(x => IsTaskFinished(x.status, x.end_time))
+                .ThenByDescending(x => x.end_time ?? DateTime.MinValue)
+                .ThenByDescending(x => x.task_id)
+                .FirstOrDefault();
+
+            if (matchedLinked != null)
+                return matchedLinked;
+
+            /*
+             * 3. Fallback cuối: task_qtys.
+             * Nếu đã có allocation từ GROUP thì coi như công đoạn đó đã Finished.
+             */
+            var qtyRow = await _db.task_qtys
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .ToListAsync(ct);
+
+            var matchedQty = qtyRow
+                .Where(x => string.Equals(
+                    GroupProductionHelper.Norm(x.process_code),
+                    previousCode,
+                    StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(x => x.created_at)
+                .FirstOrDefault();
+
+            if (matchedQty != null)
+            {
+                return new PreviousProcessTaskRef
+                {
+                    task_id = (int)matchedQty.single_task_id,
+                    prod_id = null,
+                    prod_kind = "GROUP_QTY",
+                    seq_num = null,
+                    process_code = matchedQty.process_code,
+                    process_name = matchedQty.process_code,
+                    status = "Finished",
+                    start_time = null,
+                    end_time = matchedQty.created_at
+                };
+            }
+
+            return null;
+        }
+
+        private static bool IsTaskFinished(string? status, DateTime? endTime)
+        {
+            return string.Equals(status, "Finished", StringComparison.OrdinalIgnoreCase)
+                   || endTime != null;
         }
 
         private async Task LinkSingleTasksAsync(
@@ -778,6 +1430,372 @@ namespace AMMS.Application.Services
             public int OrderId { get; set; }
             public int SingleProdId { get; set; }
             public int Qty { get; set; }
+        }
+
+        private static readonly string[] Dept1Codes = { "RALO", "CAT", "IN" };
+        private static readonly string[] Dept2Codes = { "PHU", "CAN", "BOI" };
+        private static readonly string[] Dept3Codes = { "BE", "DUT", "DAN" };
+
+        private sealed class GroupOrderRow
+        {
+            public order Order { get; init; } = null!;
+            public production SingleProd { get; init; } = null!;
+            public order_item Item { get; init; } = null!;
+            public order_request? Request { get; init; }
+            public cost_estimate? Estimate { get; init; }
+            public List<string> RouteCodes { get; init; } = new();
+        }
+
+        private sealed class ProductionPlanSegment
+        {
+            public string DepartmentCode { get; init; } = "";
+            public string DepartmentName { get; init; } = "";
+            public List<string> ProcessCodes { get; init; } = new();
+            public List<GroupOrderRow> Members { get; init; } = new();
+            public string? MaterialKey { get; set; }
+
+            public bool IsGroup => Members.Count >= 2;
+        }
+
+        private static string NormProcessCode(string? code)
+        {
+            return (code ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+        }
+
+        private static List<string> ParseProcessCodes(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static bool IsDept1(string code)
+            => Dept1Codes.Contains(NormProcessCode(code), StringComparer.OrdinalIgnoreCase);
+
+        private static bool IsDept2(string code)
+            => Dept2Codes.Contains(NormProcessCode(code), StringComparer.OrdinalIgnoreCase);
+
+        private static bool IsDept3(string code)
+            => Dept3Codes.Contains(NormProcessCode(code), StringComparer.OrdinalIgnoreCase);
+
+        private static string ResolveDepartmentCode(string processCode)
+        {
+            var code = NormProcessCode(processCode);
+
+            if (IsDept1(code)) return "DEPT_1";
+            if (IsDept2(code)) return "DEPT_2";
+            if (IsDept3(code)) return "DEPT_3";
+
+            return "OTHER";
+        }
+
+        private static string ResolveDepartmentName(string departmentCode)
+        {
+            return departmentCode switch
+            {
+                "DEPT_1" => "Ralo - Cắt - In",
+                "DEPT_2" => "Phủ - Cán - Bồi",
+                "DEPT_3" => "Bế - Dứt - Dán",
+                _ => "Khác"
+            };
+        }
+
+        private static int DepartmentOrder(string departmentCode)
+        {
+            return departmentCode switch
+            {
+                "DEPT_1" => 1,
+                "DEPT_2" => 2,
+                "DEPT_3" => 3,
+                _ => 99
+            };
+        }
+
+        private static bool RequiresSameMaterialKey(string processCode)
+        {
+            var code = NormProcessCode(processCode);
+
+            return code is "PHU" or "CAN" or "BOI";
+        }
+
+        private static string SafeKey(string? value)
+        {
+            return string.IsNullOrWhiteSpace(value)
+                ? "NULL"
+                : NormProcessCode(value);
+        }
+
+        private string ResolveMaterialGroupKey(
+    string processCode,
+    GroupOrderRow row)
+        {
+            var code = NormProcessCode(processCode);
+
+            if (code == "PHU")
+            {
+                var coating = row.Estimate?.coating_type;
+
+                return $"PHU:COATING={SafeKey(coating)}";
+            }
+
+            if (code == "CAN")
+            {
+                var lamination =
+                    !string.IsNullOrWhiteSpace(row.Estimate?.lamination_material_code)
+                        ? row.Estimate!.lamination_material_code
+                        : !string.IsNullOrWhiteSpace(row.Estimate?.lamination_material_name)
+                            ? row.Estimate!.lamination_material_name
+                            : row.Estimate?.lamination_material_id?.ToString();
+
+                return $"CAN:LAMINATION={SafeKey(lamination)}";
+            }
+
+            if (code == "BOI")
+            {
+                var wave = EstimateMaterialAlternativeHelper.ResolveWaveType(
+                    row.Estimate?.wave_alternative,
+                    row.Estimate?.wave_type);
+
+                return $"BOI:WAVE={SafeKey(wave)}";
+            }
+
+            return $"{code}:NO_MATERIAL_CHECK";
+        }
+
+        private async Task<List<GroupOrderRow>> LoadGroupOrderRowsAsync(
+    List<int> orderIds,
+    CancellationToken ct)
+        {
+            var rows = await (
+                from o in _db.orders
+                join pr in _db.productions on o.order_id equals pr.order_id
+                where orderIds.Contains(o.order_id)
+                      && pr.prod_kind == "SINGLE"
+                select new
+                {
+                    order = o,
+                    singleProd = pr,
+                    item = _db.order_items
+                        .Where(i => i.order_id == o.order_id)
+                        .OrderBy(i => i.item_id)
+                        .FirstOrDefault()
+                }
+            ).ToListAsync(ct);
+
+            var result = new List<GroupOrderRow>();
+
+            foreach (var row in rows)
+            {
+                if (row.item == null)
+                    continue;
+
+                var req = await _db.order_requests
+                    .AsNoTracking()
+                    .Where(x => x.order_id == row.order.order_id)
+                    .OrderByDescending(x => x.order_request_id)
+                    .FirstOrDefaultAsync(ct);
+
+                cost_estimate? est = null;
+
+                if (req != null)
+                {
+                    if (req.accepted_estimate_id.HasValue && req.accepted_estimate_id.Value > 0)
+                    {
+                        est = await _db.cost_estimates
+                            .AsNoTracking()
+                            .FirstOrDefaultAsync(x =>
+                                x.estimate_id == req.accepted_estimate_id.Value &&
+                                x.order_request_id == req.order_request_id,
+                                ct);
+                    }
+
+                    est ??= await _db.cost_estimates
+                        .AsNoTracking()
+                        .Where(x => x.order_request_id == req.order_request_id)
+                        .OrderByDescending(x => x.is_active)
+                        .ThenByDescending(x => x.estimate_id)
+                        .FirstOrDefaultAsync(ct);
+                }
+
+                result.Add(new GroupOrderRow
+                {
+                    Order = row.order,
+                    SingleProd = row.singleProd,
+                    Item = row.item,
+                    Request = req,
+                    Estimate = est,
+                    RouteCodes = ParseProcessCodes(row.item.production_process)
+                });
+            }
+
+            return result;
+        }
+
+        private List<ProductionPlanSegment> BuildDepartmentProductionPlan(
+    List<GroupOrderRow> rows,
+    List<string> selectedCodes,
+    out List<GroupProductionPlanWarningDto> warnings)
+        {
+            warnings = new List<GroupProductionPlanWarningDto>();
+
+            var selectedSet = selectedCodes
+                .Select(NormProcessCode)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var selectedNonDept1Codes = selectedCodes
+                .Select(NormProcessCode)
+                .Where(x => !IsDept1(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var result = new List<ProductionPlanSegment>();
+
+            foreach (var departmentGroup in selectedNonDept1Codes
+                         .GroupBy(ResolveDepartmentCode)
+                         .OrderBy(g => DepartmentOrder(g.Key)))
+            {
+                var deptCode = departmentGroup.Key;
+                var deptName = ResolveDepartmentName(deptCode);
+
+                var deptCodes = departmentGroup
+                    .OrderBy(x => GetGlobalRouteIndex(rows, x))
+                    .ToList();
+
+                foreach (var processCode in deptCodes)
+                {
+                    var membersWithProcess = rows
+                        .Where(r => r.RouteCodes.Contains(processCode, StringComparer.OrdinalIgnoreCase))
+                        .ToList();
+
+                    if (membersWithProcess.Count == 0)
+                        continue;
+
+                    if (RequiresSameMaterialKey(processCode))
+                    {
+                        var materialGroups = membersWithProcess
+                            .GroupBy(x => ResolveMaterialGroupKey(processCode, x))
+                            .ToList();
+
+                        if (materialGroups.Count > 1)
+                        {
+                            warnings.Add(new GroupProductionPlanWarningDto
+                            {
+                                process_code = processCode,
+                                reason = $"Công đoạn {processCode} khác loại NVL/sóng nên không ghép chung tất cả order, hệ thống tự tách thành nhiều production.",
+                                affected_order_ids = membersWithProcess
+                                    .Select(x => x.Order.order_id)
+                                    .Distinct()
+                                    .OrderBy(x => x)
+                                    .ToList(),
+                                material_groups = materialGroups.ToDictionary(
+                                    g => g.Key,
+                                    g => g.Select(x => x.Order.order_id).Distinct().OrderBy(x => x).ToList())
+                            });
+                        }
+
+                        foreach (var mg in materialGroups)
+                        {
+                            result.Add(new ProductionPlanSegment
+                            {
+                                DepartmentCode = deptCode,
+                                DepartmentName = deptName,
+                                ProcessCodes = new List<string> { processCode },
+                                Members = mg.ToList(),
+                                MaterialKey = mg.Key
+                            });
+                        }
+                    }
+                    else
+                    {
+                        result.Add(new ProductionPlanSegment
+                        {
+                            DepartmentCode = deptCode,
+                            DepartmentName = deptName,
+                            ProcessCodes = new List<string> { processCode },
+                            Members = membersWithProcess,
+                            MaterialKey = null
+                        });
+                    }
+                }
+            }
+
+            return MergeAdjacentSegments(result);
+        }
+
+        private static int GetGlobalRouteIndex(
+            List<GroupOrderRow> rows,
+            string processCode)
+        {
+            var indexes = rows
+                .Select(r => r.RouteCodes.FindIndex(x =>
+                    string.Equals(x, processCode, StringComparison.OrdinalIgnoreCase)))
+                .Where(x => x >= 0)
+                .ToList();
+
+            return indexes.Count == 0 ? 999 : indexes.Min();
+        }
+
+        private static List<ProductionPlanSegment> MergeAdjacentSegments(
+            List<ProductionPlanSegment> segments)
+        {
+            var result = new List<ProductionPlanSegment>();
+
+            foreach (var seg in segments)
+            {
+                var last = result.LastOrDefault();
+
+                if (last != null &&
+                    last.DepartmentCode == seg.DepartmentCode &&
+                    SameMembers(last.Members, seg.Members) &&
+                    CanMergeMaterialKey(last.MaterialKey, seg.MaterialKey))
+                {
+                    last.ProcessCodes.AddRange(seg.ProcessCodes);
+
+                    if (string.IsNullOrWhiteSpace(last.MaterialKey))
+                        last.MaterialKey = seg.MaterialKey;
+
+                    continue;
+                }
+
+                result.Add(new ProductionPlanSegment
+                {
+                    DepartmentCode = seg.DepartmentCode,
+                    DepartmentName = seg.DepartmentName,
+                    ProcessCodes = seg.ProcessCodes.ToList(),
+                    Members = seg.Members.ToList(),
+                    MaterialKey = seg.MaterialKey
+                });
+            }
+
+            return result;
+        }
+
+        private static bool SameMembers(
+            List<GroupOrderRow> a,
+            List<GroupOrderRow> b)
+        {
+            var aa = a.Select(x => x.Order.order_id).OrderBy(x => x).ToList();
+            var bb = b.Select(x => x.Order.order_id).OrderBy(x => x).ToList();
+
+            return aa.SequenceEqual(bb);
+        }
+
+        private static bool CanMergeMaterialKey(string? a, string? b)
+        {
+            if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b))
+                return true;
+
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
         }
     }
 }

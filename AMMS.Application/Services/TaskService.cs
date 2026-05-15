@@ -1,4 +1,5 @@
-﻿using AMMS.Application.Interfaces;
+﻿using AMMS.Application.Helpers;
+using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
@@ -80,6 +81,18 @@ namespace AMMS.Application.Services
 
             if (string.Equals(current.status, "Finished", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Task đã Finished, không thể chuyển lại Ready.");
+
+            var dep = await ProductionDependencyValidator.CheckTaskCanStartAsync(
+                    _db,
+                    taskId,
+                    ct);
+
+            if (!dep.can_start)
+            {
+                throw new InvalidOperationException(
+                    "Chưa thể chuyển task sang Ready vì công đoạn trước đó chưa hoàn thành. " +
+                    dep.message);
+            }
 
             if (string.Equals(current.status, "Ready", StringComparison.OrdinalIgnoreCase))
                 return true;

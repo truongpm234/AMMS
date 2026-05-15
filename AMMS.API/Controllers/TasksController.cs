@@ -258,6 +258,21 @@ public class TasksController : ControllerBase
             });
         }
 
+        var dep = await ProductionDependencyValidator.CheckTaskCanStartAsync(
+            _db,
+            req.task_id,
+            ct);
+
+        if (!dep.can_start)
+        {
+            return BadRequest(new
+            {
+                message = "Chưa thể tạo QR vì công đoạn trước đó chưa hoàn thành.",
+                detail = dep.message,
+                issues = dep.issues
+            });
+        }
+
         var taskMeta = await _db.tasks
             .AsNoTracking()
             .Include(x => x.prod)
@@ -578,10 +593,6 @@ public class TasksController : ControllerBase
             var scanReq = new ScanTaskRequest
             {
                 token = req.token.Trim()
-
-                // Không set reason/images/materials ở đây nữa.
-                // Tất cả reason, ảnh, materials, reference_inputs, outputs
-                // đã được nhét vào token ở API POST /api/Tasks/qr.
             };
 
             var scannedByUserId = GetCurrentUserId();

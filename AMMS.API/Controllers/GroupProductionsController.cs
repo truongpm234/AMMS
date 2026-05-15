@@ -1,5 +1,4 @@
-﻿using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using AMMS.Application.Interfaces;
 using AMMS.Shared.DTOs.Productions.Groups;
 using System.Security.Claims;
@@ -34,6 +33,22 @@ public class GroupProductionsController : ControllerBase
         try
         {
             var result = await _service.GetCandidatesAsync(productTypeId, processCodes, ct);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [HttpGet("suggestions")]
+    public async Task<IActionResult> SuggestByQuery(
+        [FromQuery] int? productTypeId,
+        CancellationToken ct)
+    {
+        try
+        {
+            var result = await _service.SuggestAsync(productTypeId, ct);
             return Ok(result);
         }
         catch (InvalidOperationException ex)
@@ -83,7 +98,9 @@ public class GroupProductionsController : ControllerBase
     }
 
     [HttpGet("{groupProdId:int}/detail")]
-    public async Task<IActionResult> Detail(int groupProdId, CancellationToken ct)
+    public async Task<IActionResult> Detail(
+    int groupProdId,
+    CancellationToken ct)
     {
         try
         {
@@ -91,6 +108,24 @@ public class GroupProductionsController : ControllerBase
 
             if (result == null)
                 return NotFound(new { message = "Group production not found." });
+
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [HttpGet("task/{taskId:int}/context")]
+    public async Task<IActionResult> TaskContext(int taskId, CancellationToken ct)
+    {
+        try
+        {
+            var result = await _service.GetTaskContextAsync(taskId, ct);
+
+            if (result == null)
+                return NotFound(new { message = "Task not found." });
 
             return Ok(result);
         }

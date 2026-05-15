@@ -367,6 +367,11 @@ namespace AMMS.Infrastructure.Repositories
 
             foreach (var r in baseRows)
             {
+                var isSplitRow = string.Equals(
+                    r.prod_kind,
+                    "SPLIT",
+                    StringComparison.OrdinalIgnoreCase);
+
                 var isGroupRow = string.Equals(
                     r.prod_kind,
                     "GROUP",
@@ -380,9 +385,7 @@ namespace AMMS.Infrastructure.Repositories
                 stepsByProductType.TryGetValue(ptId, out var steps);
                 steps ??= new List<StepRow>();
 
-                var routeProcessCsv = isGroupRow
-                    ? r.group_process_codes
-                    : r.first_item_production_process;
+                var routeProcessCsv = isGroupRow || isSplitRow ? r.group_process_codes : r.first_item_production_process;
 
                 steps = ResolveFixedRoute(
                     steps.OrderBy(s => s.SeqNum).ToList(),
@@ -587,7 +590,10 @@ namespace AMMS.Infrastructure.Repositories
 
                     customer_name = customerName,
                     product_name = r.first_item_product_name,
-
+                    prod_kind = r.prod_kind,
+                    production_code = r.production_code,
+                    is_group_production = isGroupRow,
+                    is_split_production = isSplitRow,
                     quantity = isGroupRow
                         ? r.group_total_qty
                         : r.first_item_quantity ?? 0,
@@ -1351,11 +1357,58 @@ namespace AMMS.Infrastructure.Repositories
             if (!prod.order_id.HasValue)
                 return;
 
+            var canMoveOrder = await AreAllOrderProductionPartsFinishedAsync(
+                prod.order_id.Value,
+                ct);
+
+            if (!canMoveOrder)
+                return;
+
             await SyncOrderAndRequestsToImportingAsync(
                 prod.order_id.Value,
                 ct);
         }
 
+        private async Task<bool> AreAllOrderProductionPartsFinishedAsync(
+    int orderId,
+    CancellationToken ct)
+        {
+            var directProdIds = await _db.productions
+                .AsNoTracking()
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.status != "Cancelled")
+                .Select(x => x.prod_id)
+                .Distinct()
+                .ToListAsync(ct);
+
+            foreach (var prodId in directProdIds)
+            {
+                var done = await AreAllProductionTasksFinishedAsync(prodId, ct);
+
+                if (!done)
+                    return false;
+            }
+
+            var groupProdIds = await _db.prod_orders
+                .AsNoTracking()
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.status == "Active")
+                .Select(x => x.prod_id)
+                .Distinct()
+                .ToListAsync(ct);
+
+            foreach (var groupProdId in groupProdIds)
+            {
+                var done = await AreAllProductionTasksFinishedAsync(groupProdId, ct);
+
+                if (!done)
+                    return false;
+            }
+
+            return directProdIds.Count > 0 || groupProdIds.Count > 0;
+        }
         private async Task SyncGroupMemberOrdersToImportingAsync(
     production groupProd,
     DateTime finishedAt,
@@ -1369,8 +1422,6 @@ namespace AMMS.Infrastructure.Repositories
 
             foreach (var member in members)
             {
-                var canMoveOrderToImporting = true;
-
                 if (member.single_prod_id.HasValue)
                 {
                     var singleProd = await _db.productions
@@ -1390,16 +1441,14 @@ namespace AMMS.Infrastructure.Repositories
                             if (singleProd.actual_start_date == null)
                                 singleProd.actual_start_date = finishedAt;
                         }
-
-                        canMoveOrderToImporting =
-                            singleAllFinished ||
-                            string.Equals(singleProd.status, "Importing", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(singleProd.status, "Completed", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(singleProd.status, "Delivery", StringComparison.OrdinalIgnoreCase);
                     }
                 }
 
-                if (!canMoveOrderToImporting)
+                var canMoveOrder = await AreAllOrderProductionPartsFinishedAsync(
+                    member.order_id,
+                    ct);
+
+                if (!canMoveOrder)
                     continue;
 
                 await SyncOrderAndRequestsToImportingAsync(

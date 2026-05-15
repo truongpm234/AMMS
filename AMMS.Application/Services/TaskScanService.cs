@@ -146,11 +146,22 @@ namespace AMMS.Application.Services
 
             var result = await _taskRepo.ExecuteInTransactionAsync(async innerCt =>
             {
-                var t = await _taskRepo.GetByIdAsync(taskId)
-                    ?? throw new Exception("Task not found");
+                var t = await _taskRepo.GetByIdAsync(taskId) ?? throw new Exception("Task not found");
 
                 if (!t.prod_id.HasValue || !t.seq_num.HasValue)
                     throw new Exception("Task missing prod_id/seq_num");
+
+                var dep = await ProductionDependencyValidator.CheckTaskCanStartAsync(
+                    _db,
+                    t.task_id,
+                    innerCt);
+
+                if (!dep.can_start)
+                {
+                    throw new InvalidOperationException(
+                        "Không thể finish task vì công đoạn trước đó chưa hoàn thành. " +
+                        dep.message);
+                }
 
                 var flowTasks = await _taskRepo.GetTasksByProductionWithProcessAsync(
                     t.prod_id.Value,
@@ -531,6 +542,8 @@ namespace AMMS.Application.Services
 
             var allocations = AllocateGroupQty(groupQtyGood, links);
 
+            var affectedSingleProdIds = new HashSet<int>();
+
             foreach (var link in links)
             {
                 var qtyForOrder = allocations.TryGetValue(link.order_id, out var q) ? q : 0;
@@ -581,12 +594,18 @@ namespace AMMS.Application.Services
 
                 link.status = "Done";
 
+                affectedSingleProdIds.Add(link.single_prod_id);
+            }
+
+            await _db.SaveChangesAsync(ct);
+
+            foreach (var singleProdId in affectedSingleProdIds)
+            {
                 await _prodRepo.TryCloseProductionIfCompletedAsync(
-                    link.single_prod_id,
+                    singleProdId,
                     now,
                     ct);
             }
-            await _db.SaveChangesAsync(ct);
         }
 
         private static Dictionary<int, int> AllocateGroupQty(

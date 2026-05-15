@@ -20,6 +20,10 @@
         public bool? is_full_process { get; set; }
         public int? sub_product_id { get; set; }
         public int sub_product_used_qty { get; set; }
+        public string? prod_kind { get; set; }
+        public string? production_code { get; set; }
+        public bool is_group_production { get; set; }
+        public bool is_split_production { get; set; }
         public string? gm_note { get; set; }
         public string? mgr_note { get; set; }
         public int nvl_qty { get; set; }

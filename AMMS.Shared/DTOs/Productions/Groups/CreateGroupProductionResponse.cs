@@ -22,6 +22,17 @@ namespace AMMS.Shared.DTOs.Productions.Groups
 
         public List<int> group_task_ids { get; set; } = new();
 
+        public List<int> group_prod_ids { get; set; } = new();
+
+        public List<int> split_prod_ids { get; set; } = new();
+
+        public List<int> all_created_prod_ids { get; set; } = new();
+
+        public List<GroupProductionPlanWarningDto> warnings { get; set; } = new();
+
         public string message { get; set; } = "";
+
+        public string? code { get; set; }
+
     }
 }
