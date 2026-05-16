@@ -72,12 +72,75 @@ namespace AMMS.Application.Services
             return Task.FromResult(result);
         }
 
-        public Task<PagedResultLite<ProducingOrderCardDto>> GetProducingOrdersAsync(
-            int page,
-            int pageSize,
-            int? roleId,
-            CancellationToken ct = default)
-            => _repo.GetProducingOrdersAsync(page, pageSize, roleId, ct);
+        public async Task<PagedResultLite<ProducingOrderCardDto>> GetProducingOrdersAsync(
+    int page,
+    int pageSize,
+    int? roleId,
+    CancellationToken ct = default)
+        {
+            var result = await _repo.GetProducingOrdersAsync(
+                page,
+                pageSize,
+                roleId,
+                ct);
+
+            await FillCanStartForGroupProductionsAsync(result.Data, ct);
+
+            return result;
+        }
+
+        private async Task FillCanStartForGroupProductionsAsync(
+    List<ProducingOrderCardDto> items,
+    CancellationToken ct)
+        {
+            if (items == null || items.Count == 0)
+                return;
+
+            foreach (var item in items)
+            {
+                var isGroupOrSplit =
+                    string.Equals(item.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(item.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase);
+
+                if (!isGroupOrSplit)
+                {
+                    item.can_start = null;
+                    item.can_start_message = null;
+                    continue;
+                }
+
+                var status = item.production_status ?? item.status;
+
+                var isWaitingToStart =
+                    string.Equals(status, "Scheduled", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(status, "Unassigned", StringComparison.OrdinalIgnoreCase);
+
+                if (!isWaitingToStart)
+                {
+                    item.can_start = false;
+                    item.can_start_message = status switch
+                    {
+                        "InProcessing" => "Production đã bắt đầu.",
+                        "Importing" => "Production đã hoàn tất sản xuất, đang chờ nhập kho.",
+                        "Delivery" => "Production đã chuyển giao hàng.",
+                        "Completed" => "Production đã hoàn thành.",
+                        _ => $"Production không ở trạng thái có thể bắt đầu. Trạng thái hiện tại: {status ?? "null"}."
+                    };
+
+                    continue;
+                }
+
+                var dep = await ProductionDependencyValidator.CheckProductionCanStartAsync(
+                    _db,
+                    item.prod_id,
+                    ct);
+
+                item.can_start = dep.can_start;
+                item.can_start_message = dep.can_start
+                    ? "Có thể bắt đầu production."
+                    : dep.message;
+            }
+        }
 
         public async Task<ProductionProgressResponse> GetProgressAsync(int prodId)
         {

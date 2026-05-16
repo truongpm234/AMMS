@@ -233,7 +233,7 @@ public partial class AppDbContext : DbContext
 
             entity.HasKey(e => e.prod_id).HasName("productions_pkey");
             entity.HasIndex(e => e.code, "productions_code_key").IsUnique();
-            entity.Property(e => e.code).HasMaxLength(20);
+            entity.Property(e => e.code).HasMaxLength(100);
             entity.Property(e => e.end_date).HasColumnType("timestamp without time zone");
             entity.Property(e => e.actual_start_date).HasColumnType("timestamp without time zone");
             entity.Property(e => e.planned_start_date).HasColumnType("timestamp without time zone");

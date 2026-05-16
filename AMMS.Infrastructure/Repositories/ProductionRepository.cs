@@ -59,14 +59,6 @@ namespace AMMS.Infrastructure.Repositories
             NormalizePaging(ref page, ref pageSize);
             var skip = (page - 1) * pageSize;
 
-            /*
-             * Lấy tất cả production:
-             * - SINGLE: có order_id
-             * - GROUP : order_id = null
-             *
-             * Không inner join orders nữa, vì GROUP không có order_id.
-             * Không where pr.order_id != null nữa.
-             */
             var baseRows = await (
                 from pr in _db.productions.AsNoTracking()
 
@@ -84,7 +76,6 @@ namespace AMMS.Infrastructure.Repositories
 
                     order_id = o != null ? o.order_id : null,
 
-                    // SINGLE dùng mã order, GROUP dùng mã production group.
                     code = o != null ? o.code : pr.code,
 
                     delivery_date = o != null ? o.delivery_date : null,
@@ -93,9 +84,6 @@ namespace AMMS.Infrastructure.Repositories
 
                     production_status = pr.status,
                     order_status = o != null ? o.status : null,
-
-                    // Với GROUP sẽ set cứng "Production ghép".
-                    // Với SINGLE sẽ load customer sau bằng order_id.
                     customer_name = o == null ? "Production ghép" : "",
 
                     production_method = pr.prod_method,
@@ -601,7 +589,8 @@ namespace AMMS.Infrastructure.Repositories
                     delivery_date = r.delivery_date,
                     progress_percent = progress,
                     current_stage = currentStage,
-
+                    can_start = null,
+                    can_start_message = null,
                     status = isGroupRow
                         ? r.production_status
                         : r.order_status,
@@ -619,19 +608,6 @@ namespace AMMS.Infrastructure.Repositories
                     nvl_qty = r.nvl_qty,
                     gm_note = r.gm_note,
                     mgr_note = r.mgr_note,
-
-                    //group_id = isGroupRow
-                    //    ? r.prod_id
-                    //    : activeGroup?.group_id,
-
-                    //group_prod_id = isGroupRow
-                    //    ? r.prod_id
-                    //    : activeGroup?.group_prod_id,
-
-                    //group_code = isGroupRow
-                    //    ? r.production_code
-                    //    : activeGroup?.group_code,
-
                     group_status = isGroupRow
                         ? r.production_status
                         : activeGroup?.group_status,
@@ -643,22 +619,6 @@ namespace AMMS.Infrastructure.Repositories
                     group_total_qty = isGroupRow
                         ? r.group_total_qty
                         : activeGroup?.group_total_qty,
-
-                    //is_grouped = isGroupRow || groupInfos.Count > 0,
-
-                    //is_active_grouped = isGroupRow
-                    //    ? !string.Equals(r.production_status, "Cancelled", StringComparison.OrdinalIgnoreCase) &&
-                    //      !string.Equals(r.production_status, "Completed", StringComparison.OrdinalIgnoreCase)
-                    //    : activeGroup != null,
-
-                    //group_prod_ids = isGroupRow
-                    //    ? new List<int> { r.prod_id }
-                    //    : groupInfos
-                    //        .Select(x => x.group_prod_id)
-                    //        .Distinct()
-                    //        .ToList(),
-
-                    //group_productions = groupInfos,
 
                     stage_status = currentStageStatus,
                     stages = stages,

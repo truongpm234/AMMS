@@ -18,6 +18,11 @@ namespace AMMS.Application.Services
     public class GroupProductionService : IGroupProductionService
     {
         private readonly AppDbContext _db;
+        private static readonly string[] Dept1Codes = { "RALO", "CAT", "IN" };
+        private static readonly string[] Dept2Codes = { "PHU", "CAN", "CAN_MANG", "BOI" };
+        private static readonly string[] Dept3Codes = { "BE", "DUT", "DAN" };
+        private static readonly string[] FullRouteOrder =
+        { "RALO", "CAT", "IN", "PHU", "CAN", "CAN_MANG", "BOI", "BE", "DUT", "DAN" };
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -308,14 +313,19 @@ namespace AMMS.Application.Services
             var now = AppTime.NowVnUnspecified();
             var codesCsv = string.Join(",", segment.ProcessCodes);
 
+            var groupCode = await GenerateShortProductionCodeAsync(
+                "GRP",
+                segment.DepartmentCode,
+                ct);
+
             var groupProd = new production
             {
-                code = $"GRP-{segment.DepartmentCode}-{now:yyyyMMddHHmmssfff}",
+                code = groupCode,
                 order_id = null,
                 manager_id = managerUserId,
                 created_at = now,
                 planned_start_date = plannedStart,
-                status = "Unassigned",
+                status = "Scheduled",
                 product_type_id = productTypeId,
                 note = string.IsNullOrWhiteSpace(note)
                     ? $"Group {segment.DepartmentName}: {codesCsv}"
@@ -417,14 +427,19 @@ namespace AMMS.Application.Services
             var now = AppTime.NowVnUnspecified();
             var codesCsv = string.Join(",", segment.ProcessCodes);
 
+            var splitCode = await GenerateShortProductionCodeAsync(
+                "SPL",
+                segment.DepartmentCode,
+                ct);
+
             var splitProd = new production
             {
-                code = $"SPL-{member.Order.order_id}-{segment.DepartmentCode}-{now:yyyyMMddHHmmssfff}",
+                code = splitCode,
                 order_id = member.Order.order_id,
                 manager_id = managerUserId,
                 created_at = now,
                 planned_start_date = plannedStart,
-                status = "Unassigned",
+                status = "Scheduled",
                 product_type_id = productTypeId,
                 note = string.IsNullOrWhiteSpace(note)
                     ? $"Split {segment.DepartmentName}: {codesCsv}"
@@ -449,19 +464,25 @@ namespace AMMS.Application.Services
                 .Where(x => x.prod_id == member.SingleProd.prod_id)
                 .ToListAsync(ct);
 
+            var processSeqMap = segment.ProcessCodes
+    .Select((code, index) => new
+    {
+        code = NormProcessCode(code),
+        seq = index + 1
+    })
+    .ToDictionary(x => x.code, x => x.seq, StringComparer.OrdinalIgnoreCase);
+
             var movedCount = 0;
 
             foreach (var task in existingTasks)
             {
-                var taskCode = GroupProductionHelper.Norm(task.process?.process_code);
+                var taskCode = NormProcessCode(task.process?.process_code);
 
-                if (!segment.ProcessCodes.Contains(taskCode, StringComparer.OrdinalIgnoreCase))
+                if (!processSeqMap.ContainsKey(taskCode))
                     continue;
 
                 task.prod_id = splitProd.prod_id;
-                task.seq_num = segment.ProcessCodes.FindIndex(x =>
-                    string.Equals(x, taskCode, StringComparison.OrdinalIgnoreCase)) + 1;
-
+                task.seq_num = processSeqMap[taskCode];
                 task.status = "Unassigned";
                 task.start_time = null;
                 task.end_time = null;
@@ -474,20 +495,20 @@ namespace AMMS.Application.Services
             {
                 var stepRows = allSteps
                     .Where(x => segment.ProcessCodes.Contains(
-                        GroupProductionHelper.Norm(x.process_code),
+                        NormProcessCode(x.process_code),
                         StringComparer.OrdinalIgnoreCase))
-                    .OrderBy(x => x.seq_num)
+                    .OrderBy(x => FullRouteIndex(x.process_code))
                     .ToList();
-
-                var seq = 1;
 
                 foreach (var step in stepRows)
                 {
+                    var code = NormProcessCode(step.process_code);
+
                     await _db.tasks.AddAsync(new task
                     {
                         prod_id = splitProd.prod_id,
                         name = $"SPLIT-{step.process_name ?? step.process_code}",
-                        seq_num = seq++,
+                        seq_num = processSeqMap.TryGetValue(code, out var seq) ? seq : 999,
                         status = "Unassigned",
                         machine = step.machine,
                         process_id = step.process_id,
@@ -685,6 +706,13 @@ namespace AMMS.Application.Services
                 throw new InvalidOperationException("API này chỉ dùng cho production GROUP/SPLIT.");
             }
 
+            if (!string.Equals(prod.status, "Scheduled", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(prod.status, "Unassigned", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Chỉ production Scheduled mới được bắt đầu. Trạng thái hiện tại: {prod.status}");
+            }
+
             var dep = await ProductionDependencyValidator.CheckProductionCanStartAsync(
                 _db,
                 groupProdId,
@@ -701,18 +729,6 @@ namespace AMMS.Application.Services
 
             prod.status = "InProcessing";
             prod.actual_start_date ??= now;
-
-            var tasks = await _db.tasks
-                .Where(x => x.prod_id == groupProdId)
-                .OrderBy(x => x.seq_num)
-                .ThenBy(x => x.task_id)
-                .ToListAsync(ct);
-
-            foreach (var task in tasks)
-            {
-                if (string.Equals(task.status, "GroupedWaiting", StringComparison.OrdinalIgnoreCase))
-                    task.status = "Unassigned";
-            }
 
             await _db.SaveChangesAsync(ct);
         }
@@ -869,11 +885,25 @@ namespace AMMS.Application.Services
                 orderRows,
                 ct);
 
+            var dep = await ProductionDependencyValidator.CheckProductionCanStartAsync(
+                _db,
+                prod.prod_id,
+                ct);
+
+            var isScheduled =
+                string.Equals(prod.status, "Scheduled", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(prod.status, "Unassigned", StringComparison.OrdinalIgnoreCase);
+
+            var canStart = isScheduled && dep.can_start;
             return new GroupProductionDetailDto
             {
                 prod_id = prod.prod_id,
                 code = prod.code,
                 status = prod.status,
+
+                can_start = canStart,
+                can_start_message = canStart ? "Có thể bắt đầu production." : dep.message,
+
                 product_type_id = prod.product_type_id,
                 product_type_name = productTypeName,
                 total_qty = prod.group_total_qty,
@@ -1062,6 +1092,62 @@ namespace AMMS.Application.Services
             public DateTime? end_time { get; set; }
         }
 
+        
+
+        private static bool IsPrivateOrderProcess(string? processCode)
+        {
+            var code = NormProcessCode(processCode);
+
+            return code is "BE" or "DUT" or "DAN";
+        }
+
+        private static bool IsDept1(string code)
+            => Dept1Codes.Contains(NormProcessCode(code), StringComparer.OrdinalIgnoreCase);
+
+        private static bool IsDept2(string code)
+            => Dept2Codes.Contains(NormProcessCode(code), StringComparer.OrdinalIgnoreCase);
+
+        private static bool IsDept3(string code)
+            => Dept3Codes.Contains(NormProcessCode(code), StringComparer.OrdinalIgnoreCase);
+
+        private static int FullRouteIndex(string? processCode)
+        {
+            var code = NormProcessCode(processCode);
+
+            var idx = Array.FindIndex(FullRouteOrder, x =>
+                string.Equals(x, code, StringComparison.OrdinalIgnoreCase));
+
+            return idx < 0 ? 999 : idx;
+        }
+
+        private static string ResolveDepartmentCode(string processCode)
+        {
+            var code = NormProcessCode(processCode);
+
+            if (IsDept1(code)) return "DEPT_1";
+            if (IsDept2(code)) return "DEPT_2";
+            if (IsDept3(code)) return "DEPT_3";
+
+            return "OTHER";
+        }
+
+        private static string ResolveDepartmentName(string departmentCode)
+        {
+            return departmentCode switch
+            {
+                "DEPT_1" => "Ralo - Cắt - In",
+                "DEPT_2" => "Phủ - Cán - Bồi",
+                "DEPT_3" => "Bế - Dứt - Dán",
+                _ => "Khác"
+            };
+        }
+
+        private static bool RequiresSameMaterialKey(string processCode)
+        {
+            var code = NormProcessCode(processCode);
+
+            return code is "PHU" or "CAN" or "BOI";
+        }
         private async Task<PreviousProcessTaskRef?> FindPreviousProcessTaskForOrderAsync(
     int orderId,
     string previousProcessCode,
@@ -1069,15 +1155,6 @@ namespace AMMS.Application.Services
         {
             var previousCode = GroupProductionHelper.Norm(previousProcessCode);
 
-            /*
-             * 1. Tìm trong tất cả production direct của order:
-             * - SINGLE
-             * - SPLIT
-             *
-             * Với GROUP, khi group task finish thì MirrorGroupFinishToSingleTasksAsync
-             * sẽ set single_task tương ứng trong SINGLE production thành Finished.
-             * Vì vậy tìm theo production direct của order vẫn bắt được status sau khi group mirror.
-             */
             var directTasks = await (
                 from t in _db.tasks.AsNoTracking()
 
@@ -1432,10 +1509,6 @@ namespace AMMS.Application.Services
             public int Qty { get; set; }
         }
 
-        private static readonly string[] Dept1Codes = { "RALO", "CAT", "IN" };
-        private static readonly string[] Dept2Codes = { "PHU", "CAN", "BOI" };
-        private static readonly string[] Dept3Codes = { "BE", "DUT", "DAN" };
-
         private sealed class GroupOrderRow
         {
             public order Order { get; init; } = null!;
@@ -1450,8 +1523,11 @@ namespace AMMS.Application.Services
         {
             public string DepartmentCode { get; init; } = "";
             public string DepartmentName { get; init; } = "";
-            public List<string> ProcessCodes { get; init; } = new();
-            public List<GroupOrderRow> Members { get; init; } = new();
+
+            public List<string> ProcessCodes { get; set; } = new();
+
+            public List<GroupOrderRow> Members { get; set; } = new();
+
             public string? MaterialKey { get; set; }
 
             public bool IsGroup => Members.Count >= 2;
@@ -1479,37 +1555,6 @@ namespace AMMS.Application.Services
                 .ToList();
         }
 
-        private static bool IsDept1(string code)
-            => Dept1Codes.Contains(NormProcessCode(code), StringComparer.OrdinalIgnoreCase);
-
-        private static bool IsDept2(string code)
-            => Dept2Codes.Contains(NormProcessCode(code), StringComparer.OrdinalIgnoreCase);
-
-        private static bool IsDept3(string code)
-            => Dept3Codes.Contains(NormProcessCode(code), StringComparer.OrdinalIgnoreCase);
-
-        private static string ResolveDepartmentCode(string processCode)
-        {
-            var code = NormProcessCode(processCode);
-
-            if (IsDept1(code)) return "DEPT_1";
-            if (IsDept2(code)) return "DEPT_2";
-            if (IsDept3(code)) return "DEPT_3";
-
-            return "OTHER";
-        }
-
-        private static string ResolveDepartmentName(string departmentCode)
-        {
-            return departmentCode switch
-            {
-                "DEPT_1" => "Ralo - Cắt - In",
-                "DEPT_2" => "Phủ - Cán - Bồi",
-                "DEPT_3" => "Bế - Dứt - Dán",
-                _ => "Khác"
-            };
-        }
-
         private static int DepartmentOrder(string departmentCode)
         {
             return departmentCode switch
@@ -1521,13 +1566,6 @@ namespace AMMS.Application.Services
             };
         }
 
-        private static bool RequiresSameMaterialKey(string processCode)
-        {
-            var code = NormProcessCode(processCode);
-
-            return code is "PHU" or "CAN" or "BOI";
-        }
-
         private static string SafeKey(string? value)
         {
             return string.IsNullOrWhiteSpace(value)
@@ -1535,9 +1573,7 @@ namespace AMMS.Application.Services
                 : NormProcessCode(value);
         }
 
-        private string ResolveMaterialGroupKey(
-    string processCode,
-    GroupOrderRow row)
+        private string ResolveMaterialGroupKey(string processCode, GroupOrderRow row)
         {
             var code = NormProcessCode(processCode);
 
@@ -1648,84 +1684,123 @@ namespace AMMS.Application.Services
         {
             warnings = new List<GroupProductionPlanWarningDto>();
 
-            var selectedSet = selectedCodes
+            var normalizedSelectedCodes = selectedCodes
                 .Select(NormProcessCode)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            var selectedNonDept1Codes = selectedCodes
-                .Select(NormProcessCode)
-                .Where(x => !IsDept1(x))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+
+            /*
+             * RALO/CAT/IN.
+             * Các công đoạn này nằm ở production SINGLE của từng order.
+             */
+            var nonDept1Codes = normalizedSelectedCodes
+                .Where(x => !IsDept1(x))
+                .ToList();
+
+            var sharedProcessCodes = nonDept1Codes
+                .Where(x => !IsPrivateOrderProcess(x))
+                .ToList();
+
+            var privateOrderProcessCodes = nonDept1Codes
+                .Where(IsPrivateOrderProcess)
                 .ToList();
 
             var result = new List<ProductionPlanSegment>();
 
-            foreach (var departmentGroup in selectedNonDept1Codes
-                         .GroupBy(ResolveDepartmentCode)
-                         .OrderBy(g => DepartmentOrder(g.Key)))
+            /*
+             * 1. PHU / CAN / BOI:
+             * Vẫn có thể sản xuất GROUP nếu cùng material_key.
+             */
+            foreach (var processCode in sharedProcessCodes)
             {
-                var deptCode = departmentGroup.Key;
+                var deptCode = ResolveDepartmentCode(processCode);
                 var deptName = ResolveDepartmentName(deptCode);
 
-                var deptCodes = departmentGroup
-                    .OrderBy(x => GetGlobalRouteIndex(rows, x))
+                var membersWithProcess = rows
+                    .Where(r => r.RouteCodes.Contains(processCode, StringComparer.OrdinalIgnoreCase))
                     .ToList();
 
-                foreach (var processCode in deptCodes)
+                if (membersWithProcess.Count == 0)
+                    continue;
+
+                if (RequiresSameMaterialKey(processCode))
                 {
-                    var membersWithProcess = rows
-                        .Where(r => r.RouteCodes.Contains(processCode, StringComparer.OrdinalIgnoreCase))
+                    var materialGroups = membersWithProcess
+                        .GroupBy(x => ResolveMaterialGroupKey(processCode, x))
                         .ToList();
 
-                    if (membersWithProcess.Count == 0)
-                        continue;
-
-                    if (RequiresSameMaterialKey(processCode))
+                    if (materialGroups.Count > 1)
                     {
-                        var materialGroups = membersWithProcess
-                            .GroupBy(x => ResolveMaterialGroupKey(processCode, x))
-                            .ToList();
-
-                        if (materialGroups.Count > 1)
+                        warnings.Add(new GroupProductionPlanWarningDto
                         {
-                            warnings.Add(new GroupProductionPlanWarningDto
-                            {
-                                process_code = processCode,
-                                reason = $"Công đoạn {processCode} khác loại NVL/sóng nên không ghép chung tất cả order, hệ thống tự tách thành nhiều production.",
-                                affected_order_ids = membersWithProcess
-                                    .Select(x => x.Order.order_id)
-                                    .Distinct()
-                                    .OrderBy(x => x)
-                                    .ToList(),
-                                material_groups = materialGroups.ToDictionary(
-                                    g => g.Key,
-                                    g => g.Select(x => x.Order.order_id).Distinct().OrderBy(x => x).ToList())
-                            });
-                        }
-
-                        foreach (var mg in materialGroups)
-                        {
-                            result.Add(new ProductionPlanSegment
-                            {
-                                DepartmentCode = deptCode,
-                                DepartmentName = deptName,
-                                ProcessCodes = new List<string> { processCode },
-                                Members = mg.ToList(),
-                                MaterialKey = mg.Key
-                            });
-                        }
+                            process_code = processCode,
+                            reason = $"Công đoạn {processCode} khác mã vật tư/material_key nên không thể ghép chung tất cả order. Hệ thống tự tách theo từng nhóm vật tư.",
+                            affected_order_ids = membersWithProcess
+                                .Select(x => x.Order.order_id)
+                                .Distinct()
+                                .OrderBy(x => x)
+                                .ToList(),
+                            material_groups = materialGroups.ToDictionary(
+                                g => g.Key,
+                                g => g.Select(x => x.Order.order_id)
+                                      .Distinct()
+                                      .OrderBy(x => x)
+                                      .ToList())
+                        });
                     }
-                    else
+
+                    foreach (var mg in materialGroups)
                     {
                         result.Add(new ProductionPlanSegment
                         {
                             DepartmentCode = deptCode,
                             DepartmentName = deptName,
                             ProcessCodes = new List<string> { processCode },
-                            Members = membersWithProcess,
+                            Members = mg.ToList(),
                             MaterialKey = null
                         });
                     }
+                }
+                else
+                {
+                    result.Add(new ProductionPlanSegment
+                    {
+                        DepartmentCode = deptCode,
+                        DepartmentName = deptName,
+                        ProcessCodes = new List<string> { processCode },
+                        Members = membersWithProcess,
+                        MaterialKey = null
+                    });
+                }
+            }
+
+            /*
+             * 2. BE / DUT / DAN:
+             * Không tạo GROUP giữa nhiều order.
+             * Mỗi order tạo riêng, gom BE/DUT/DAN của order đó vào cùng 1 production nếu có đủ path.
+             */
+            if (privateOrderProcessCodes.Count > 0)
+            {
+                foreach (var row in rows.OrderBy(x => x.Order.order_id))
+                {
+                    var privateCodesForOrder = privateOrderProcessCodes
+                        .Where(code => row.RouteCodes.Contains(code, StringComparer.OrdinalIgnoreCase))
+                        .OrderBy(FullRouteIndex)
+                        .ToList();
+
+                    if (privateCodesForOrder.Count == 0)
+                        continue;
+
+                    result.Add(new ProductionPlanSegment
+                    {
+                        DepartmentCode = "DEPT_3",
+                        DepartmentName = ResolveDepartmentName("DEPT_3"),
+                        ProcessCodes = privateCodesForOrder,
+                        Members = new List<GroupOrderRow> { row },
+                        MaterialKey = $"ORDER:{row.Order.order_id}"
+                    });
                 }
             }
 
@@ -1745,8 +1820,62 @@ namespace AMMS.Application.Services
             return indexes.Count == 0 ? 999 : indexes.Min();
         }
 
+        private static string ShortDepartmentCode(string? departmentCode)
+        {
+            var code = (departmentCode ?? "").Trim().ToUpperInvariant();
+
+            return code switch
+            {
+                "DEPT_1" => "D1",
+                "DEPT_2" => "D2",
+                "DEPT_3" => "D3",
+                _ => "DX"
+            };
+        }
+
+        private async Task<string> GenerateShortProductionCodeAsync(
+            string prefix,
+            string? departmentCode,
+            CancellationToken ct)
+        {
+            var safePrefix = (prefix ?? "PRD")
+                .Trim()
+                .ToUpperInvariant();
+
+            if (safePrefix.Length > 3)
+                safePrefix = safePrefix[..3];
+
+            if (safePrefix.Length < 3)
+                safePrefix = safePrefix.PadRight(3, 'X');
+
+            var dept = ShortDepartmentCode(departmentCode);
+
+            for (var i = 0; i < 20; i++)
+            {
+                var now = AppTime.NowVnUnspecified();
+
+                var code = $"{safePrefix}{dept}{now:MMddHHmmss}{Random.Shared.Next(100, 999)}";
+
+                if (code.Length > 20)
+                    code = code[..20];
+
+                var exists = await _db.productions
+                    .AsNoTracking()
+                    .AnyAsync(x => x.code == code, ct);
+
+                if (!exists)
+                    return code;
+            }
+
+            var fallback = $"{safePrefix}{dept}{Random.Shared.Next(100000000, 999999999)}";
+
+            return fallback.Length <= 20
+                ? fallback
+                : fallback[..20];
+        }
+
         private static List<ProductionPlanSegment> MergeAdjacentSegments(
-            List<ProductionPlanSegment> segments)
+    List<ProductionPlanSegment> segments)
         {
             var result = new List<ProductionPlanSegment>();
 
@@ -1757,9 +1886,15 @@ namespace AMMS.Application.Services
                 if (last != null &&
                     last.DepartmentCode == seg.DepartmentCode &&
                     SameMembers(last.Members, seg.Members) &&
-                    CanMergeMaterialKey(last.MaterialKey, seg.MaterialKey))
+                    CanMergeSegmentKey(last.MaterialKey, seg.MaterialKey))
                 {
-                    last.ProcessCodes.AddRange(seg.ProcessCodes);
+                    var mergedCodes = last.ProcessCodes
+                        .Concat(seg.ProcessCodes)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(FullRouteIndex)
+                        .ToList();
+
+                    last.ProcessCodes = mergedCodes;
 
                     if (string.IsNullOrWhiteSpace(last.MaterialKey))
                         last.MaterialKey = seg.MaterialKey;
@@ -1771,7 +1906,10 @@ namespace AMMS.Application.Services
                 {
                     DepartmentCode = seg.DepartmentCode,
                     DepartmentName = seg.DepartmentName,
-                    ProcessCodes = seg.ProcessCodes.ToList(),
+                    ProcessCodes = seg.ProcessCodes
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(FullRouteIndex)
+                        .ToList(),
                     Members = seg.Members.ToList(),
                     MaterialKey = seg.MaterialKey
                 });
@@ -1788,6 +1926,14 @@ namespace AMMS.Application.Services
             var bb = b.Select(x => x.Order.order_id).OrderBy(x => x).ToList();
 
             return aa.SequenceEqual(bb);
+        }
+
+        private static bool CanMergeSegmentKey(string? a, string? b)
+        {
+            if (string.IsNullOrWhiteSpace(a) && string.IsNullOrWhiteSpace(b))
+                return true;
+
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool CanMergeMaterialKey(string? a, string? b)

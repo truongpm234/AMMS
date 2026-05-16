@@ -27,6 +27,8 @@
         public string? gm_note { get; set; }
         public string? mgr_note { get; set; }
         public int nvl_qty { get; set; }
+        public bool? can_start { get; set; }
+        public string? can_start_message { get; set; }
         public List<ProductionStageStatusDto> stage_statuses { get; set; } = new();
         public List<string> stages { get; set; } = new();
         public int prod_id { get; set; }

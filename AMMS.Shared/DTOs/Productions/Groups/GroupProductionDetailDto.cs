@@ -21,6 +21,9 @@ namespace AMMS.Shared.DTOs.Productions.Groups
         public int total_qty { get; set; }
 
         public string? process_codes { get; set; }
+        public bool can_start { get; set; }
+
+        public string? can_start_message { get; set; }
 
         public GroupProductionTaskContextDto? task_context { get; set; }
 
