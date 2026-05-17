@@ -386,7 +386,7 @@ namespace AMMS.Application.Services
                     name = $"GROUP-{segment.DepartmentCode}-{step.process_name ?? step.process_code}",
                     seq_num = seq++,
                     status = "Unassigned",
-                    machine = step.machine,
+                    machine = ResolveTaskMachineFromProcess(step),
                     process_id = step.process_id,
                     input_mode = "MANUAL",
                     reason = $"Task thuộc production ghép phòng ban {segment.DepartmentName}, nhập tay input/output khi báo cáo."
@@ -510,7 +510,7 @@ namespace AMMS.Application.Services
                         name = $"SPLIT-{step.process_name ?? step.process_code}",
                         seq_num = processSeqMap.TryGetValue(code, out var seq) ? seq : 999,
                         status = "Unassigned",
-                        machine = step.machine,
+                        machine = ResolveTaskMachineFromProcess(step),
                         process_id = step.process_id,
                         input_mode = "MANUAL",
                         reason = $"Task SPLIT theo phòng ban {segment.DepartmentName}."
@@ -1685,16 +1685,12 @@ namespace AMMS.Application.Services
             warnings = new List<GroupProductionPlanWarningDto>();
 
             var normalizedSelectedCodes = selectedCodes
-                .Select(NormProcessCode)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(FullRouteIndex)
-                .ToList();
+     .Select(NormProcessCode)
+     .Where(x => !string.IsNullOrWhiteSpace(x))
+     .Distinct(StringComparer.OrdinalIgnoreCase)
+     .OrderBy(FullRouteIndex)
+     .ToList();
 
-            /*
-             * RALO/CAT/IN.
-             * Các công đoạn này nằm ở production SINGLE của từng order.
-             */
             var nonDept1Codes = normalizedSelectedCodes
                 .Where(x => !IsDept1(x))
                 .ToList();
@@ -1777,31 +1773,87 @@ namespace AMMS.Application.Services
             }
 
             /*
-             * 2. BE / DUT / DAN:
-             * Không tạo GROUP giữa nhiều order.
-             * Mỗi order tạo riêng, gom BE/DUT/DAN của order đó vào cùng 1 production nếu có đủ path.
-             */
-            if (privateOrderProcessCodes.Count > 0)
+ * 2. BE / DUT / DAN:
+ *
+ * Rule mới:
+ * - Nếu user chọn trực tiếp BE/DUT/DAN => vẫn tạo SPLIT riêng từng order.
+ * - Nếu user chọn bất kỳ công đoạn Dept2: PHU/CAN/CAN_MANG/BOI
+ *   => tự động tách toàn bộ Dept3 phía sau: BE/DUT/DAN sang SPLIT riêng từng order.
+ *
+ * Mục tiêu:
+ * - SINGLE gốc giữ Dept1: RALO/CAT/IN và shadow task GroupedWaiting của Dept2.
+ * - GROUP giữ Dept2 được chọn: PHU/CAN/BOI...
+ * - SPLIT giữ Dept3: BE/DUT/DAN riêng từng order.
+ */
+            var selectedDept2Codes = normalizedSelectedCodes
+                .Where(IsDept2)
+                .ToList();
+
+            var selectedDept3Codes = normalizedSelectedCodes
+                .Where(IsPrivateOrderProcess)
+                .ToList();
+
+            foreach (var row in rows.OrderBy(x => x.Order.order_id))
             {
-                foreach (var row in rows.OrderBy(x => x.Order.order_id))
+                var privateCodesForOrder = new List<string>();
+
+                /*
+                 * Case A:
+                 * User chọn trực tiếp BE/DUT/DAN.
+                 */
+                privateCodesForOrder.AddRange(
+                    selectedDept3Codes
+                        .Where(code => row.RouteCodes.Contains(code, StringComparer.OrdinalIgnoreCase)));
+
+                /*
+                 * Case B:
+                 * User chọn PHU/CAN/BOI.
+                 * Khi đã ghép/tách Dept2 thì Dept3 phía sau không được nằm chung production
+                 * với RALO/CAT/IN nữa, nên tự động tách BE/DUT/DAN.
+                 */
+                if (selectedDept2Codes.Count > 0)
                 {
-                    var privateCodesForOrder = privateOrderProcessCodes
-                        .Where(code => row.RouteCodes.Contains(code, StringComparer.OrdinalIgnoreCase))
-                        .OrderBy(FullRouteIndex)
-                        .ToList();
+                    var lastSelectedDept2Index = row.RouteCodes
+                        .Select((code, index) => new
+                        {
+                            code = NormProcessCode(code),
+                            index
+                        })
+                        .Where(x => selectedDept2Codes.Contains(
+                            x.code,
+                            StringComparer.OrdinalIgnoreCase))
+                        .Select(x => x.index)
+                        .DefaultIfEmpty(-1)
+                        .Max();
 
-                    if (privateCodesForOrder.Count == 0)
-                        continue;
-
-                    result.Add(new ProductionPlanSegment
+                    if (lastSelectedDept2Index >= 0)
                     {
-                        DepartmentCode = "DEPT_3",
-                        DepartmentName = ResolveDepartmentName("DEPT_3"),
-                        ProcessCodes = privateCodesForOrder,
-                        Members = new List<GroupOrderRow> { row },
-                        MaterialKey = $"ORDER:{row.Order.order_id}"
-                    });
+                        var dept3AfterSelectedDept2 = row.RouteCodes
+                            .Skip(lastSelectedDept2Index + 1)
+                            .Where(IsDept3)
+                            .OrderBy(FullRouteIndex)
+                            .ToList();
+
+                        privateCodesForOrder.AddRange(dept3AfterSelectedDept2);
+                    }
                 }
+
+                privateCodesForOrder = privateCodesForOrder
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(FullRouteIndex)
+                    .ToList();
+
+                if (privateCodesForOrder.Count == 0)
+                    continue;
+
+                result.Add(new ProductionPlanSegment
+                {
+                    DepartmentCode = "DEPT_3",
+                    DepartmentName = ResolveDepartmentName("DEPT_3"),
+                    ProcessCodes = privateCodesForOrder,
+                    Members = new List<GroupOrderRow> { row },
+                    MaterialKey = $"ORDER:{row.Order.order_id}:DEPT_3"
+                });
             }
 
             return MergeAdjacentSegments(result);
@@ -1872,6 +1924,16 @@ namespace AMMS.Application.Services
             return fallback.Length <= 20
                 ? fallback
                 : fallback[..20];
+        }
+
+        private static string ResolveTaskMachineFromProcess(product_type_process step)
+        {
+            var code = NormProcessCode(step.process_code);
+
+            if (!string.IsNullOrWhiteSpace(code))
+                return code;
+
+            return NormProcessCode(step.process_name);
         }
 
         private static List<ProductionPlanSegment> MergeAdjacentSegments(

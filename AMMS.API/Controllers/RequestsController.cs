@@ -906,7 +906,8 @@ namespace AMMS.API.Controllers
         private static bool IsPayableStatus(string? status)
         {
             return string.Equals(status, "Verified", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(status, "Waiting", StringComparison.OrdinalIgnoreCase);
+                || string.Equals(status, "Waiting", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Accepted", StringComparison.OrdinalIgnoreCase);
         }
 
         private static (bool ok, string message) ValidateQuotePaymentWindow(order_request req, DateTime now)
