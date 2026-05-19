@@ -490,7 +490,7 @@ public static class ProductionDependencyValidator
 
     private static bool IsFinished(string? status, DateTime? endTime)
     {
-        return string.Equals(status, "Finished")
+        return string.Equals(status, "Finished", StringComparison.OrdinalIgnoreCase)
                || endTime != null;
     }
 

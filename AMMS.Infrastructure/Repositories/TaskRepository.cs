@@ -274,23 +274,42 @@ namespace AMMS.Infrastructure.Repositories
             if (!prod.order_id.HasValue)
                 return null;
 
+            if (!currentTask.prod_id.HasValue)
+                return null;
+
             if (!currentTask.seq_num.HasValue)
                 return null;
 
             var orderId = prod.order_id.Value;
+            var singleProdId = currentTask.prod_id.Value;
             var currentSeq = currentTask.seq_num.Value;
 
+            /*
+             * Không dùng:
+             * string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase)
+             * trong IQueryable vì EF Core không translate được StringComparison.
+             *
+             * Dùng EF.Functions.ILike cho PostgreSQL/Npgsql để so sánh không phân biệt hoa thường.
+             */
             var previousGroup = await _db.task_links
                 .AsNoTracking()
-                .Include(x => x.group_task)
                 .Where(x =>
-                    x.single_prod_id == currentTask.prod_id &&
+                    x.single_prod_id == singleProdId &&
                     x.order_id == orderId &&
                     x.group_task != null &&
                     x.group_task.seq_num.HasValue &&
                     x.group_task.seq_num.Value < currentSeq &&
-                    !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                    (
+                        x.status == null ||
+                        !EF.Functions.ILike(x.status.Trim(), "Cancelled")
+                    ))
                 .OrderByDescending(x => x.group_task!.seq_num)
+                .ThenByDescending(x => x.group_task_id)
+                .Select(x => new
+                {
+                    x.group_task_id,
+                    x.process_code
+                })
                 .FirstOrDefaultAsync(ct);
 
             if (previousGroup == null)
