@@ -1374,13 +1374,35 @@ namespace AMMS.Application.Services
             };
         }
 
-        public void QueueRelease(int orderId)
+        public void QueueRelease(
+    int orderId,
+    bool autoApproveSingleMethod = false)
         {
             _ = Task.Run(async () =>
             {
                 try
                 {
+                    /*
+                     * Bước 1:
+                     * Tạo/schedule production + tasks như logic cũ.
+                     */
                     await ExecuteAsync(orderId, CancellationToken.None);
+
+                    /*
+                     * Bước 2:
+                     * Sau khi production đã được tạo xong,
+                     * tự trigger duyệt ready/method.
+                     *
+                     * SetProductionReadyAsync sẽ tự quyết định:
+                     * - 1 method khả dụng: auto approve
+                     * - nhiều method khả dụng: waiting manager approval
+                     */
+                    if (autoApproveSingleMethod)
+                    {
+                        await TryAutoApproveProductionMethodAfterLayoutAsync(
+                            orderId,
+                            CancellationToken.None);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -1389,6 +1411,116 @@ namespace AMMS.Application.Services
                         orderId);
                 }
             });
+        }
+
+        private async Task TryAutoApproveProductionMethodAfterLayoutAsync(
+    int orderId,
+    CancellationToken ct = default)
+        {
+            using var scope = _scopeFactory.CreateScope();
+
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var productionService = scope.ServiceProvider.GetRequiredService<IProductionService>();
+            var hub = scope.ServiceProvider.GetRequiredService<IHubContext<RealtimeHub>>();
+
+            var ord = await db.orders
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.order_id == orderId, ct);
+
+            if (ord == null)
+            {
+                _logger.LogWarning(
+                    "[AutoApproveProductionMethodAfterLayout] Order not found. OrderId={OrderId}",
+                    orderId);
+                return;
+            }
+
+            if (!ord.layout_confirmed)
+            {
+                _logger.LogInformation(
+                    "[AutoApproveProductionMethodAfterLayout] Skip because layout_confirmed=false. OrderId={OrderId}",
+                    orderId);
+                return;
+            }
+
+            var productions = await db.productions
+                .AsNoTracking()
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.end_date == null &&
+                    (
+                        x.prod_kind == null ||
+                        x.prod_kind != "GROUP"
+                    ))
+                .OrderByDescending(x => x.prod_id)
+                .ToListAsync(ct);
+
+            if (productions.Count == 0)
+            {
+                _logger.LogWarning(
+                    "[AutoApproveProductionMethodAfterLayout] No production found after release. OrderId={OrderId}",
+                    orderId);
+                return;
+            }
+
+            /*
+             * Tránh gọi lặp nếu order đã ready và production đã có method rõ ràng.
+             */
+            var allProductionsAlreadyHaveMethod = productions.All(x =>
+                !string.IsNullOrWhiteSpace(x.prod_method) &&
+                !string.Equals(x.prod_method, "MANUAL", StringComparison.OrdinalIgnoreCase));
+
+            if (ord.is_production_ready && allProductionsAlreadyHaveMethod)
+            {
+                _logger.LogInformation(
+                    "[AutoApproveProductionMethodAfterLayout] Skip because order already ready and method already approved. OrderId={OrderId}",
+                    orderId);
+                return;
+            }
+
+            try
+            {
+                /*
+                 * Đây chính là API start-ready được trigger tự động.
+                 *
+                 * proposedMethod = null để service tự resolve option khả dụng:
+                 * - chỉ NVL
+                 * - chỉ SUB
+                 * - chỉ BOTH
+                 * - hoặc nhiều option thì chờ manager chọn.
+                 */
+                var result = await productionService.SetProductionReadyAsync(
+                    orderId,
+                    true,
+                    "Tự động kiểm tra và duyệt method sản xuất sau khi designer xác nhận layout.",
+                    null,
+                    ct);
+
+                _logger.LogInformation(
+                    "[AutoApproveProductionMethodAfterLayout] Done. OrderId={OrderId}, Result={@Result}",
+                    orderId,
+                    result);
+
+                await hub.Clients.All.SendAsync(
+                    "update-ui",
+                    new
+                    {
+                        message = "update UI",
+                        order_id = orderId
+                    },
+                    ct);
+            }
+            catch (Exception ex)
+            {
+                /*
+                 * Không throw ngược để tránh làm chết background release.
+                 * Lỗi sẽ được log, general vẫn có thể xử lý bằng API start-ready thủ công.
+                 */
+                _logger.LogError(
+                    ex,
+                    "[AutoApproveProductionMethodAfterLayout] Failed. OrderId={OrderId}",
+                    orderId);
+            }
         }
 
         public async Task ExecuteAsync(int orderId, CancellationToken ct = default)

@@ -998,15 +998,16 @@ namespace AMMS.API.Controllers
                     await tx.CommitAsync(ct);
                 });
 
-                _service.QueueRelease(orderId);
-
+                _service.QueueRelease(
+    orderId,
+    autoApproveSingleMethod: true);
 
                 return Accepted(new
                 {
                     ok = true,
                     request_id = dto.request_id,
                     order_id = orderId,
-                    message = "Designer confirmed layout. Production release started."
+                    message = "Designer confirmed layout. Production release started. Auto method approval will run after production scheduling."
                 });
             }
             catch (Exception ex)
