@@ -336,8 +336,10 @@ namespace AMMS.Infrastructure.Repositories
              */
             var linkedSingleTaskIds = await _db.task_links
                 .AsNoTracking()
-                .Where(x => prodIds.Contains(x.single_prod_id))
-                .Select(x => x.single_task_id)
+                .Where(x =>
+                    prodIds.Contains(x.single_prod_id) &&
+                    x.single_task_id.HasValue)
+                .Select(x => x.single_task_id!.Value)
                 .Distinct()
                 .ToListAsync(ct);
 
@@ -2077,6 +2079,22 @@ namespace AMMS.Infrastructure.Repositories
                 .Select(t => t.end_time!.Value)
                 .DefaultIfEmpty(now)
                 .Max();
+
+            var hasUnfinishedGroupLinks = await _db.task_links
+    .AsNoTracking()
+    .Include(x => x.group_task)
+    .AnyAsync(x =>
+        x.single_prod_id == prodId &&
+        !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase) &&
+        (
+            !string.Equals(x.status, "Done", StringComparison.OrdinalIgnoreCase) ||
+            x.group_task == null ||
+            !string.Equals(x.group_task.status, "Finished", StringComparison.OrdinalIgnoreCase)
+        ),
+        ct);
+
+            if (hasUnfinishedGroupLinks)
+                return false;
 
             prod.end_date = finishedAt;
             prod.status = "Importing";

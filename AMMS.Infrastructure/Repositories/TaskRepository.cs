@@ -266,6 +266,50 @@ namespace AMMS.Infrastructure.Repositories
             return true;
         }
 
+        private async Task<int?> GetPreviousGroupedOutputQtyCapAsync(
+    task currentTask,
+    production prod,
+    CancellationToken ct)
+        {
+            if (!prod.order_id.HasValue)
+                return null;
+
+            if (!currentTask.seq_num.HasValue)
+                return null;
+
+            var orderId = prod.order_id.Value;
+            var currentSeq = currentTask.seq_num.Value;
+
+            var previousGroup = await _db.task_links
+                .AsNoTracking()
+                .Include(x => x.group_task)
+                .Where(x =>
+                    x.single_prod_id == currentTask.prod_id &&
+                    x.order_id == orderId &&
+                    x.group_task != null &&
+                    x.group_task.seq_num.HasValue &&
+                    x.group_task.seq_num.Value < currentSeq &&
+                    !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(x => x.group_task!.seq_num)
+                .FirstOrDefaultAsync(ct);
+
+            if (previousGroup == null)
+                return null;
+
+            var qty = await _db.task_qtys
+                .AsNoTracking()
+                .Where(x =>
+                    x.group_task_id == previousGroup.group_task_id &&
+                    x.order_id == orderId &&
+                    x.process_code == previousGroup.process_code)
+                .SumAsync(x => x.qty_good, ct);
+
+            if (qty <= 0)
+                return null;
+
+            return qty;
+        }
+
         public async Task<TaskQtyPolicyDto?> GetQtyPolicyAsync(int taskId, CancellationToken ct = default)
         {
             var taskRow = await _db.tasks
@@ -376,6 +420,23 @@ namespace AMMS.Infrastructure.Repositories
             var maxAllowed = qtyProfile.MaxAllowed;
             var suggestedQty = qtyProfile.SuggestedQty;
             var happyCaseQty = qtyProfile.SuggestedQty;
+
+            var previousGroupedCap = await GetPreviousGroupedOutputQtyCapAsync(
+    stage,
+    prod,
+    ct);
+
+            if (previousGroupedCap.HasValue && previousGroupedCap.Value > 0)
+            {
+                maxAllowed = Math.Min(maxAllowed, previousGroupedCap.Value);
+
+                if (maxAllowed <= 0)
+                    maxAllowed = previousGroupedCap.Value;
+
+                minAllowed = 1;
+                suggestedQty = maxAllowed;
+                happyCaseQty = suggestedQty;
+            }
 
             // BOTH:
             if (bothQtyContext.IsCoveredBySub(currentIndex) &&

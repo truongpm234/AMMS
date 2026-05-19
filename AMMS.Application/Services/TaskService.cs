@@ -153,9 +153,25 @@ namespace AMMS.Application.Services
     int groupTaskId,
     CancellationToken ct)
         {
+            var groupTask = await _db.tasks
+                .AsNoTracking()
+                .Include(x => x.process)
+                .FirstOrDefaultAsync(x => x.task_id == groupTaskId, ct);
+
+            if (groupTask == null)
+                throw new InvalidOperationException("Không tìm thấy group task.");
+
+            if (!groupTask.seq_num.HasValue)
+                throw new InvalidOperationException("Group task thiếu seq_num.");
+
+            var groupSeq = groupTask.seq_num.Value;
+            var groupCode = NormCode(groupTask.process?.process_code);
+
             var links = await _db.task_links
                 .AsNoTracking()
-                .Where(x => x.group_task_id == groupTaskId)
+                .Where(x =>
+                    x.group_task_id == groupTaskId &&
+                    !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
                 .ToListAsync(ct);
 
             if (links.Count == 0)
@@ -163,53 +179,76 @@ namespace AMMS.Application.Services
 
             foreach (var link in links)
             {
-                var singleProd = await _db.productions
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(x => x.prod_id == link.single_prod_id, ct);
-
-                if (singleProd == null)
-                    throw new InvalidOperationException($"Không tìm thấy single production {link.single_prod_id}.");
-
-                var currentCode = GroupProductionHelper.Norm(link.process_code);
-
-                var currentStepSeq = await _db.product_type_processes
-                    .AsNoTracking()
-                    .Where(x =>
-                        x.product_type_id == singleProd.product_type_id &&
-                        x.process_code != null &&
-                        x.process_code.ToUpper() == currentCode)
-                    .Select(x => (int?)x.seq_num)
-                    .FirstOrDefaultAsync(ct);
-
-                if (!currentStepSeq.HasValue)
-                    continue;
-
-                var previousTasks = await _db.tasks
+                // Check task riêng phía trước trong production single.
+                var notFinishedBefore = await _db.tasks
                     .AsNoTracking()
                     .Include(x => x.process)
-                    .Where(x => x.prod_id == link.single_prod_id)
-                    .Where(x => x.process != null)
                     .Where(x =>
-                        _db.product_type_processes.Any(p =>
-                            p.product_type_id == singleProd.product_type_id &&
-                            p.process_id == x.process_id &&
-                            p.seq_num < currentStepSeq.Value))
+                        x.prod_id == link.single_prod_id &&
+                        x.seq_num.HasValue &&
+                        x.seq_num.Value < groupSeq &&
+                        !string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase))
                     .OrderBy(x => x.seq_num)
+                    .ThenBy(x => x.task_id)
                     .ToListAsync(ct);
 
-                var notFinished = previousTasks
-                    .Where(x =>
-                        !string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) &&
-                        x.end_time == null)
-                    .ToList();
-
-                if (notFinished.Count > 0)
+                if (notFinishedBefore.Count > 0)
                 {
                     throw new InvalidOperationException(
-                        $"Order {link.order_id} chưa hoàn thành công đoạn riêng trước công đoạn ghép {currentCode}. " +
-                        $"Còn thiếu: {string.Join(",", notFinished.Select(x => x.process?.process_code ?? x.name))}");
+                        $"Order {link.order_id} chưa hoàn thành công đoạn riêng trước công đoạn ghép {groupCode}. " +
+                        $"Còn thiếu: {string.Join(",", notFinishedBefore.Select(x => x.process?.process_code ?? x.name))}");
+                }
+
+                // Check group task trước đó nếu group nhiều công đoạn liên tiếp.
+                var previousGroupLinks = await _db.task_links
+                    .AsNoTracking()
+                    .Include(x => x.group_task)
+                        .ThenInclude(x => x.process)
+                    .Where(x =>
+                        x.single_prod_id == link.single_prod_id &&
+                        x.group_task_id != groupTaskId &&
+                        !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                    .ToListAsync(ct);
+
+                foreach (var prev in previousGroupLinks)
+                {
+                    if (prev.group_task == null || !prev.group_task.seq_num.HasValue)
+                        continue;
+
+                    if (prev.group_task.seq_num.Value >= groupSeq)
+                        continue;
+
+                    if (!string.Equals(prev.group_task.status, "Finished", StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException(
+                            $"Order {link.order_id} chưa hoàn thành công đoạn ghép trước đó: {prev.process_code}.");
+                    }
+
+                    var hasQty = await _db.task_qtys
+                        .AsNoTracking()
+                        .AnyAsync(x =>
+                            x.group_task_id == prev.group_task_id &&
+                            x.order_id == prev.order_id &&
+                            x.process_code == prev.process_code &&
+                            x.qty_good > 0,
+                            ct);
+
+                    if (!hasQty)
+                    {
+                        throw new InvalidOperationException(
+                            $"Công đoạn ghép {prev.process_code} đã Finished nhưng chưa có sản lượng phân bổ cho order {prev.order_id}.");
+                    }
                 }
             }
+        }
+
+        private static string NormCode(string? code)
+        {
+            return (code ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
         }
 
         public async Task<FinishTasksFromStockResponse> FinishTasksFromStockAsync(List<int> taskIds, int? scannedByUserId = null, CancellationToken ct = default)

@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using AMMS.Infrastructure.DBContext;
+using AMMS.Infrastructure.Entities;
 using AMMS.Shared.Helpers;
 using Microsoft.EntityFrameworkCore;
 
@@ -98,6 +99,38 @@ public static class ProductionDependencyValidator
             };
         }
 
+        var prod = await db.productions
+    .AsNoTracking()
+    .FirstOrDefaultAsync(x => x.prod_id == currentTask.prod_id.Value, ct);
+
+        var isGroupProduction =
+            prod != null &&
+            string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase);
+
+        if (!isGroupProduction)
+        {
+            var logical = await CheckSingleProductionLogicalPreviousDoneAsync(
+                db,
+                currentTask,
+                ct);
+
+            if (!logical.ok)
+            {
+                return new ProductionDependencyCheckResult
+                {
+                    can_start = false,
+                    issues = new List<ProductionDependencyIssueDto>
+    {
+        new()
+        {
+            current_task_id = taskId,
+            message = logical.message
+        }
+    }
+                };
+            }
+        }
+
         if (!currentTask.prod_id.HasValue || currentTask.prod == null)
         {
             return new ProductionDependencyCheckResult
@@ -176,6 +209,101 @@ public static class ProductionDependencyValidator
         }
 
         return result;
+    }
+
+    private static async Task<(bool ok, string message)> CheckSingleProductionLogicalPreviousDoneAsync(
+    AppDbContext db,
+    task currentTask,
+    CancellationToken ct)
+    {
+        if (!currentTask.prod_id.HasValue)
+            return (false, "Task thiếu prod_id.");
+
+        if (!currentTask.seq_num.HasValue)
+            return (false, "Task thiếu seq_num.");
+
+        var currentSeq = currentTask.seq_num.Value;
+
+        var prod = await db.productions
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.prod_id == currentTask.prod_id.Value, ct);
+
+        if (prod == null)
+            return (false, "Không tìm thấy production.");
+
+        var previousUnfinishedTasks = await db.tasks
+            .AsNoTracking()
+            .Include(x => x.process)
+            .Where(x =>
+                x.prod_id == currentTask.prod_id.Value &&
+                x.task_id != currentTask.task_id &&
+                x.seq_num.HasValue &&
+                x.seq_num.Value < currentSeq &&
+                !string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(x => x.seq_num)
+            .ThenBy(x => x.task_id)
+            .ToListAsync(ct);
+
+        if (previousUnfinishedTasks.Count > 0)
+        {
+            var first = previousUnfinishedTasks.First();
+
+            return (false,
+                $"Công đoạn trước chưa Finished: {first.process?.process_code ?? first.name}, " +
+                $"task_id={first.task_id}, status={first.status}");
+        }
+
+        if (!prod.order_id.HasValue)
+            return (true, "");
+
+        var orderId = prod.order_id.Value;
+
+        var previousGroupLinks = await db.task_links
+            .AsNoTracking()
+            .Include(x => x.group_task)
+                .ThenInclude(x => x.process)
+            .Where(x =>
+                x.single_prod_id == currentTask.prod_id.Value &&
+                !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+            .ToListAsync(ct);
+
+        foreach (var link in previousGroupLinks)
+        {
+            var groupTask = link.group_task;
+
+            if (groupTask == null)
+                return (false, $"Công đoạn ghép {link.process_code} chưa có group task hợp lệ.");
+
+            if (!groupTask.seq_num.HasValue)
+                return (false, $"Công đoạn ghép {link.process_code} thiếu seq_num.");
+
+            if (groupTask.seq_num.Value >= currentSeq)
+                continue;
+
+            if (!string.Equals(groupTask.status, "Finished", StringComparison.OrdinalIgnoreCase))
+            {
+                return (false,
+                    $"Công đoạn ghép {link.process_code} chưa Finished. " +
+                    $"group_task_id={groupTask.task_id}, status={groupTask.status}");
+            }
+
+            var hasQty = await db.task_qtys
+                .AsNoTracking()
+                .AnyAsync(x =>
+                    x.group_task_id == groupTask.task_id &&
+                    x.order_id == orderId &&
+                    x.process_code == link.process_code &&
+                    x.qty_good > 0,
+                    ct);
+
+            if (!hasQty)
+            {
+                return (false,
+                    $"Công đoạn ghép {link.process_code} đã Finished nhưng chưa có sản lượng phân bổ cho order {orderId}.");
+            }
+        }
+
+        return (true, "");
     }
 
     private static async Task<List<int>> ResolveOrderIdsOfTaskAsync(

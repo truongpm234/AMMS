@@ -513,25 +513,26 @@ namespace AMMS.Application.Services
             }
 
             var links = await _db.task_links
-                .Where(x => x.group_task_id == groupTask.task_id && x.status != "Done")
+                .Where(x =>
+                    x.group_task_id == groupTask.task_id &&
+                    x.status != "Done")
                 .OrderBy(x => x.id)
                 .ToListAsync(ct);
 
             if (links.Count == 0)
                 return;
 
-            var allocations = AllocateGroupQty(groupQtyGood, links);
-
-            var affectedSingleProdIds = new HashSet<int>();
+            var allocations = AllocateGroupQtyByLinks(groupQtyGood, links);
 
             foreach (var link in links)
             {
-                var qtyForOrder = allocations.TryGetValue(link.order_id, out var q) ? q : 0;
+                var qtyForOrder = allocations.TryGetValue(link.order_id, out var q)
+                    ? q
+                    : 0;
 
-                var privateTask = await _db.tasks
-                    .FirstOrDefaultAsync(x => x.task_id == link.single_task_id, ct);
-
-                var allocatedOutputs = AllocateOutputsForOrder(groupOutputs, qtyForOrder);
+                var allocatedOutputs = AllocateOutputsForOrder(
+                    groupOutputs,
+                    qtyForOrder);
 
                 var allocatedOutputJson = allocatedOutputs.Count == 0
                     ? null
@@ -540,51 +541,135 @@ namespace AMMS.Application.Services
                 await _db.task_qtys.AddAsync(new task_qty
                 {
                     task_log_id = groupLog.log_id == 0 ? null : groupLog.log_id,
+
                     group_task_id = groupTask.task_id,
-                    single_task_id = privateTask?.task_id ?? link.single_task_id,
+
+                    // Task single đã bị xóa.
+                    single_task_id = null,
+
+                    single_prod_id = link.single_prod_id,
                     order_id = link.order_id,
                     process_code = link.process_code,
+
                     qty_good = qtyForOrder,
                     output_json = allocatedOutputJson,
                     created_at = now
                 }, ct);
 
-                if (privateTask != null)
-                {
-                    privateTask.status = "Finished";
-                    privateTask.start_time ??= now;
-                    privateTask.end_time = now;
-                    privateTask.reason = $"Hoàn thành từ production ghép prod_id={groupProd.prod_id}.";
-
-                    await _db.task_logs.AddAsync(new task_log
-                    {
-                        task_id = privateTask.task_id,
-                        scanned_code = $"GROUP-{groupProd.prod_id}-TASK-{groupTask.task_id}",
-                        action_type = "FinishedByGroup",
-                        qty_good = qtyForOrder,
-                        log_time = now,
-                        scanned_by_user_id = scannedByUserId,
-                        reason = $"Mirror từ production ghép {groupProd.code}",
-                        material_usage_json = null,
-                        reference_input_json = null,
-                        output_json = allocatedOutputJson,
-                        report_image_url = groupLog.report_image_url
-                    }, ct);
-                }
-
                 link.status = "Done";
-                affectedSingleProdIds.Add(link.single_prod_id);
+                link.done_at = now;
             }
 
             await _db.SaveChangesAsync(ct);
 
+            var affectedSingleProdIds = links
+                .Select(x => x.single_prod_id)
+                .Distinct()
+                .ToList();
+
             foreach (var singleProdId in affectedSingleProdIds)
             {
+                await PromoteFirstAvailableSingleTaskAfterGroupedStageAsync(
+                    singleProdId,
+                    now,
+                    ct);
+
                 await _prodRepo.TryCloseProductionIfCompletedAsync(
                     singleProdId,
                     now,
                     ct);
             }
+        }
+
+        private static Dictionary<int, int> AllocateGroupQtyByLinks(
+            int groupQtyGood,
+            List<task_link> links)
+        {
+            var result = new Dictionary<int, int>();
+
+            var totalPlan = links.Sum(x => x.qty_plan);
+
+            if (totalPlan <= 0)
+            {
+                foreach (var link in links)
+                    result[link.order_id] = 0;
+
+                return result;
+            }
+
+            var remaining = groupQtyGood;
+
+            for (var i = 0; i < links.Count; i++)
+            {
+                var link = links[i];
+
+                int qty;
+
+                if (i == links.Count - 1)
+                {
+                    qty = remaining;
+                }
+                else
+                {
+                    qty = (int)Math.Round(
+                        groupQtyGood * (link.qty_plan / (decimal)totalPlan),
+                        MidpointRounding.AwayFromZero);
+
+                    if (qty < 0)
+                        qty = 0;
+
+                    if (qty > remaining)
+                        qty = remaining;
+                }
+
+                result[link.order_id] = qty;
+                remaining -= qty;
+            }
+
+            return result;
+        }
+
+        private async Task PromoteFirstAvailableSingleTaskAfterGroupedStageAsync(
+    int singleProdId,
+    DateTime now,
+    CancellationToken ct)
+        {
+            var prod = await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.prod_id == singleProdId, ct);
+
+            if (prod == null)
+                return;
+
+            if (!string.Equals(prod.status, "InProcessing", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var candidates = await _db.tasks
+                .Include(x => x.process)
+                .Where(x =>
+                    x.prod_id == singleProdId &&
+                    !string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(x.status, "Ready", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(x => x.seq_num)
+                .ThenBy(x => x.task_id)
+                .ToListAsync(ct);
+
+            foreach (var candidate in candidates)
+            {
+                var dep = await ProductionDependencyValidator.CheckTaskCanStartAsync(
+                    _db,
+                    candidate.task_id,
+                    ct);
+
+                if (!dep.can_start)
+                    continue;
+
+                candidate.status = "Ready";
+                candidate.start_time ??= now;
+                break;
+            }
+
+            await _db.SaveChangesAsync(ct);
         }
 
         private static Dictionary<int, int> AllocateGroupQty(
@@ -809,7 +894,7 @@ namespace AMMS.Application.Services
 
             foreach (var link in links)
             {
-                var singleCtx = await GetTaskEstimateContextAsync(link.single_task_id, ct);
+                var singleCtx = await GetTaskEstimateContextAsync((int)link.single_task_id, ct);
 
                 if (singleCtx == null)
                     continue;

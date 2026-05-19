@@ -18,6 +18,8 @@ public class task_qty
 
     public int? single_task_id { get; set; }
 
+    public int? single_prod_id { get; set; }
+
     public int order_id { get; set; }
 
     public string? process_code { get; set; }
