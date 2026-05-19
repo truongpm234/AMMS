@@ -25,10 +25,10 @@ namespace AMMS.Application.Interfaces
             int groupProdId,
             CancellationToken ct = default);
         Task<List<SuggestedGroupProductionDto>> SuggestAsync(
-     int? productTypeId,
-     string? processCodes,
-     string? orderIds,
-     CancellationToken ct = default);
+    int? productTypeId,
+    string? processCodes,
+    string? orderIds,
+    CancellationToken ct = default);
 
         Task<GroupProductionTaskContextDto?> GetTaskContextAsync(
             int taskId,

@@ -654,21 +654,36 @@ namespace AMMS.Application.Services
     string? orderIds,
     CancellationToken ct = default)
         {
+            /*
+             * Mục tiêu:
+             * - Không cần FE truyền orderIds/productType/processCodes.
+             * - Nếu không truyền gì: tự lấy toàn bộ order hợp lệ từ GetCandidatesAsync.
+             * - Nếu có nhiều product_type khác nhau: tự tách từng product_type rồi suggest riêng.
+             * - Trong mỗi product_type:
+             *   + Dept1: RALO/CAT/IN không suggest group.
+             *   + Dept2: PHU/CAN/CAN_MANG/BOI có thể GROUP nếu đủ điều kiện.
+             *   + Dept3: BE/DUT/DAN không GROUP nhiều order, chỉ auto SPLIT sau GROUP Dept2.
+             */
+
             var selectedCodes = GroupProductionHelper.ParseCodes(processCodes);
             var selectedOrderIds = ParseOrderIdsCsv(orderIds);
 
             if (selectedCodes.Count > 0)
                 GroupProductionHelper.EnsureShareableCodes(selectedCodes);
 
-            List<GroupOrderRow> rows;
+            List<GroupOrderRow> allRows;
 
+            /*
+             * CASE 1:
+             * FE có truyền orderIds thì chỉ suggest trong danh sách order đó.
+             */
             if (selectedOrderIds.Count > 0)
             {
-                rows = await LoadGroupOrderRowsAsync(selectedOrderIds, ct);
+                allRows = await LoadGroupOrderRowsAsync(selectedOrderIds, ct);
 
-                if (rows.Count != selectedOrderIds.Count)
+                if (allRows.Count != selectedOrderIds.Count)
                 {
-                    var found = rows
+                    var found = allRows
                         .Select(x => x.Order.order_id)
                         .ToHashSet();
 
@@ -677,88 +692,221 @@ namespace AMMS.Application.Services
                         .ToList();
 
                     throw new InvalidOperationException(
-                        $"Không tìm thấy đủ order hoặc production đơn để gợi ý.");
+                        $"Không tìm thấy đủ order hoặc production SINGLE để gợi ý. Missing: {string.Join(",", missing)}");
                 }
             }
+            /*
+             * CASE 2:
+             * FE không truyền gì.
+             * Backend tự lấy tất cả order có thể ghép.
+             */
             else
             {
+                var candidateProcessFilter = selectedCodes.Count > 0
+                    ? processCodes
+                    : null;
+
                 var candidates = await GetCandidatesAsync(
                     productTypeId,
-                    null,
+                    candidateProcessFilter,
                     ct);
 
                 var candidateOrderIds = candidates
+                    .Where(x => x.can_group)
                     .Select(x => x.order_id)
                     .Distinct()
                     .ToList();
 
-                if (candidateOrderIds.Count == 0)
+                if (candidateOrderIds.Count < 2)
                     return new List<SuggestedGroupProductionDto>();
 
-                rows = await LoadGroupOrderRowsAsync(candidateOrderIds, ct);
+                allRows = await LoadGroupOrderRowsAsync(candidateOrderIds, ct);
             }
 
+            /*
+             * Nếu API vẫn truyền productTypeId thì lọc lại thêm 1 lần.
+             */
             if (productTypeId.HasValue)
             {
-                rows = rows
+                allRows = allRows
                     .Where(x => x.Item.product_type_id == productTypeId.Value)
                     .ToList();
             }
 
-            if (rows.Count == 0)
+            allRows = allRows
+                .Where(x => x.Item != null)
+                .Where(x => x.Item.product_type_id.HasValue)
+                .Where(x => x.Order.layout_confirmed)
+                .Where(x => x.Order.is_production_ready)
+                .Where(x => string.Equals(x.Order.status, "Scheduled", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (allRows.Count < 2)
                 return new List<SuggestedGroupProductionDto>();
 
-            var suggestions = selectedCodes.Count > 0
-                ? BuildSuggestionPreviewFromSelectedCodes(rows, selectedCodes)
-                : BuildAutoDept2Suggestions(rows);
+            /*
+             * Lấy tên product_type để trả ra response.
+             */
+            var productTypeIds = allRows
+                .Where(x => x.Item.product_type_id.HasValue)
+                .Select(x => x.Item.product_type_id!.Value)
+                .Distinct()
+                .ToList();
 
-            foreach (var s in suggestions)
+            var productTypeNameMap = await _db.product_types
+                .AsNoTracking()
+                .Where(x => productTypeIds.Contains(x.product_type_id))
+                .ToDictionaryAsync(
+                    x => x.product_type_id,
+                    x => x.name,
+                    ct);
+
+            var finalSuggestions = new List<SuggestedGroupProductionDto>();
+
+            /*
+             * QUAN TRỌNG:
+             * Tự tách theo product_type_id.
+             * Như vậy nhiều product type khác nhau vẫn suggest được,
+             * nhưng không suggest ghép chéo sai product type.
+             */
+            foreach (var productTypeGroup in allRows
+                         .GroupBy(x => x.Item.product_type_id!.Value)
+                         .OrderBy(g => g.Key))
             {
-                if (s.suggest_order == null || s.suggest_order.Count < 2)
-                {
-                    s.note =
-                        s.suggestion_type == "SPLIT_ONLY"
-                            ? "Đây là gợi ý riêng từng order, không phải gợi ý nhóm lênh sản xuất nên không tạo preview ghép."
-                            : "Không đủ 2 order để tạo preview ghép.";
+                var rowsOfOneProductType = productTypeGroup
+                    .OrderBy(x => x.Order.delivery_date)
+                    .ThenBy(x => x.Order.order_id)
+                    .ToList();
 
+                if (rowsOfOneProductType.Count < 2)
                     continue;
-                }
 
-                try
+                var currentProductTypeId = productTypeGroup.Key;
+
+                productTypeNameMap.TryGetValue(
+                    currentProductTypeId,
+                    out var currentProductTypeName);
+
+                List<SuggestedGroupProductionDto> suggestionsOfType;
+
+                /*
+                 * Nếu FE có truyền processCodes:
+                 * suggest đúng theo process FE chọn, nhưng vẫn chia riêng từng product_type.
+                 */
+                if (selectedCodes.Count > 0)
                 {
-                    var preview = await PreviewAsync(new CreateGroupProductionRequest
-                    {
-                        order_ids = s.suggest_order,
-                        process_codes = s.suggest_process,
-                        planned_start_date = null,
-                        note = null
-                    }, ct);
-
-                    s.suggested_planned_start_date = preview.suggested_planned_start_date;
-                    s.common_delivery_deadline = preview.common_delivery_deadline;
-                    s.estimated_finish_date = preview.estimated_finish_date;
-                    s.estimated_total_days = preview.total_duration_days;
-                    s.preview = preview;
-
-                    s.note =
-                        $"Gợi ý ghép vì các order cùng loại sản phẩm, cùng nhóm NVL/công đoạn {string.Join(",", s.suggest_process)}. " +
-                        $"Mốc giao chung: {preview.common_delivery_deadline:yyyy-MM-dd}, " +
-                        $"ngày bắt đầu gợi ý: {preview.suggested_planned_start_date:yyyy-MM-dd}, " +
-                        $"dự kiến xong: {preview.estimated_finish_date:yyyy-MM-dd}.";
+                    suggestionsOfType = BuildSuggestionPreviewFromSelectedCodes(
+                        rowsOfOneProductType,
+                        selectedCodes);
                 }
-                catch (Exception ex)
+                /*
+                 * Nếu FE không truyền gì:
+                 * tự suggest tất cả nhóm Dept2 có thể ghép.
+                 */
+                else
                 {
-                    s.note = $"Không tạo được preview lịch: {ex.Message}";
+                    suggestionsOfType = BuildAutoDept2Suggestions(
+                        rowsOfOneProductType);
                 }
+
+                foreach (var suggestion in suggestionsOfType)
+                {
+                    suggestion.product_type_id = currentProductTypeId;
+                    suggestion.product_type_name = currentProductTypeName;
+
+                    await EnrichSuggestionWithPreviewAsync(
+                        suggestion,
+                        currentProductTypeId,
+                        currentProductTypeName,
+                        ct);
+                }
+
+                finalSuggestions.AddRange(suggestionsOfType);
             }
 
-            return suggestions
+            return finalSuggestions
+                .Where(x => x.suggest_order != null)
+                .Where(x => x.suggest_order.Count >= 2)
+                .Where(x => x.suggest_process != null)
+                .Where(x => x.suggest_process.Count > 0)
                 .OrderByDescending(x =>
-                    x.suggestion_type == "GROUP_WITH_AUTO_SPLIT" ||
-                    x.suggestion_type == "GROUP")
-                .ThenBy(x => x.department_code)
-                .ThenBy(x => string.Join(",", x.suggest_process ?? new List<string>()))
+                    string.Equals(x.suggestion_type, "GROUP_WITH_AUTO_SPLIT", StringComparison.OrdinalIgnoreCase))
+                .ThenByDescending(x =>
+                    string.Equals(x.suggestion_type, "GROUP", StringComparison.OrdinalIgnoreCase))
+                .ThenBy(x => x.product_type_id)
+                .ThenBy(x => DepartmentOrder(x.department_code ?? ""))
+                .ThenBy(x => string.Join(",", x.suggest_process))
+                .ThenBy(x => x.common_delivery_deadline)
                 .ToList();
+        }
+
+        private async Task EnrichSuggestionWithPreviewAsync(
+    SuggestedGroupProductionDto suggestion,
+    int productTypeId,
+    string? productTypeName,
+    CancellationToken ct)
+        {
+            if (suggestion.suggest_order == null || suggestion.suggest_order.Count < 2)
+            {
+                suggestion.note =
+                    "Không đủ 2 order để tạo gợi ý ghép.";
+                return;
+            }
+
+            if (suggestion.suggest_process == null || suggestion.suggest_process.Count == 0)
+            {
+                suggestion.note =
+                    "Không có công đoạn hợp lệ để tạo gợi ý ghép.";
+                return;
+            }
+
+            /*
+             * SPLIT_ONLY không phải gợi ý group nhiều order.
+             * Trường hợp này không cần gọi PreviewAsync.
+             */
+            if (string.Equals(suggestion.suggestion_type, "SPLIT_ONLY", StringComparison.OrdinalIgnoreCase))
+            {
+                suggestion.note =
+                    "Đây là gợi ý tách riêng từng order, không phải gợi ý sản xuất ghép nhiều order.";
+                return;
+            }
+
+            try
+            {
+                var preview = await PreviewAsync(new CreateGroupProductionRequest
+                {
+                    order_ids = suggestion.suggest_order,
+                    process_codes = suggestion.suggest_process,
+                    planned_start_date = null,
+                    note = null
+                }, ct);
+
+                suggestion.suggested_planned_start_date = preview.suggested_planned_start_date;
+                suggestion.common_delivery_deadline = preview.common_delivery_deadline;
+                suggestion.estimated_finish_date = preview.estimated_finish_date;
+                suggestion.estimated_total_days = preview.total_duration_days;
+                suggestion.preview = preview;
+
+                var processText = string.Join(",", suggestion.suggest_process);
+                var orderText = string.Join(",", suggestion.suggest_order);
+
+                var baseReason = string.IsNullOrWhiteSpace(suggestion.reason)
+                    ? $"Các order {orderText} có thể ghép công đoạn {processText}."
+                    : suggestion.reason.Trim();
+
+                suggestion.note =
+                    $"{baseReason} " +
+                    $"ProductType={productTypeId}" +
+                    $"{(string.IsNullOrWhiteSpace(productTypeName) ? "" : $" - {productTypeName}")}. " +
+                    $"Mốc giao chung lấy theo order có ngày giao sớm nhất: {preview.common_delivery_deadline:yyyy-MM-dd}. " +
+                    $"Ngày bắt đầu gợi ý: {preview.suggested_planned_start_date:yyyy-MM-dd}. " +
+                    $"Dự kiến hoàn tất: {preview.estimated_finish_date:yyyy-MM-dd}.";
+            }
+            catch (Exception ex)
+            {
+                suggestion.note =
+                    $"Gợi ý được tạo nhưng chưa build được preview lịch. Lý do: {ex.Message}";
+            }
         }
 
         private static List<int> ParseOrderIdsCsv(string? raw)

@@ -42,7 +42,7 @@ public class GroupProductionsController : ControllerBase
     }
 
     [HttpGet("suggestions")]
-    public async Task<IActionResult> SuggestByQuery(
+    public async Task<IActionResult> Suggest(
     [FromQuery] int? productTypeId,
     [FromQuery] string? processCodes,
     [FromQuery] string? orderIds,
@@ -60,7 +60,10 @@ public class GroupProductionsController : ControllerBase
         }
         catch (InvalidOperationException ex)
         {
-            return BadRequest(new { message = ex.Message });
+            return BadRequest(new
+            {
+                message = ex.Message
+            });
         }
     }
 
