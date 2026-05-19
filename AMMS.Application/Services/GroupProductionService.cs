@@ -591,20 +591,22 @@ namespace AMMS.Application.Services
                     .ToHashSet();
 
             var alreadyLinkedTaskIds = await _db.task_links
-                .AsNoTracking()
-                .Where(x =>
-                    (
-                        x.single_task_id.HasValue &&
-                        taskIdsToDelete.Contains(x.single_task_id.Value)
-                    )
-                    ||
-                    (
-                        x.original_single_task_id.HasValue &&
-                        taskIdsToDelete.Contains(x.original_single_task_id.Value)
-                    ))
-                .Where(x => !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
-                .Select(x => x.original_single_task_id ?? x.single_task_id)
-                .ToListAsync(ct);
+    .AsNoTracking()
+    .Where(x =>
+        (
+            x.single_task_id.HasValue &&
+            taskIdsToDelete.Contains(x.single_task_id.Value)
+        )
+        ||
+        (
+            x.original_single_task_id.HasValue &&
+            taskIdsToDelete.Contains(x.original_single_task_id.Value)
+        ))
+    .Where(x =>
+        x.status == null ||
+        x.status.ToUpper() != "CANCELLED")
+    .Select(x => x.original_single_task_id ?? x.single_task_id)
+    .ToListAsync(ct);
 
             if (alreadyLinkedTaskIds.Count > 0)
             {

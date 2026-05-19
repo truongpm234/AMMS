@@ -263,8 +263,11 @@ public static class ProductionDependencyValidator
             .Include(x => x.group_task)
                 .ThenInclude(x => x.process)
             .Where(x =>
-                x.single_prod_id == currentTask.prod_id.Value &&
-                !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+    x.single_prod_id == currentTask.prod_id.Value &&
+    (
+        x.status == null ||
+        x.status.ToUpper() != "CANCELLED"
+    ))
             .ToListAsync(ct);
 
         foreach (var link in previousGroupLinks)
