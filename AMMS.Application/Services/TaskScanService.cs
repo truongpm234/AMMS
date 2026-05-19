@@ -648,8 +648,13 @@ namespace AMMS.Application.Services
                 .Include(x => x.process)
                 .Where(x =>
                     x.prod_id == singleProdId &&
-                    !string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(x.status, "Ready", StringComparison.OrdinalIgnoreCase))
+                    (
+                        x.status == null ||
+                        (
+                            x.status.ToUpper() != "FINISHED" &&
+                            x.status.ToUpper() != "READY"
+                        )
+                    ))
                 .OrderBy(x => x.seq_num)
                 .ThenBy(x => x.task_id)
                 .ToListAsync(ct);
@@ -670,54 +675,6 @@ namespace AMMS.Application.Services
             }
 
             await _db.SaveChangesAsync(ct);
-        }
-
-        private static Dictionary<int, int> AllocateGroupQty(
-    int groupQtyGood,
-    List<task_link> links)
-        {
-            var result = new Dictionary<int, int>();
-
-            var totalPlan = links.Sum(x => x.qty_plan);
-
-            if (totalPlan <= 0)
-            {
-                foreach (var link in links)
-                    result[link.order_id] = 0;
-
-                return result;
-            }
-
-            var remaining = groupQtyGood;
-
-            for (var i = 0; i < links.Count; i++)
-            {
-                var link = links[i];
-
-                int qty;
-
-                if (i == links.Count - 1)
-                {
-                    qty = remaining;
-                }
-                else
-                {
-                    qty = (int)Math.Round(
-                        groupQtyGood * (link.qty_plan / (decimal)totalPlan),
-                        MidpointRounding.AwayFromZero);
-
-                    if (qty < 0)
-                        qty = 0;
-
-                    if (qty > remaining)
-                        qty = remaining;
-                }
-
-                result[link.order_id] = qty;
-                remaining -= qty;
-            }
-
-            return result;
         }
 
         private static List<TaskOutputReportDto> AllocateOutputsForOrder(

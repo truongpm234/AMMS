@@ -2043,6 +2043,51 @@ namespace AMMS.Infrastructure.Repositories
             return startedProdId.HasValue;
         }
 
+        private async Task<bool> HasUnfinishedGroupLinksForSingleProductionAsync(
+    int prodId,
+    CancellationToken ct)
+        {
+            var activeLinks = await _db.task_links
+                .AsNoTracking()
+                .Where(x =>
+                    x.single_prod_id == prodId &&
+                    (
+                        x.status == null ||
+                        (
+                            x.status.Trim().ToUpper() != "CANCELLED" &&
+                            x.status.Trim().ToUpper() != "DONE"
+                        )
+                    ))
+                .Select(x => new
+                {
+                    x.group_task_id,
+                    x.process_code,
+                    x.order_id
+                })
+                .ToListAsync(ct);
+
+            if (activeLinks.Count == 0)
+                return false;
+
+            var groupTaskIds = activeLinks
+                .Select(x => x.group_task_id)
+                .Distinct()
+                .ToList();
+
+            var finishedGroupTaskIds = await _db.tasks
+                .AsNoTracking()
+                .Where(x =>
+                    groupTaskIds.Contains(x.task_id) &&
+                    x.status != null &&
+                    x.status.Trim().ToUpper() == "FINISHED")
+                .Select(x => x.task_id)
+                .ToListAsync(ct);
+
+            var finishedSet = finishedGroupTaskIds.ToHashSet();
+
+            return activeLinks.Any(x => !finishedSet.Contains(x.group_task_id));
+        }
+
         public async Task<bool> TryCloseProductionIfCompletedAsync(
     int prodId,
     DateTime now,
@@ -2080,20 +2125,22 @@ namespace AMMS.Infrastructure.Repositories
                 .DefaultIfEmpty(now)
                 .Max();
 
-            var hasUnfinishedGroupLinks = await _db.task_links
+            var hasUnfinishedOwnTasks = await _db.tasks
     .AsNoTracking()
-    .Include(x => x.group_task)
+    .Where(x => x.prod_id == prodId)
     .AnyAsync(x =>
-        x.single_prod_id == prodId &&
-        !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase) &&
-        (
-            !string.Equals(x.status, "Done", StringComparison.OrdinalIgnoreCase) ||
-            x.group_task == null ||
-            !string.Equals(x.group_task.status, "Finished", StringComparison.OrdinalIgnoreCase)
-        ),
+        x.status == null ||
+        x.status.Trim().ToUpper() != "FINISHED",
         ct);
 
-            if (hasUnfinishedGroupLinks)
+            if (hasUnfinishedOwnTasks)
+                return false;
+
+            var hasUnfinishedGroup = await HasUnfinishedGroupLinksForSingleProductionAsync(
+                prodId,
+                ct);
+
+            if (hasUnfinishedGroup)
                 return false;
 
             prod.end_date = finishedAt;

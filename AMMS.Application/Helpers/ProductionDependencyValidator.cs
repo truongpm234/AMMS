@@ -99,6 +99,22 @@ public static class ProductionDependencyValidator
             };
         }
 
+        if (!currentTask.prod_id.HasValue || currentTask.prod == null)
+        {
+            return new ProductionDependencyCheckResult
+            {
+                can_start = false,
+                issues = new List<ProductionDependencyIssueDto>
+                {
+                    new()
+                    {
+                        current_task_id = taskId,
+                        message = $"Task {taskId} chưa gắn production."
+                    }
+                }
+            };
+        }
+
         var prod = await db.productions
     .AsNoTracking()
     .FirstOrDefaultAsync(x => x.prod_id == currentTask.prod_id.Value, ct);
@@ -129,22 +145,6 @@ public static class ProductionDependencyValidator
     }
                 };
             }
-        }
-
-        if (!currentTask.prod_id.HasValue || currentTask.prod == null)
-        {
-            return new ProductionDependencyCheckResult
-            {
-                can_start = false,
-                issues = new List<ProductionDependencyIssueDto>
-                {
-                    new()
-                    {
-                        current_task_id = taskId,
-                        message = $"Task {taskId} chưa gắn production."
-                    }
-                }
-            };
         }
 
         var currentProcessCode = Norm(currentTask.process?.process_code);

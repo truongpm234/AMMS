@@ -149,9 +149,22 @@ namespace AMMS.Application.Services
             return true;
         }
 
+        private static bool StatusEquals(string? status, string expected)
+        {
+            return string.Equals(
+                status?.Trim(),
+                expected,
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsFinishedStatus(string? status, DateTime? endTime = null)
+        {
+            return StatusEquals(status, "Finished") || endTime != null;
+        }
+
         private async Task EnsureGroupPrerequisiteFinishedAsync(
-    int groupTaskId,
-    CancellationToken ct)
+            int groupTaskId,
+            CancellationToken ct)
         {
             var groupTask = await _db.tasks
                 .AsNoTracking()
@@ -171,7 +184,10 @@ namespace AMMS.Application.Services
                 .AsNoTracking()
                 .Where(x =>
                     x.group_task_id == groupTaskId &&
-                    !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
                 .ToListAsync(ct);
 
             if (links.Count == 0)
@@ -179,7 +195,6 @@ namespace AMMS.Application.Services
 
             foreach (var link in links)
             {
-                // Check task riêng phía trước trong production single.
                 var notFinishedBefore = await _db.tasks
                     .AsNoTracking()
                     .Include(x => x.process)
@@ -187,7 +202,10 @@ namespace AMMS.Application.Services
                         x.prod_id == link.single_prod_id &&
                         x.seq_num.HasValue &&
                         x.seq_num.Value < groupSeq &&
-                        !string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase))
+                        (
+                            x.status == null ||
+                            x.status.ToUpper() != "FINISHED"
+                        ))
                     .OrderBy(x => x.seq_num)
                     .ThenBy(x => x.task_id)
                     .ToListAsync(ct);
@@ -199,44 +217,70 @@ namespace AMMS.Application.Services
                         $"Còn thiếu: {string.Join(",", notFinishedBefore.Select(x => x.process?.process_code ?? x.name))}");
                 }
 
-                // Check group task trước đó nếu group nhiều công đoạn liên tiếp.
                 var previousGroupLinks = await _db.task_links
                     .AsNoTracking()
-                    .Include(x => x.group_task)
-                        .ThenInclude(x => x.process)
                     .Where(x =>
                         x.single_prod_id == link.single_prod_id &&
                         x.group_task_id != groupTaskId &&
-                        !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                        (
+                            x.status == null ||
+                            x.status.ToUpper() != "CANCELLED"
+                        ))
+                    .Select(x => new
+                    {
+                        x.group_task_id,
+                        x.order_id,
+                        x.process_code
+                    })
                     .ToListAsync(ct);
+
+                if (previousGroupLinks.Count == 0)
+                    continue;
+
+                var prevGroupTaskIds = previousGroupLinks
+                    .Select(x => x.group_task_id)
+                    .Distinct()
+                    .ToList();
+
+                var prevGroupTasks = await _db.tasks
+                    .AsNoTracking()
+                    .Include(x => x.process)
+                    .Where(x => prevGroupTaskIds.Contains(x.task_id))
+                    .ToDictionaryAsync(x => x.task_id, ct);
 
                 foreach (var prev in previousGroupLinks)
                 {
-                    if (prev.group_task == null || !prev.group_task.seq_num.HasValue)
+                    if (!prevGroupTasks.TryGetValue(prev.group_task_id, out var prevGroupTask))
                         continue;
 
-                    if (prev.group_task.seq_num.Value >= groupSeq)
+                    if (!prevGroupTask.seq_num.HasValue)
                         continue;
 
-                    if (!string.Equals(prev.group_task.status, "Finished", StringComparison.OrdinalIgnoreCase))
+                    if (prevGroupTask.seq_num.Value >= groupSeq)
+                        continue;
+
+                    if (!IsFinishedStatus(prevGroupTask.status, prevGroupTask.end_time))
                     {
                         throw new InvalidOperationException(
                             $"Order {link.order_id} chưa hoàn thành công đoạn ghép trước đó: {prev.process_code}.");
                     }
 
+                    var prevProcessCode = NormCode(prev.process_code);
+
                     var hasQty = await _db.task_qtys
                         .AsNoTracking()
                         .AnyAsync(x =>
                             x.group_task_id == prev.group_task_id &&
-                            x.order_id == prev.order_id &&
-                            x.process_code == prev.process_code &&
+                            x.order_id == link.order_id &&
+                            x.process_code != null &&
+                            x.process_code.Trim().ToUpper() == prevProcessCode &&
                             x.qty_good > 0,
                             ct);
 
                     if (!hasQty)
                     {
                         throw new InvalidOperationException(
-                            $"Công đoạn ghép {prev.process_code} đã Finished nhưng chưa có sản lượng phân bổ cho order {prev.order_id}.");
+                            $"Order {link.order_id} đã xong group task {prev.process_code} nhưng chưa có sản lượng phân bổ.");
                     }
                 }
             }
@@ -244,11 +288,7 @@ namespace AMMS.Application.Services
 
         private static string NormCode(string? code)
         {
-            return (code ?? "")
-                .Trim()
-                .ToUpperInvariant()
-                .Replace(" ", "_")
-                .Replace("-", "_");
+            return (code ?? "").Trim().ToUpperInvariant();
         }
 
         public async Task<FinishTasksFromStockResponse> FinishTasksFromStockAsync(List<int> taskIds, int? scannedByUserId = null, CancellationToken ct = default)
