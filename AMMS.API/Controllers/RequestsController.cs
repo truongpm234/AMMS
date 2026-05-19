@@ -1168,5 +1168,92 @@ namespace AMMS.API.Controllers
                 return BadRequest(new { message = ex.Message });
             }
         }
+
+        [HttpPost("fake-payment-success/{orderRequestId:int}")]
+        public async Task<IActionResult> FakePaymentSuccess(
+            int orderRequestId,
+            CancellationToken ct)
+        {
+            try
+            {
+                // Chỉ cho phép DEV
+                //if (!_config.GetValue<bool>("Payment:AllowFakePayment"))
+                //{
+                //    return Forbid("Fake payment is disabled");
+                //}
+
+                var req = await _db.order_requests
+                    .FirstOrDefaultAsync(x => x.order_request_id == orderRequestId, ct);
+
+                if (req == null)
+                    return NotFound(new { message = "Request not found" });
+
+                if (string.Equals(req.process_status, "Accepted", StringComparison.OrdinalIgnoreCase))
+                {
+                    return BadRequest(new
+                    {
+                        message = "Request already accepted"
+                    });
+                }
+
+                // Lấy payment pending mới nhất
+                var payment = await _db.payments
+                    .Where(x =>
+                        x.order_request_id == orderRequestId &&
+                        x.provider == "PAYOS" &&
+                        x.status == "PENDING")
+                    .OrderByDescending(x => x.payment_id)
+                    .FirstOrDefaultAsync(ct);
+
+                if (payment == null)
+                {
+                    return BadRequest(new
+                    {
+                        message = "No pending payment found"
+                    });
+                }
+
+                // Fake raw webhook json
+                var fakeRaw = JsonSerializer.Serialize(new
+                {
+                    code = "00",
+                    success = true,
+                    data = new
+                    {
+                        orderCode = payment.order_code,
+                        amount = payment.amount,
+                        status = "PAID",
+                        code_internal = "00",
+                        desc = "Thanh toán thành công"
+                    }
+                });
+
+                var result = await _paymentService.ProcessPaidAsync(
+                    orderRequestId: orderRequestId,
+                    orderCode: payment.order_code,
+                    amount: (long)payment.amount,
+                    paymentLinkId: payment.payos_payment_link_id ?? $"FAKE_LINK_{payment.order_code}",
+                    transactionId: $"FAKE_TXN_{Guid.NewGuid():N}",
+                    rawJson: fakeRaw,
+                    estimateIdFromQuery: payment.estimate_id,
+                    quoteIdFromQuery: payment.quote_id,
+                    ct: ct);
+
+                return Ok(new
+                {
+                    success = result.ok,
+                    message = result.message,
+                    request_id = orderRequestId,
+                    order_code = payment.order_code
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = ex.Message
+                });
+            }
+        }
     }
 }

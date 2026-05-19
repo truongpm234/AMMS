@@ -176,7 +176,7 @@ builder.Services.AddAuthorization(options =>
         policy.RequireClaim("roleid", "5"));
     options.AddPolicy("staff", policy =>
         policy.RequireClaim("roleid", "6"));
-    options.AddPolicy("admin, manager", policy =>
+    options.AddPolicy("admin,manager", policy =>
         policy.RequireClaim("roleid", "1", "3"));
 });
 
