@@ -222,24 +222,34 @@ public static class ProductionDependencyValidator
         if (!currentTask.seq_num.HasValue)
             return (false, "Task thiếu seq_num.");
 
+        var currentProdId = currentTask.prod_id.Value;
         var currentSeq = currentTask.seq_num.Value;
 
         var prod = await db.productions
             .AsNoTracking()
-            .FirstOrDefaultAsync(x => x.prod_id == currentTask.prod_id.Value, ct);
+            .FirstOrDefaultAsync(x => x.prod_id == currentProdId, ct);
 
         if (prod == null)
             return (false, "Không tìm thấy production.");
 
+        /*
+         * Không được dùng:
+         * !string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase)
+         *
+         * Vì EF Core không translate được StringComparison.
+         */
         var previousUnfinishedTasks = await db.tasks
             .AsNoTracking()
             .Include(x => x.process)
             .Where(x =>
-                x.prod_id == currentTask.prod_id.Value &&
+                x.prod_id == currentProdId &&
                 x.task_id != currentTask.task_id &&
                 x.seq_num.HasValue &&
                 x.seq_num.Value < currentSeq &&
-                !string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase))
+                (
+                    x.status == null ||
+                    x.status.ToUpper() != "FINISHED"
+                ))
             .OrderBy(x => x.seq_num)
             .ThenBy(x => x.task_id)
             .ToListAsync(ct);
@@ -258,28 +268,54 @@ public static class ProductionDependencyValidator
 
         var orderId = prod.order_id.Value;
 
+        /*
+         * Lấy task_links trước.
+         * Không dùng Include group_task để tránh phụ thuộc navigation.
+         */
         var previousGroupLinks = await db.task_links
             .AsNoTracking()
-            .Include(x => x.group_task)
-                .ThenInclude(x => x.process)
             .Where(x =>
-    x.single_prod_id == currentTask.prod_id.Value &&
-    (
-        x.status == null ||
-        x.status.ToUpper() != "CANCELLED"
-    ))
+                x.single_prod_id == currentProdId &&
+                (
+                    x.status == null ||
+                    x.status.ToUpper() != "CANCELLED"
+                ))
             .ToListAsync(ct);
+
+        if (previousGroupLinks.Count == 0)
+            return (true, "");
+
+        var groupTaskIds = previousGroupLinks
+            .Select(x => x.group_task_id)
+            .Distinct()
+            .ToList();
+
+        var groupTasks = await db.tasks
+            .AsNoTracking()
+            .Include(x => x.process)
+            .Where(x => groupTaskIds.Contains(x.task_id))
+            .ToDictionaryAsync(x => x.task_id, ct);
 
         foreach (var link in previousGroupLinks)
         {
-            var groupTask = link.group_task;
-
-            if (groupTask == null)
-                return (false, $"Công đoạn ghép {link.process_code} chưa có group task hợp lệ.");
+            if (!groupTasks.TryGetValue(link.group_task_id, out var groupTask))
+            {
+                return (false,
+                    $"Công đoạn ghép {link.process_code} chưa có group task hợp lệ.");
+            }
 
             if (!groupTask.seq_num.HasValue)
-                return (false, $"Công đoạn ghép {link.process_code} thiếu seq_num.");
+            {
+                return (false,
+                    $"Công đoạn ghép {link.process_code} thiếu seq_num.");
+            }
 
+            /*
+             * Chỉ check các group task nằm trước task hiện tại.
+             * Ví dụ:
+             * - Task hiện tại là DAN seq 8
+             * - Group PHU/CAN seq 4/5 phải Finished
+             */
             if (groupTask.seq_num.Value >= currentSeq)
                 continue;
 
@@ -290,12 +326,17 @@ public static class ProductionDependencyValidator
                     $"group_task_id={groupTask.task_id}, status={groupTask.status}");
             }
 
+            var linkProcessCode = (link.process_code ?? "")
+                .Trim()
+                .ToUpperInvariant();
+
             var hasQty = await db.task_qtys
                 .AsNoTracking()
                 .AnyAsync(x =>
                     x.group_task_id == groupTask.task_id &&
                     x.order_id == orderId &&
-                    x.process_code == link.process_code &&
+                    x.process_code != null &&
+                    x.process_code.ToUpper() == linkProcessCode &&
                     x.qty_good > 0,
                     ct);
 
@@ -449,7 +490,7 @@ public static class ProductionDependencyValidator
 
     private static bool IsFinished(string? status, DateTime? endTime)
     {
-        return string.Equals(status, "Finished", StringComparison.OrdinalIgnoreCase)
+        return string.Equals(status, "Finished")
                || endTime != null;
     }
 
