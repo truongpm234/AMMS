@@ -775,6 +775,9 @@ public partial class AppDbContext : DbContext
                 .HasColumnType("timestamp without time zone")
                 .HasDefaultValueSql("CURRENT_TIMESTAMP");
 
+            entity.Property(x => x.done_at)
+                .HasColumnType("timestamp without time zone");
+
             entity.HasIndex(x => new { x.group_task_id, x.single_task_id })
                 .IsUnique();
         });
