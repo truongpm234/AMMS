@@ -833,7 +833,12 @@ namespace AMMS.Application.Services
 
             var links = await _db.task_links
                 .AsNoTracking()
-                .Where(x => x.group_task_id == groupTaskId)
+                .Where(x =>
+                    x.group_task_id == groupTaskId &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
                 .OrderBy(x => x.id)
                 .ToListAsync(ct);
 
@@ -851,13 +856,20 @@ namespace AMMS.Application.Services
 
             foreach (var link in links)
             {
-                var singleCtx = await GetTaskEstimateContextAsync((int)link.single_task_id, ct);
+                var singleCtx = await GetGroupLinkEstimateContextAsync(
+                    groupTask,
+                    link,
+                    ct);
 
                 if (singleCtx == null)
                     continue;
 
                 var mats = await BuildConsumableMaterialsAsync(singleCtx, ct);
-                var refs = await BuildReferenceInputsAsync(singleCtx, ct);
+                var refs = await BuildReferenceInputsForGroupLinkAsync(
+                    singleCtx,
+                    link.order_id,
+                    link.process_code ?? groupTask.process?.process_code,
+                    ct);
 
                 allMaterials.AddRange(mats);
                 allRefs.AddRange(refs);
@@ -868,6 +880,174 @@ namespace AMMS.Application.Services
                 consumable_materials = AggregateConsumableMaterials(allMaterials),
                 reference_inputs = AggregateReferenceInputs(allRefs)
             };
+        }
+
+        private async Task<TaskEstimateContext?> GetGroupLinkEstimateContextAsync(
+    task groupTask,
+    task_link link,
+    CancellationToken ct)
+        {
+            if (link.single_prod_id <= 0)
+                return null;
+
+            if (link.order_id <= 0)
+                return null;
+
+            var singleProd = await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x =>
+                    x.prod_id == link.single_prod_id &&
+                    x.order_id == link.order_id,
+                    ct);
+
+            if (singleProd == null)
+                return null;
+
+            var req = await _db.order_requests
+                .AsNoTracking()
+                .Where(x => x.order_id == link.order_id)
+                .OrderByDescending(x => x.order_request_id)
+                .FirstOrDefaultAsync(ct);
+
+            if (req == null)
+                return null;
+
+            cost_estimate? est = null;
+
+            if (req.accepted_estimate_id.HasValue && req.accepted_estimate_id.Value > 0)
+            {
+                est = await _db.cost_estimates
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x =>
+                        x.estimate_id == req.accepted_estimate_id.Value &&
+                        x.order_request_id == req.order_request_id,
+                        ct);
+            }
+
+            est ??= await _db.cost_estimates
+                .AsNoTracking()
+                .Where(x => x.order_request_id == req.order_request_id)
+                .OrderByDescending(x => x.is_active)
+                .ThenByDescending(x => x.estimate_id)
+                .FirstOrDefaultAsync(ct);
+
+            if (est == null)
+                return null;
+
+            /*
+             * Task single đã bị xóa nên không thể lấy theo single_task_id.
+             * Tạo task context giả để BuildConsumableMaterialsAsync đọc process_code.
+             */
+            var fakeTask = new task
+            {
+                task_id = groupTask.task_id,
+                prod_id = singleProd.prod_id,
+                seq_num = groupTask.seq_num,
+                process_id = groupTask.process_id,
+                process = groupTask.process,
+                input_mode = "MANUAL"
+            };
+
+            return new TaskEstimateContext
+            {
+                Task = fakeTask,
+                Production = singleProd,
+                Request = req,
+                Estimate = est
+            };
+        }
+
+        private async Task<List<TaskReferenceInputDto>> BuildReferenceInputsForGroupLinkAsync(
+    TaskEstimateContext ctx,
+    int orderId,
+    string? currentProcessCode,
+    CancellationToken ct)
+        {
+            var currentCode = ProductionFlowHelper.Norm(currentProcessCode);
+
+            if (string.IsNullOrWhiteSpace(currentCode))
+                return new List<TaskReferenceInputDto>();
+
+            var routeCodes = await ResolveRouteProcessCodesForOrderAsync(orderId, ct);
+
+            if (routeCodes.Count == 0)
+                return new List<TaskReferenceInputDto>();
+
+            var currentIndex = routeCodes.FindIndex(x =>
+                string.Equals(
+                    ProductionFlowHelper.Norm(x),
+                    currentCode,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (currentIndex <= 0)
+                return new List<TaskReferenceInputDto>();
+
+            var previousCode = ProductionFlowHelper.Norm(routeCodes[currentIndex - 1]);
+
+            var (unit, qty) = ResolveReferenceInputShape(
+                currentProcessCode: currentCode,
+                currentStageIndex: currentIndex,
+                routeProcessCodes: routeCodes,
+                ctx: ctx);
+
+            return new List<TaskReferenceInputDto>
+    {
+        new TaskReferenceInputDto
+        {
+            input_code = previousCode,
+            input_name = $"Bán thành phẩm từ công đoạn {previousCode}",
+            unit = unit,
+            estimated_qty = Math.Round(qty, 4)
+        }
+    };
+        }
+
+        private async Task<List<string?>> ResolveRouteProcessCodesForOrderAsync(
+    int orderId,
+    CancellationToken ct)
+        {
+            var item = await _db.order_items
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderBy(x => x.item_id)
+                .Select(x => new
+                {
+                    x.product_type_id,
+                    x.production_process
+                })
+                .FirstOrDefaultAsync(ct);
+
+            var fromOrderItem = ParseProcessRouteCsv(item?.production_process)
+                .Cast<string?>()
+                .ToList();
+
+            if (fromOrderItem.Count > 0)
+                return fromOrderItem;
+
+            if (item?.product_type_id == null || item.product_type_id.Value <= 0)
+                return new List<string?>();
+
+            return await _db.product_type_processes
+                .AsNoTracking()
+                .Where(x =>
+                    x.product_type_id == item.product_type_id.Value &&
+                    (x.is_active ?? true))
+                .OrderBy(x => x.seq_num)
+                .Select(x => (string?)x.process_code)
+                .ToListAsync(ct);
+        }
+
+        private static List<string> ParseProcessRouteCsv(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim().ToUpperInvariant())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         private static List<TaskConsumableMaterialDto> AggregateConsumableMaterials(
