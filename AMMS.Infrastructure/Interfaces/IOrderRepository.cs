@@ -28,5 +28,36 @@ namespace AMMS.Infrastructure.Interfaces
         Task RecalculateIsEnoughForOrdersAsync(CancellationToken ct = default);
         Task<List<order_item>> GetOrderItemsByOrderIdAsync(int orderId, CancellationToken ct = default);
         Task<bool> IsOrderEnoughByOrderIdAsync(int orderId, CancellationToken ct = default);
+        Task<OrderProductionTrackingRawResult> GetProductionTrackingByOrderStatusAsync(
+            string status,
+            int page,
+            int pageSize,
+            CancellationToken ct = default);
+    }
+    public class OrderProductionTrackingRawResult
+    {
+        public int Page { get; set; }
+        public int PageSize { get; set; }
+        public bool HasNext { get; set; }
+
+        public List<order> Orders { get; set; } = new();
+        public List<OrderRequestLiteRaw> Requests { get; set; } = new();
+        public List<production> Productions { get; set; } = new();
+        public List<task> Tasks { get; set; } = new();
+        public List<task_log> TaskLogs { get; set; } = new();
+        public List<ProdOrderLiteRaw> ProdOrders { get; set; } = new();
+    }
+
+    public class OrderRequestLiteRaw
+    {
+        public int order_request_id { get; set; }
+        public int? order_id { get; set; }
+    }
+
+    public class ProdOrderLiteRaw
+    {
+        public int order_id { get; set; }
+        public int prod_id { get; set; }
+        public int? single_prod_id { get; set; }
     }
 }
