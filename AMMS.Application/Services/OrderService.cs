@@ -101,5 +101,145 @@ namespace AMMS.Application.Services
         {
             return _orderRepo.GetAllOrderInprocessStatus();
         }
+
+        public async Task<PagedResultLite<OrderProductionTrackingDto>> GetProductionTrackingByOrderStatusAsync(
+    string status,
+    int page,
+    int pageSize,
+    CancellationToken ct = default)
+        {
+            if (string.IsNullOrWhiteSpace(status))
+                throw new ArgumentException("status không được để trống");
+
+            if (page <= 0) page = 1;
+            if (pageSize <= 0) pageSize = 10;
+            if (pageSize > 200) pageSize = 200;
+
+            status = status.Trim();
+
+            var raw = await _orderRepo.GetProductionTrackingByOrderStatusAsync(
+                status,
+                page,
+                pageSize,
+                ct);
+
+            var data = raw.Orders.Select(o =>
+            {
+                var requestIds = raw.Requests
+                    .Where(r => r.order_id == o.order_id)
+                    .Select(r => r.order_request_id)
+                    .Distinct()
+                    .ToList();
+
+                var linkedProdIds = raw.ProdOrders
+                    .Where(x => x.order_id == o.order_id)
+                    .SelectMany(x =>
+                        x.single_prod_id == null
+                            ? new[] { x.prod_id }
+                            : new[] { x.prod_id, x.single_prod_id.Value })
+                    .ToHashSet();
+
+                if (o.production_id != null)
+                    linkedProdIds.Add(o.production_id.Value);
+
+                var relatedProductions = raw.Productions
+                    .Where(p =>
+                        (p.order_id != null && p.order_id.Value == o.order_id) ||
+                        linkedProdIds.Contains(p.prod_id))
+                    .GroupBy(p => p.prod_id)
+                    .Select(g => g.First())
+                    .OrderBy(p => p.planned_start_date)
+                    .ThenBy(p => p.prod_id)
+                    .ToList();
+
+                return new OrderProductionTrackingDto
+                {
+                    request_id = requestIds.Count > 0 ? requestIds[0] : null,
+
+                    order_id = o.order_id,
+                    order_status = o.status,
+
+                    productions = relatedProductions.Select(p => new ProductionTrackingDto
+                    {
+                        prod_id = p.prod_id,
+                        code = p.code,
+                        order_id = p.order_id,
+                        manager_id = p.manager_id,
+                        end_date = p.end_date,
+                        status = p.status,
+                        product_type_id = p.product_type_id,
+                        note = p.note,
+                        created_at = p.created_at,
+                        planned_start_date = p.planned_start_date,
+                        actual_start_date = p.actual_start_date,
+                        is_full_process = p.is_full_process,
+                        sub_product_used_qty = p.sub_product_used_qty,
+                        import_recieve_path = p.import_recieve_path,
+                        sub_product_id = p.sub_product_id,
+                        nvl_qty = p.nvl_qty,
+                        prod_method = p.prod_method,
+                        gm_note = p.gm_note,
+                        mgr_note = p.mgr_note,
+                        prod_kind = p.prod_kind,
+                        group_process_codes = p.group_process_codes,
+                        group_total_qty = p.group_total_qty,
+                        gm_proposed_method = p.gm_proposed_method,
+
+                        tasks = raw.Tasks
+                            .Where(t => t.prod_id == p.prod_id)
+                            .OrderBy(t => t.seq_num)
+                            .ThenBy(t => t.task_id)
+                            .Select(t => new TaskTrackingDto
+                            {
+                                task_id = t.task_id,
+                                prod_id = t.prod_id,
+                                name = t.name,
+                                seq_num = t.seq_num,
+                                status = t.status,
+                                machine = t.machine,
+                                start_time = t.start_time,
+                                end_time = t.end_time,
+                                process_id = t.process_id,
+                                planned_start_time = t.planned_start_time,
+                                planned_end_time = t.planned_end_time,
+                                reason = t.reason,
+                                is_taken_sub_product = t.is_taken_sub_product,
+                                input_mode = t.input_mode,
+
+                                task_logs = raw.TaskLogs
+                                    .Where(l => l.task_id == t.task_id)
+                                    .OrderByDescending(l => l.log_time)
+                                    .ThenByDescending(l => l.log_id)
+                                    .Select(l => new TaskLogTrackingDto
+                                    {
+                                        log_id = l.log_id,
+                                        task_id = l.task_id,
+                                        scanned_code = l.scanned_code,
+                                        action_type = l.action_type,
+                                        qty_good = l.qty_good,
+                                        log_time = l.log_time,
+                                        scanned_by_user_id = l.scanned_by_user_id,
+                                        material_usage_json = l.material_usage_json,
+                                        reason = l.reason,
+                                        report_image_url = l.report_image_url,
+                                        reference_input_json = l.reference_input_json,
+                                        output_json = l.output_json
+                                    })
+                                    .ToList()
+                            })
+                            .ToList()
+                    })
+                    .ToList()
+                };
+            }).ToList();
+
+            return new PagedResultLite<OrderProductionTrackingDto>
+            {
+                Page = raw.Page,
+                PageSize = raw.PageSize,
+                HasNext = raw.HasNext,
+                Data = data
+            };
+        }
     }
 }

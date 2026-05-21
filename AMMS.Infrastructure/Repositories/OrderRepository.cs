@@ -1127,5 +1127,128 @@ namespace AMMS.Infrastructure.Repositories
             "" => "Keo Nước",
             _ => coatingType ?? "Keo nước"
         };
+
+        public async Task<OrderProductionTrackingRawResult> GetProductionTrackingByOrderStatusAsync(
+    string status,
+    int page,
+    int pageSize,
+    CancellationToken ct = default)
+        {
+            var orderRows = await _db.orders
+                .AsNoTracking()
+                .Where(o => o.status == status)
+                .OrderByDescending(o => o.order_date)
+                .ThenByDescending(o => o.order_id)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize + 1)
+                .ToListAsync(ct);
+
+            var hasNext = orderRows.Count > pageSize;
+
+            if (hasNext)
+                orderRows.RemoveAt(orderRows.Count - 1);
+
+            if (orderRows.Count == 0)
+            {
+                return new OrderProductionTrackingRawResult
+                {
+                    Page = page,
+                    PageSize = pageSize,
+                    HasNext = false
+                };
+            }
+
+            var orderIds = orderRows
+                .Select(o => o.order_id)
+                .Distinct()
+                .ToList();
+
+            var orderProductionIds = orderRows
+                .Where(o => o.production_id != null)
+                .Select(o => o.production_id!.Value)
+                .Distinct()
+                .ToList();
+
+            var requests = await _db.order_requests
+                .AsNoTracking()
+                .Where(r => r.order_id != null && orderIds.Contains(r.order_id.Value))
+                .Select(r => new OrderRequestLiteRaw
+                {
+                    order_request_id = r.order_request_id,
+                    order_id = r.order_id
+                })
+                .ToListAsync(ct);
+
+            var prodOrders = await _db.prod_orders
+                .AsNoTracking()
+                .Where(po => orderIds.Contains(po.order_id))
+                .Select(po => new ProdOrderLiteRaw
+                {
+                    order_id = po.order_id,
+                    prod_id = po.prod_id,
+                    single_prod_id = po.single_prod_id
+                })
+                .ToListAsync(ct);
+
+            var prodIdsFromProdOrders = prodOrders
+                .Select(x => x.prod_id)
+                .Concat(
+                    prodOrders
+                        .Where(x => x.single_prod_id != null)
+                        .Select(x => x.single_prod_id!.Value)
+                )
+                .Distinct()
+                .ToList();
+
+            var allRelatedProdIds = orderProductionIds
+                .Concat(prodIdsFromProdOrders)
+                .Distinct()
+                .ToList();
+
+            var productions = await _db.productions
+                .AsNoTracking()
+                .Where(p =>
+                    (p.order_id != null && orderIds.Contains(p.order_id.Value)) ||
+                    allRelatedProdIds.Contains(p.prod_id))
+                .ToListAsync(ct);
+
+            var productionIds = productions
+                .Select(p => p.prod_id)
+                .Distinct()
+                .ToList();
+
+            var tasks = await _db.tasks
+                .AsNoTracking()
+                .Where(t => t.prod_id != null && productionIds.Contains(t.prod_id.Value))
+                .OrderBy(t => t.seq_num)
+                .ThenBy(t => t.task_id)
+                .ToListAsync(ct);
+
+            var taskIds = tasks
+                .Select(t => t.task_id)
+                .Distinct()
+                .ToList();
+
+            var taskLogs = await _db.task_logs
+                .AsNoTracking()
+                .Where(l => l.task_id != null && taskIds.Contains(l.task_id.Value))
+                .OrderByDescending(l => l.log_time)
+                .ThenByDescending(l => l.log_id)
+                .ToListAsync(ct);
+
+            return new OrderProductionTrackingRawResult
+            {
+                Page = page,
+                PageSize = pageSize,
+                HasNext = hasNext,
+
+                Orders = orderRows,
+                Requests = requests,
+                Productions = productions,
+                Tasks = tasks,
+                TaskLogs = taskLogs,
+                ProdOrders = prodOrders
+            };
+        }
     }
 }

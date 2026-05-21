@@ -282,5 +282,31 @@ CancellationToken ct)
 
         private string GetBackendBaseUrl()
             => NormalizeBaseUrl(_config["Deal:BaseUrl"], "https://amms-juaa.onrender.com");
+
+        [HttpGet("tracking-by-status")]
+        public async Task<IActionResult> GetProductionTrackingByStatus(
+    [FromQuery] string status,
+    [FromQuery] int page = 1,
+    [FromQuery] int pageSize = 10,
+    CancellationToken ct = default)
+        {
+            try
+            {
+                var result = await _service.GetProductionTrackingByOrderStatusAsync(
+                    status,
+                    page,
+                    pageSize,
+                    ct);
+
+                return Ok(result);
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message
+                });
+            }
+        }
     }
 }
