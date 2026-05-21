@@ -1,9 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using AMMS.Infrastructure.Entities;
+﻿using AMMS.Infrastructure.Entities;
 using QuestPDF.Fluent;
 using QuestPDF.Helpers;
 using QuestPDF.Infrastructure;
@@ -12,114 +7,30 @@ namespace AMMS.Application.Helpers
 {
     public static class SubProductImportReceiptPdfHelper
     {
-        public static byte[] GeneratePdf(sub_product sp)
+        public static byte[] GeneratePdf(IReadOnlyList<sub_product> items)
         {
-            var productTypeName = sp.product_type?.name ?? $"ProductType #{sp.product_type_id}";
+            if (items == null || items.Count == 0)
+                throw new InvalidOperationException("Không có bán thành phẩm để tạo phiếu nhập.");
+
             var now = DateTime.Now;
+            var receiptNo = $"BTP-IN-{now:yyyyMMdd-HHmmss}";
+            var totalQty = items.Sum(x => x.quantity);
 
             return Document.Create(container =>
             {
                 container.Page(page =>
                 {
                     page.Size(PageSizes.A4);
-                    page.Margin(32);
+                    page.Margin(28);
                     page.PageColor(Colors.White);
 
                     page.DefaultTextStyle(x => x
                         .FontFamily("DejaVu Sans")
-                        .FontSize(10));
+                        .FontSize(9));
 
-                    page.Header().Column(col =>
-                    {
-                        col.Item().Row(row =>
-                        {
-                            row.RelativeItem().Column(left =>
-                            {
-                                left.Item().Text("AMMS - PHIẾU NHẬP BÁN THÀNH PHẨM")
-                                    .Bold()
-                                    .FontSize(15);
+                    page.Header().Element(c => ComposeHeader(c, receiptNo, now));
 
-                                left.Item().Text("Phiếu được tạo tự động từ hệ thống sau khi công đoạn sản xuất báo cáo dư bán thành phẩm.")
-                                    .FontSize(9)
-                                    .FontColor(Colors.Grey.Darken1);
-                            });
-
-                            row.ConstantItem(170).AlignRight().Column(right =>
-                            {
-                                right.Item().Text($"Mã phiếu: SP-IN-{sp.id:D6}")
-                                    .Bold();
-
-                                right.Item().Text($"Ngày tạo: {now:dd/MM/yyyy HH:mm}");
-                            });
-                        });
-
-                        col.Item().PaddingTop(10).LineHorizontal(1);
-                    });
-
-                    page.Content().PaddingTop(18).Column(col =>
-                    {
-                        col.Spacing(12);
-
-                        col.Item().Text("THÔNG TIN BÁN THÀNH PHẨM")
-                            .Bold()
-                            .FontSize(13);
-
-                        col.Item().Table(table =>
-                        {
-                            table.ColumnsDefinition(columns =>
-                            {
-                                columns.ConstantColumn(170);
-                                columns.RelativeColumn();
-                            });
-
-                            AddRow("Mã bán thành phẩm", sp.id.ToString());
-                            AddRow("Loại sản phẩm", productTypeName);
-                            AddRow("Product type ID", sp.product_type_id.ToString());
-                            AddRow("Kích thước", $"{sp.width?.ToString() ?? "-"} x {sp.length?.ToString() ?? "-"}");
-                            AddRow("Công đoạn bán thành phẩm", sp.product_process ?? "-");
-                            AddRow("Số lượng nhập", sp.quantity.ToString("N0"));
-                            AddRow("Trạng thái active", sp.is_active ? "Đã active" : "Chờ nhập kho");
-                            AddRow("Trạng thái nhập kho", sp.is_imported ? "Đã nhập" : "Chưa nhập");
-                            AddRow("Nguồn task", sp.source_task_id?.ToString() ?? "-");
-                            AddRow("Nguồn production", sp.source_prod_id?.ToString() ?? "-");
-                            AddRow("Nguồn order", sp.source_order_id?.ToString() ?? "-");
-                            AddRow("Ghi chú", sp.description ?? "-");
-
-                            void AddRow(string label, string value)
-                            {
-                                table.Cell().Element(LabelCell).Text(label).SemiBold();
-                                table.Cell().Element(ValueCell).Text(value);
-                            }
-                        });
-
-                        col.Item().PaddingTop(10).Text("XÁC NHẬN")
-                            .Bold()
-                            .FontSize(13);
-
-                        col.Item().Row(row =>
-                        {
-                            row.RelativeItem().AlignCenter().Column(c =>
-                            {
-                                c.Item().Text("Người lập phiếu").Bold();
-                                c.Item().PaddingTop(4).Text("(Ký, ghi rõ họ tên)").Italic();
-                                c.Item().PaddingTop(70).Text("");
-                            });
-
-                            row.RelativeItem().AlignCenter().Column(c =>
-                            {
-                                c.Item().Text("Thủ kho").Bold();
-                                c.Item().PaddingTop(4).Text("(Ký, ghi rõ họ tên)").Italic();
-                                c.Item().PaddingTop(70).Text("");
-                            });
-
-                            row.RelativeItem().AlignCenter().Column(c =>
-                            {
-                                c.Item().Text("Quản lý sản xuất").Bold();
-                                c.Item().PaddingTop(4).Text("(Ký, ghi rõ họ tên)").Italic();
-                                c.Item().PaddingTop(70).Text("");
-                            });
-                        });
-                    });
+                    page.Content().Element(c => ComposeContent(c, items, totalQty));
 
                     page.Footer().AlignCenter().Text(text =>
                     {
@@ -132,23 +43,182 @@ namespace AMMS.Application.Helpers
             }).GeneratePdf();
         }
 
-        private static IContainer LabelCell(IContainer container)
+        private static void ComposeHeader(
+            IContainer container,
+            string receiptNo,
+            DateTime now)
+        {
+            container.Column(column =>
+            {
+                column.Spacing(6);
+
+                column.Item().Row(row =>
+                {
+                    row.RelativeItem().Column(left =>
+                    {
+                        left.Item().Text("AMMS - PHIẾU NHẬP BÁN THÀNH PHẨM")
+                            .Bold()
+                            .FontSize(15);
+
+                        left.Item().Text("Phiếu được tạo tự động từ hệ thống sản xuất.")
+                            .FontSize(9)
+                            .FontColor(Colors.Grey.Darken1);
+                    });
+
+                    row.ConstantItem(180).AlignRight().Column(right =>
+                    {
+                        right.Item().Text($"Số phiếu: {receiptNo}")
+                            .Bold();
+
+                        right.Item().Text($"Ngày tạo: {now:dd/MM/yyyy HH:mm}");
+                    });
+                });
+
+                column.Item().LineHorizontal(1);
+            });
+        }
+
+        private static void ComposeContent(
+            IContainer container,
+            IReadOnlyList<sub_product> items,
+            int totalQty)
+        {
+            container.Column(column =>
+            {
+                column.Spacing(12);
+
+                column.Item().Text("DANH SÁCH BÁN THÀNH PHẨM NHẬP KHO")
+                    .Bold()
+                    .FontSize(12);
+
+                column.Item().Table(table =>
+                {
+                    table.ColumnsDefinition(columns =>
+                    {
+                        columns.ConstantColumn(32);
+                        columns.ConstantColumn(55);
+                        columns.RelativeColumn(1.2f);
+                        columns.ConstantColumn(55);
+                        columns.ConstantColumn(55);
+                        columns.ConstantColumn(60);
+                        columns.ConstantColumn(60);
+                        columns.RelativeColumn(1.2f);
+                    });
+
+                    AddHeader(table, "STT");
+                    AddHeader(table, "Sub ID");
+                    AddHeader(table, "Loại SP");
+                    AddHeader(table, "Width");
+                    AddHeader(table, "Length");
+                    AddHeader(table, "Công đoạn");
+                    AddHeader(table, "SL");
+                    AddHeader(table, "Nguồn");
+
+                    var index = 1;
+
+                    foreach (var sp in items.OrderBy(x => x.id))
+                    {
+                        AddCell(table, index.ToString());
+                        AddCell(table, sp.id.ToString());
+                        AddCell(table, sp.product_type?.name ?? $"PT #{sp.product_type_id}");
+                        AddCell(table, sp.width?.ToString() ?? "-");
+                        AddCell(table, sp.length?.ToString() ?? "-");
+                        AddCell(table, sp.product_process ?? "-");
+                        AddCell(table, sp.quantity.ToString("N0"));
+                        AddCell(table, BuildSourceText(sp));
+
+                        index++;
+                    }
+                });
+
+                column.Item().PaddingTop(6).Row(row =>
+                {
+                    row.RelativeItem().Text($"Tổng dòng: {items.Count}")
+                        .Bold();
+
+                    row.RelativeItem().AlignRight().Text($"Tổng số lượng: {totalQty:N0}")
+                        .Bold();
+                });
+
+                column.Item().PaddingTop(18).Text("XÁC NHẬN")
+                    .Bold()
+                    .FontSize(12);
+
+                column.Item().Row(row =>
+                {
+                    row.RelativeItem().AlignCenter().Column(col =>
+                    {
+                        col.Item().Text("Người lập phiếu").Bold();
+                        col.Item().PaddingTop(4).Text("(Ký, ghi rõ họ tên)").Italic();
+                        col.Item().PaddingTop(60).Text("");
+                    });
+
+                    row.RelativeItem().AlignCenter().Column(col =>
+                    {
+                        col.Item().Text("Thủ kho").Bold();
+                        col.Item().PaddingTop(4).Text("(Ký, ghi rõ họ tên)").Italic();
+                        col.Item().PaddingTop(60).Text("");
+                    });
+
+                    row.RelativeItem().AlignCenter().Column(col =>
+                    {
+                        col.Item().Text("Quản lý sản xuất").Bold();
+                        col.Item().PaddingTop(4).Text("(Ký, ghi rõ họ tên)").Italic();
+                        col.Item().PaddingTop(60).Text("");
+                    });
+                });
+            });
+        }
+
+        private static string BuildSourceText(sub_product sp)
+        {
+            var parts = new List<string>();
+
+            if (sp.source_order_id.HasValue)
+                parts.Add($"Order {sp.source_order_id}");
+
+            if (sp.source_prod_id.HasValue)
+                parts.Add($"Prod {sp.source_prod_id}");
+
+            if (sp.source_task_id.HasValue)
+                parts.Add($"Task {sp.source_task_id}");
+
+            return parts.Count == 0 ? "-" : string.Join(" / ", parts);
+        }
+
+        private static void AddHeader(TableDescriptor table, string text)
+        {
+            table.Cell()
+                .Element(HeaderCell)
+                .Text(text)
+                .Bold();
+        }
+
+        private static void AddCell(TableDescriptor table, string text)
+        {
+            table.Cell()
+                .Element(BodyCell)
+                .Text(text);
+        }
+
+        private static IContainer HeaderCell(IContainer container)
         {
             return container
                 .Border(0.5f)
                 .BorderColor(Colors.Grey.Lighten1)
                 .Background(Colors.Grey.Lighten3)
-                .PaddingVertical(6)
-                .PaddingHorizontal(8);
+                .PaddingVertical(5)
+                .PaddingHorizontal(4)
+                .AlignCenter();
         }
 
-        private static IContainer ValueCell(IContainer container)
+        private static IContainer BodyCell(IContainer container)
         {
             return container
                 .Border(0.5f)
                 .BorderColor(Colors.Grey.Lighten1)
-                .PaddingVertical(6)
-                .PaddingHorizontal(8);
+                .PaddingVertical(5)
+                .PaddingHorizontal(4);
         }
     }
 }

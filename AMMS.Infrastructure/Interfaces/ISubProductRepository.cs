@@ -17,11 +17,12 @@ namespace AMMS.Infrastructure.Interfaces
         Task<bool> ProductTypeExistsAsync(int productTypeId, CancellationToken ct = default);
         Task<int> SaveChangesAsync(CancellationToken ct = default);
         Task<PagedResultLite<SubProductDto>> GetPagedAsync(
-            int page,
-            int pageSize,
-            bool? isActive = null,
-            bool? isImported = null,
-            CancellationToken ct = default);
+    int page,
+    int pageSize,
+    bool? isActive = null,
+    bool? isImported = null,
+    CancellationToken ct = default);
+        void Remove(sub_product entity);
     }
 }
 

@@ -10,21 +10,34 @@ namespace AMMS.Application.Interfaces
 {
     public interface ISubProductService
     {
-        Task<CreateSubProductResponse> CreateAsync(CreateSubProductDto dto, CancellationToken ct = default);
         Task<SubProductDto?> GetByIdAsync(int id, CancellationToken ct = default);
-        Task<UpdateSubProductResponse> UpdateAsync(int id, UpdateSubProductDto dto, CancellationToken ct = default);
-        Task<bool> DeleteAsync(int id, CancellationToken ct = default);
-        Task<PagedResultLite<SubProductDto>> GetPagedAsync(
-    int page,
-    int pageSize,
-    bool? isActive = null,
-    bool? isImported = null,
-    CancellationToken ct = default);
 
-        Task<SubProductImportReceiptResponseDto> GenerateImportReceiptAsync(
-            int subProductId,
+        Task<PagedResultLite<SubProductDto>> GetPagedAsync(
+            int page,
+            int pageSize,
+            bool? isActive = null,
+            bool? isImported = null,
             CancellationToken ct = default);
+
+        Task<CreateSubProductResponse> CreateAsync(
+            CreateSubProductDto dto,
+            CancellationToken ct = default);
+
+        Task<UpdateSubProductResponse> UpdateAsync(
+            int id,
+            UpdateSubProductDto dto,
+            CancellationToken ct = default);
+
+        Task<DeleteSubProductResponse> DeleteAsync(
+            int id,
+            CancellationToken ct = default);
+
+        Task<SubProductImportReceiptBatchResponseDto> GenerateImportReceiptsAsync(
+            List<int> subProductIds,
+            CancellationToken ct = default);
+
         Task<ImportPendingSubProductsResponseDto> ImportPendingSubProductsAsync(
+            List<int>? ids = null,
             CancellationToken ct = default);
     }
 }

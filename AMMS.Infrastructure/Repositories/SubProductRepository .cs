@@ -42,6 +42,7 @@ namespace AMMS.Infrastructure.Repositories
     CancellationToken ct = default)
         {
             NormalizePaging(ref page, ref pageSize);
+
             var skip = (page - 1) * pageSize;
 
             var query = _db.sub_products
@@ -84,7 +85,9 @@ namespace AMMS.Infrastructure.Repositories
                 .ToListAsync(ct);
 
             var hasNext = rows.Count > pageSize;
-            if (hasNext) rows.RemoveAt(rows.Count - 1);
+
+            if (hasNext)
+                rows.RemoveAt(rows.Count - 1);
 
             return new PagedResultLite<SubProductDto>
             {
@@ -110,5 +113,9 @@ namespace AMMS.Infrastructure.Repositories
 
         public async Task AddAsync(sub_product entity, CancellationToken ct = default)
     => await _db.sub_products.AddAsync(entity, ct);
+        public void Remove(sub_product entity)
+        {
+            _db.sub_products.Remove(entity);
+        }
     }
 }

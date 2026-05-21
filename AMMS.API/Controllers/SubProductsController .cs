@@ -27,49 +27,159 @@ namespace AMMS.API.Controllers
 
         [HttpGet("paged")]
         public async Task<IActionResult> GetPaged(
-    [FromQuery] int page = 1,
-    [FromQuery] int pageSize = 10,
-    [FromQuery] bool? isActive = null,
-    [FromQuery] bool? isImported = null,
-    CancellationToken ct = default)
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 10,
+            [FromQuery] bool? isActive = null,
+            [FromQuery] bool? isImported = null,
+            CancellationToken ct = default)
         {
-            var result = await _service.GetPagedAsync(page, pageSize, isActive, isImported, ct);
+            var result = await _service.GetPagedAsync(
+                page,
+                pageSize,
+                isActive,
+                isImported,
+                ct);
+
             return Ok(result);
         }
 
-        [HttpPost("{id:int}/generate-import-receipt")]
-        public async Task<IActionResult> GenerateImportReceipt(int id, CancellationToken ct)
+        [HttpPost]
+        public async Task<IActionResult> Create(
+            [FromBody] CreateSubProductDto dto,
+            CancellationToken ct)
         {
             try
             {
-                var result = await _service.GenerateImportReceiptAsync(id, ct);
+                var result = await _service.CreateAsync(dto, ct);
                 return Ok(result);
             }
             catch (ArgumentException ex)
             {
-                return BadRequest(new { message = ex.Message, sub_product_id = id });
-            }
-            catch (InvalidOperationException ex)
-            {
-                return NotFound(new { message = ex.Message, sub_product_id = id });
+                return BadRequest(new { message = ex.Message });
             }
             catch (Exception ex)
             {
                 return StatusCode(StatusCodes.Status500InternalServerError, new
                 {
-                    message = "Generate sub product import receipt failed",
-                    detail = ex.Message,
-                    sub_product_id = id
+                    message = "Create sub product failed",
+                    detail = ex.Message
                 });
             }
         }
 
-        [HttpPost("import-pending")]
-        public async Task<IActionResult> ImportPending(CancellationToken ct)
+        [HttpPut("{id:int}")]
+        public async Task<IActionResult> Update(
+            int id,
+            [FromBody] UpdateSubProductDto dto,
+            CancellationToken ct)
         {
             try
             {
-                var result = await _service.ImportPendingSubProductsAsync(ct);
+                var result = await _service.UpdateAsync(id, dto, ct);
+
+                if (!result.success)
+                    return NotFound(result);
+
+                return Ok(result);
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new { message = ex.Message, id });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    message = "Update sub product failed",
+                    detail = ex.Message,
+                    id
+                });
+            }
+        }
+
+        [HttpDelete("{id:int}")]
+        public async Task<IActionResult> Delete(int id, CancellationToken ct)
+        {
+            var result = await _service.DeleteAsync(id, ct);
+
+            if (!result.success)
+                return NotFound(result);
+
+            return Ok(result);
+        }
+
+        /*
+         * Tạo 1 file PDF chung cho nhiều sub_product_id.
+         *
+         * Method dùng PUT thay vì POST để tránh case FE bắt buộc POST phải có body đặc biệt.
+         *
+         * Body:
+         * {
+         *   "sub_product_ids": [1, 2, 3]
+         * }
+         */
+        [HttpPut("generate-import-receipts")]
+        public async Task<IActionResult> GenerateImportReceipts(
+            [FromBody] GenerateSubProductImportReceiptsRequestDto dto,
+            CancellationToken ct)
+        {
+            try
+            {
+                if (dto == null || dto.sub_product_ids == null || dto.sub_product_ids.Count == 0)
+                {
+                    return BadRequest(new
+                    {
+                        message = "sub_product_ids is required"
+                    });
+                }
+
+                var result = await _service.GenerateImportReceiptsAsync(
+                    dto.sub_product_ids,
+                    ct);
+
+                return Ok(result);
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    message = "Generate sub product import receipts failed",
+                    detail = ex.Message
+                });
+            }
+        }
+
+        /*
+         * Nhập kho bán thành phẩm pending.
+         *
+         * Đổi từ POST sang PUT.
+         * Không cần body.
+         *
+         * Nhập tất cả pending:
+         * PUT /api/SubProducts/import-pending
+         *
+         * Nhập một số id:
+         * PUT /api/SubProducts/import-pending?ids=1&ids=2&ids=3
+         */
+        [HttpPut("import-pending")]
+        public async Task<IActionResult> ImportPending(
+            [FromQuery] List<int>? ids,
+            CancellationToken ct)
+        {
+            try
+            {
+                var result = await _service.ImportPendingSubProductsAsync(
+                    ids,
+                    ct);
+
                 return Ok(result);
             }
             catch (Exception ex)
@@ -80,62 +190,6 @@ namespace AMMS.API.Controllers
                     detail = ex.Message
                 });
             }
-        }
-
-        [HttpPut("{id:int}")]
-        public async Task<IActionResult> Update(int id, [FromBody] UpdateSubProductDto dto, CancellationToken ct)
-        {
-            try
-            {
-                var result = await _service.UpdateAsync(id, dto, ct);
-                if (!result.success)
-                    return NotFound(result);
-
-                return Ok(result);
-            }
-            catch (ArgumentException ex)
-            {
-                return BadRequest(new
-                {
-                    message = ex.Message,
-                    id
-                });
-            }
-        }
-
-        [HttpPost]
-        public async Task<IActionResult> Create([FromBody] CreateSubProductDto dto, CancellationToken ct)
-        {
-            try
-            {
-                var result = await _service.CreateAsync(dto, ct);
-                return StatusCode(StatusCodes.Status201Created, result);
-            }
-            catch (ArgumentException ex)
-            {
-                return BadRequest(new { message = ex.Message });
-            }
-        }
-
-        [HttpDelete("{id:int}")]
-        public async Task<IActionResult> Delete(int id, CancellationToken ct)
-        {
-            var ok = await _service.DeleteAsync(id, ct);
-            if (!ok)
-            {
-                return NotFound(new
-                {
-                    message = "Sub product not found",
-                    id
-                });
-            }
-
-            return Ok(new
-            {
-                success = true,
-                message = "Sub product deleted successfully",
-                id
-            });
         }
     }
 }
