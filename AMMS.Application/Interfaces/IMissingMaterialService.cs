@@ -12,5 +12,9 @@ namespace AMMS.Application.Interfaces
     public interface IMissingMaterialService
     {
         Task<PagedResultLite<MissingMaterialDto>> GetPagedAsync(int page, int pageSize, CancellationToken ct = default);
+        Task<byte[]> ExportExcelAsync(
+            int page,
+            int pageSize,
+            CancellationToken ct = default);
     }
 }
