@@ -22,5 +22,11 @@ namespace AMMS.Application.Interfaces
         Task<string> DeleteDesignFilePath(int orderRequestId);
 
         Task<List<order>> GetAllOrderWithStatusInProcess();
+
+        Task<PagedResultLite<OrderProductionTrackingDto>> GetProductionTrackingByOrderStatusAsync(
+    string status,
+    int page,
+    int pageSize,
+    CancellationToken ct = default);
     }
 }
