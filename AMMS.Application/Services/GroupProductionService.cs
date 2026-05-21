@@ -1,15 +1,12 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using AMMS.Application.Helpers;
+﻿using AMMS.Application.Helpers;
 using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Shared.DTOs.Productions;
 using AMMS.Shared.DTOs.Productions.Groups;
+using AMMS.Shared.DTOs.Socket;
 using AMMS.Shared.Helpers;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 
@@ -18,6 +15,8 @@ namespace AMMS.Application.Services
     public class GroupProductionService : IGroupProductionService
     {
         private readonly AppDbContext _db;
+        private readonly NotificationService _noti;
+        private readonly IHubContext<RealtimeHub> _hub;
         private static readonly string[] Dept1Codes = { "RALO", "CAT", "IN" };
         private static readonly string[] Dept2Codes = { "PHU", "CAN", "CAN_MANG", "BOI" };
         private static readonly string[] Dept3Codes = { "BE", "DUT", "DAN" };
@@ -31,9 +30,11 @@ namespace AMMS.Application.Services
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         };
 
-        public GroupProductionService(AppDbContext db)
+        public GroupProductionService(AppDbContext db, NotificationService noti, IHubContext<RealtimeHub> hub)
         {
             _db = db;
+            _noti = noti;
+            _hub = hub;
         }
 
         public async Task<List<GroupProductionCandidateDto>> GetCandidatesAsync(
@@ -388,10 +389,12 @@ namespace AMMS.Application.Services
                 group_process_codes = codesCsv,
                 group_total_qty = segment.Members.Sum(x => x.Item.quantity)
             };
-
             await _db.productions.AddAsync(groupProd, ct);
             await _db.SaveChangesAsync(ct);
 
+            var prod_id = await _db.productions.FirstOrDefaultAsync(o => o.code == groupProd.code);
+            await _hub.Clients.Group(RealtimeGroups.ByRole("production manager")).SendAsync("group-production", new { meassage = $"Lệnh sản xuất {prod_id.prod_id} đã được lên lịch" });
+            await _noti.CreateNotfi(6, $"Lệnh sản xuất {prod_id} đã được lên lịch", null, prod_id.prod_id, "Inprocessing");
             foreach (var member in segment.Members)
             {
                 await _db.prod_orders.AddAsync(new prod_order
@@ -721,6 +724,9 @@ namespace AMMS.Application.Services
                  */
                 end_date = plannedEnd
             };
+
+            await _hub.Clients.Group(RealtimeGroups.ByRole("production manager")).SendAsync("group-production", new { meassage = $"Lệnh sản xuất {splitProd.prod_id} đã được lên lịch" });
+            await _noti.CreateNotfi(6, $"Lệnh sản xuất {splitProd.prod_id} đã được lên lịch", null, splitProd.prod_id, "Inprocessing");
 
             await _db.productions.AddAsync(splitProd, ct);
             await _db.SaveChangesAsync(ct);
@@ -3178,6 +3184,6 @@ namespace AMMS.Application.Services
             return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
         }
 
-        
+
     }
 }

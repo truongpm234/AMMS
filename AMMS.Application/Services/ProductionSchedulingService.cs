@@ -5,11 +5,12 @@ using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Planning;
+using AMMS.Shared.DTOs.Socket;
 using AMMS.Shared.Helpers;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using System;
 
 namespace AMMS.Application.Services
 {
@@ -22,9 +23,13 @@ namespace AMMS.Application.Services
         private readonly ILogger<ProductionSchedulingService> _logger;
         private readonly SchedulingOptions _opt;
         private readonly IProductionRepository _prodRepo;
+        private readonly IHubContext<RealtimeHub> _hub;
+        private readonly NotificationService _noti;
 
         public ProductionSchedulingService(
             AppDbContext db,
+            IHubContext<RealtimeHub> hub,
+            NotificationService noti,
             IProductionRepository prodRepo,
             IProductTypeProcessRepository ptpRepo,
             IMachineRepository machineRepo,
@@ -39,6 +44,8 @@ namespace AMMS.Application.Services
             _logger = logger;
             _opt = opt.Value ?? new SchedulingOptions();
             _prodRepo = prodRepo;
+            _noti = noti;
+            _hub = hub;
         }
         private async Task<int> GetMinStartWaitMinutesAsync(CancellationToken ct = default)
         {
@@ -321,6 +328,9 @@ namespace AMMS.Application.Services
 
             prod.code = $"PROD-{prod.prod_id:00000}";
             await _db.SaveChangesAsync();
+
+            await _hub.Clients.Group(RealtimeGroups.ByRole("production manager")).SendAsync("production", new { message = $"Lệnh sản xuất {prod.prod_id} đã được lên lịch" });
+            await _noti.CreateNotfi(6, $"Lệnh sản xuất {prod.prod_id} đã được lên lịch", null, prod.prod_id, "Inprocessing");
 
             order.production_id = prod.prod_id;
             await _db.SaveChangesAsync();
