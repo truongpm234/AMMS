@@ -24,6 +24,18 @@ namespace AMMS.Infrastructure.Entities
 
         public bool is_active { get; set; } = true;
 
+        public bool is_imported { get; set; } = true;
+
+        public string? import_file { get; set; }
+
+        public int? source_task_id { get; set; }
+
+        public int? source_task_log_id { get; set; }
+
+        public int? source_prod_id { get; set; }
+
+        public int? source_order_id { get; set; }
+
         public string? description { get; set; }
 
         public DateTime? updated_at { get; set; }

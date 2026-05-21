@@ -242,11 +242,6 @@ namespace AMMS.Application.Services
 
                 await _logRepo.AddAsync(finishLog);
 
-                /*
-                 * NVL đã được reserve/trừ ở bước confirm production method.
-                 * Khi finish task, chỉ nhập lại phần dư nếu FE báo quantity_left và is_stock=true.
-                 * Không OUT kho lần nữa.
-                 */
                 await ReturnLeftoverMaterialsFromEstimatedFlowAsync(
                     materialUsageSnapshot,
                     t,
@@ -254,7 +249,30 @@ namespace AMMS.Application.Services
                     now,
                     innerCt);
 
+                /*
+                 * Save trước để task_log có log_id.
+                 */
                 await _taskRepo.SaveChangesAsync(innerCt);
+
+                /*
+                 * Bổ sung:
+                 * Nếu FE gửi reference_inputs_json có quantity_left > 0,
+                 * tạo dòng sub_product tạm:
+                 * - is_active = false
+                 * - is_imported = false
+                 *
+                 * Dòng này chưa tham gia flow chọn method sản xuất.
+                 * Warehouse sẽ nhập kho bằng API /api/SubProducts/import-pending.
+                 */
+                await CreatePendingSubProductsFromReferenceLeftoverAsync(
+                    normalizedReferenceInputs,
+                    t,
+                    finishLog,
+                    now,
+                    innerCt);
+
+                await _db.SaveChangesAsync(innerCt);
+
                 await MirrorGroupFinishToSingleTasksAsync(
                     t,
                     finishLog,
@@ -311,6 +329,136 @@ namespace AMMS.Application.Services
              * Nếu giữ block cũ ở đây sẽ bị gửi thông báo trùng.
              */
             return result;
+        }
+
+        private async Task CreatePendingSubProductsFromReferenceLeftoverAsync(
+    List<TaskReferenceUsageInputDto> referenceInputs,
+    task currentTask,
+    task_log finishLog,
+    DateTime now,
+    CancellationToken ct)
+        {
+            if (referenceInputs == null || referenceInputs.Count == 0)
+                return;
+
+            if (!currentTask.prod_id.HasValue)
+                return;
+
+            var leftovers = referenceInputs
+                .Where(x => !string.IsNullOrWhiteSpace(x.input_code))
+                .Where(x => x.quantity_left > 0)
+                .ToList();
+
+            if (leftovers.Count == 0)
+                return;
+
+            var prod = await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.prod_id == currentTask.prod_id.Value, ct);
+
+            if (prod == null)
+                return;
+
+            var sourceOrderId = prod.order_id;
+
+            /*
+             * GROUP production không có order_id trực tiếp.
+             * Lấy order đầu tiên trong prod_orders để lấy size/product_type.
+             * Logic group của bạn đang ghép theo cùng loại/kích thước nên cách này không phá flow.
+             */
+            if (!sourceOrderId.HasValue)
+            {
+                sourceOrderId = await _db.prod_orders
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.prod_id == prod.prod_id &&
+                        x.status == "Active")
+                    .OrderBy(x => x.order_id)
+                    .Select(x => (int?)x.order_id)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            var item = sourceOrderId.HasValue
+                ? await _db.order_items
+                    .AsNoTracking()
+                    .Where(x => x.order_id == sourceOrderId.Value)
+                    .OrderBy(x => x.item_id)
+                    .Select(x => new
+                    {
+                        x.product_type_id,
+                        width = EF.Property<int?>(x, "width_mm"),
+                        length = EF.Property<int?>(x, "length_mm")
+                    })
+                    .FirstOrDefaultAsync(ct)
+                : null;
+
+            var productTypeId = prod.product_type_id ?? item?.product_type_id;
+
+            if (!productTypeId.HasValue || productTypeId.Value <= 0)
+                return;
+
+            foreach (var input in leftovers)
+            {
+                var qty = ToSubProductQty(input.quantity_left);
+                if (qty <= 0)
+                    continue;
+
+                var processCode = NormSubProductProcess(input.input_code);
+
+                if (string.IsNullOrWhiteSpace(processCode))
+                    continue;
+
+                var pending = new sub_product
+                {
+                    product_type_id = productTypeId.Value,
+                    width = item?.width,
+                    length = item?.length,
+                    product_process = processCode,
+                    quantity = qty,
+
+                    /*
+                     * Quan trọng:
+                     * Chưa nhập kho thật nên không active.
+                     * Không ảnh hưởng flow chọn SUB/BOTH hiện tại.
+                     */
+                    is_active = false,
+                    is_imported = false,
+
+                    source_task_id = currentTask.task_id,
+                    source_task_log_id = finishLog.log_id > 0 ? finishLog.log_id : null,
+                    source_prod_id = prod.prod_id,
+                    source_order_id = sourceOrderId,
+
+                    description =
+                        $"BTP dư từ task_id={currentTask.task_id}, prod_id={prod.prod_id}, " +
+                        $"process={processCode}, qty_left={input.quantity_left}, tạo lúc {now:yyyy-MM-dd HH:mm:ss}.",
+
+                    updated_at = now
+                };
+
+                await _db.sub_products.AddAsync(pending, ct);
+            }
+        }
+
+        private static int ToSubProductQty(decimal quantityLeft)
+        {
+            if (quantityLeft <= 0)
+                return 0;
+
+            /*
+             * sub_product.quantity hiện là int.
+             * Dùng Ceiling để không làm mất số lượng dư khi FE gửi decimal.
+             */
+            return (int)Math.Ceiling(quantityLeft);
+        }
+
+        private static string NormSubProductProcess(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
         }
 
         private async Task NotifyImportingForProductionAsync(

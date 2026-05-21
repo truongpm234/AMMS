@@ -27,13 +27,59 @@ namespace AMMS.API.Controllers
 
         [HttpGet("paged")]
         public async Task<IActionResult> GetPaged(
-            [FromQuery] int page = 1,
-            [FromQuery] int pageSize = 10,
-            [FromQuery] bool? isActive = null,
-            CancellationToken ct = default)
+    [FromQuery] int page = 1,
+    [FromQuery] int pageSize = 10,
+    [FromQuery] bool? isActive = null,
+    [FromQuery] bool? isImported = null,
+    CancellationToken ct = default)
         {
-            var result = await _service.GetPagedAsync(page, pageSize, isActive, ct);
+            var result = await _service.GetPagedAsync(page, pageSize, isActive, isImported, ct);
             return Ok(result);
+        }
+
+        [HttpPost("{id:int}/generate-import-receipt")]
+        public async Task<IActionResult> GenerateImportReceipt(int id, CancellationToken ct)
+        {
+            try
+            {
+                var result = await _service.GenerateImportReceiptAsync(id, ct);
+                return Ok(result);
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new { message = ex.Message, sub_product_id = id });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return NotFound(new { message = ex.Message, sub_product_id = id });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    message = "Generate sub product import receipt failed",
+                    detail = ex.Message,
+                    sub_product_id = id
+                });
+            }
+        }
+
+        [HttpPost("import-pending")]
+        public async Task<IActionResult> ImportPending(CancellationToken ct)
+        {
+            try
+            {
+                var result = await _service.ImportPendingSubProductsAsync(ct);
+                return Ok(result);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    message = "Import pending sub products failed",
+                    detail = ex.Message
+                });
+            }
         }
 
         [HttpPut("{id:int}")]

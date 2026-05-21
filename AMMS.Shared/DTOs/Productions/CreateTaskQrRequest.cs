@@ -14,6 +14,10 @@ namespace AMMS.Shared.DTOs.Productions
         public int? qty_good { get; set; }
         public bool use_manual_input { get; set; } = false;
         public List<TaskMaterialUsageInputDto> materials { get; set; } = new();
+        public List<TaskReferenceUsageInputDto> reference_inputs { get; set; } = new();
+        public List<TaskOutputReportDto> outputs { get; set; } = new();
+        public string? reason { get; set; }
+        public string? report_image_url { get; set; }
     }
 
 }

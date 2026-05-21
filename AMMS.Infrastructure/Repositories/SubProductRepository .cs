@@ -34,7 +34,12 @@ namespace AMMS.Infrastructure.Repositories
                 .Include(x => x.product_type)
                 .FirstOrDefaultAsync(x => x.id == id, ct);
 
-        public async Task<PagedResultLite<SubProductDto>> GetPagedAsync(int page, int pageSize, bool? isActive = null, CancellationToken ct = default)
+        public async Task<PagedResultLite<SubProductDto>> GetPagedAsync(
+    int page,
+    int pageSize,
+    bool? isActive = null,
+    bool? isImported = null,
+    CancellationToken ct = default)
         {
             NormalizePaging(ref page, ref pageSize);
             var skip = (page - 1) * pageSize;
@@ -47,8 +52,13 @@ namespace AMMS.Infrastructure.Repositories
             if (isActive.HasValue)
                 query = query.Where(x => x.is_active == isActive.Value);
 
+            if (isImported.HasValue)
+                query = query.Where(x => x.is_imported == isImported.Value);
+
             var rows = await query
-                .OrderByDescending(x => x.updated_at)
+                .OrderBy(x => x.is_imported)
+                .ThenBy(x => x.is_active)
+                .ThenByDescending(x => x.updated_at)
                 .ThenByDescending(x => x.id)
                 .Skip(skip)
                 .Take(pageSize + 1)
@@ -62,6 +72,12 @@ namespace AMMS.Infrastructure.Repositories
                     product_process = x.product_process,
                     quantity = x.quantity,
                     is_active = x.is_active,
+                    is_imported = x.is_imported,
+                    import_file = x.import_file,
+                    source_task_id = x.source_task_id,
+                    source_task_log_id = x.source_task_log_id,
+                    source_prod_id = x.source_prod_id,
+                    source_order_id = x.source_order_id,
                     description = x.description,
                     updated_at = x.updated_at
                 })

@@ -811,6 +811,12 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.is_active)
                   .HasDefaultValue(true);
 
+            entity.Property(e => e.is_imported)
+                  .HasDefaultValue(true);
+
+            entity.Property(e => e.import_file)
+                  .HasColumnType("text");
+
             entity.Property(e => e.description)
                   .HasMaxLength(255);
 
@@ -824,12 +830,27 @@ public partial class AppDbContext : DbContext
             entity.HasIndex(e => e.is_active)
                   .HasDatabaseName("ix_sub_product_is_active");
 
+            entity.HasIndex(e => e.is_imported)
+                  .HasDatabaseName("ix_sub_product_is_imported");
+
+            entity.HasIndex(e => new
+            {
+                e.product_type_id,
+                e.width,
+                e.length,
+                e.product_process,
+                e.is_active,
+                e.is_imported
+            })
+            .HasDatabaseName("ix_sub_product_import_match");
+
             entity.HasOne(d => d.product_type)
                   .WithMany(p => p.sub_products)
                   .HasForeignKey(d => d.product_type_id)
                   .OnDelete(DeleteBehavior.Restrict)
                   .HasConstraintName("fk_sub_product_product_type");
         });
+
         OnModelCreatingPartial(modelBuilder);
     }
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder);

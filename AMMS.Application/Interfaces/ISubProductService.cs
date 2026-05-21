@@ -12,8 +12,19 @@ namespace AMMS.Application.Interfaces
     {
         Task<CreateSubProductResponse> CreateAsync(CreateSubProductDto dto, CancellationToken ct = default);
         Task<SubProductDto?> GetByIdAsync(int id, CancellationToken ct = default);
-        Task<PagedResultLite<SubProductDto>> GetPagedAsync(int page, int pageSize, bool? isActive = null, CancellationToken ct = default);
         Task<UpdateSubProductResponse> UpdateAsync(int id, UpdateSubProductDto dto, CancellationToken ct = default);
         Task<bool> DeleteAsync(int id, CancellationToken ct = default);
+        Task<PagedResultLite<SubProductDto>> GetPagedAsync(
+    int page,
+    int pageSize,
+    bool? isActive = null,
+    bool? isImported = null,
+    CancellationToken ct = default);
+
+        Task<SubProductImportReceiptResponseDto> GenerateImportReceiptAsync(
+            int subProductId,
+            CancellationToken ct = default);
+        Task<ImportPendingSubProductsResponseDto> ImportPendingSubProductsAsync(
+            CancellationToken ct = default);
     }
 }
