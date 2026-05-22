@@ -28,14 +28,9 @@ namespace AMMS.Infrastructure.Interfaces
         Task RecalculateIsEnoughForOrdersAsync(CancellationToken ct = default);
         Task<List<order_item>> GetOrderItemsByOrderIdAsync(int orderId, CancellationToken ct = default);
         Task<bool> IsOrderEnoughByOrderIdAsync(int orderId, CancellationToken ct = default);
-        Task<OrderProductionTrackingRawResult> GetProductionTrackingByOrderStatusAsync(
-            string status,
-            int page,
-            int pageSize,
-            CancellationToken ct = default);
-        Task<OrdersByProcessRawResult> GetOrdersByProcessCodeRawAsync(
-    string processCode,
-    CancellationToken ct = default);
+        Task<OrderProductionTrackingRawResult> GetProductionTrackingByOrderStatusAsync(string status, int page, int pageSize, CancellationToken ct = default);
+        Task<OrdersByProcessRawResult> GetOrdersByProcessCodeRawAsync(string processCode, CancellationToken ct = default);
+        Task<AllOrdersProductionTrackingRawResult> GetAllOrdersProductionTrackingRawAsync(int page, int pageSize, CancellationToken ct = default);
     }
     public class OrderProductionTrackingRawResult
     {
@@ -79,5 +74,26 @@ namespace AMMS.Infrastructure.Interfaces
         public int? process_id { get; set; }
         public string? process_code { get; set; }
         public string? process_name { get; set; }
+    }
+
+    public class AllOrdersProductionTrackingRawResult
+    {
+        public int Page { get; set; }
+        public int PageSize { get; set; }
+        public bool HasNext { get; set; }
+
+        public List<order> Orders { get; set; } = new();
+        public List<OrderRequestIdRaw> Requests { get; set; } = new();
+        public List<production> Productions { get; set; } = new();
+        public List<task> Tasks { get; set; } = new();
+        public List<task_log> TaskLogs { get; set; } = new();
+        public List<ProdOrderLiteRaw> ProdOrders { get; set; } = new();
+        public List<TaskProcessLiteRaw> TaskProcesses { get; set; } = new();
+    }
+
+    public class OrderRequestIdRaw
+    {
+        public int order_request_id { get; set; }
+        public int? order_id { get; set; }
     }
 }

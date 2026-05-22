@@ -334,5 +334,19 @@ CancellationToken ct)
                 });
             }
         }
+
+        [HttpGet("all-with-production-tracking")]
+        public async Task<IActionResult> GetAllOrdersProductionTracking(
+    [FromQuery] int page = 1,
+    [FromQuery] int pageSize = 10,
+    CancellationToken ct = default)
+        {
+            var result = await _service.GetAllOrdersProductionTrackingAsync(
+                page,
+                pageSize,
+                ct);
+
+            return Ok(result);
+        }
     }
 }
