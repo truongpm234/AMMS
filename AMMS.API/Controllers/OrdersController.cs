@@ -308,5 +308,31 @@ CancellationToken ct)
                 });
             }
         }
+
+        [HttpGet("by-current-process")]
+        public async Task<IActionResult> GetOrdersByCurrentProcess(
+    [FromQuery] string processCode,
+    [FromQuery] int page = 1,
+    [FromQuery] int pageSize = 10,
+    CancellationToken ct = default)
+        {
+            try
+            {
+                var result = await _service.GetOrdersByCurrentProcessAsync(
+                    processCode,
+                    page,
+                    pageSize,
+                    ct);
+
+                return Ok(result);
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message
+                });
+            }
+        }
     }
 }
