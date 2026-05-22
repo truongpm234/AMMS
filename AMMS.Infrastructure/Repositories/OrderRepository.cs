@@ -1250,5 +1250,227 @@ namespace AMMS.Infrastructure.Repositories
                 ProdOrders = prodOrders
             };
         }
+
+        public async Task<OrdersByProcessRawResult> GetOrdersByProcessCodeRawAsync(
+    string processCode,
+    CancellationToken ct = default)
+        {
+            processCode = (processCode ?? "").Trim().ToUpperInvariant();
+
+            if (string.IsNullOrWhiteSpace(processCode))
+            {
+                return new OrdersByProcessRawResult();
+            }
+
+            // 1. Tìm process_id trong product_type_process theo process_code
+            var matchedProcessIds = await _db.product_type_processes
+                .AsNoTracking()
+                .Where(p =>
+                    p.process_code != null &&
+                    p.process_code.ToUpper() == processCode)
+                .Select(p => p.process_id)
+                .Distinct()
+                .ToListAsync(ct);
+
+            // 2. Tìm task có liên quan đến công đoạn
+            var candidateTasks = await _db.tasks
+                .AsNoTracking()
+                .Where(t =>
+                    (t.process_id != null && matchedProcessIds.Contains(t.process_id.Value)) ||
+                    ((t.name ?? "").ToUpper() == processCode) ||
+                    ((t.machine ?? "").ToUpper() == processCode))
+                .ToListAsync(ct);
+
+            if (candidateTasks.Count == 0)
+            {
+                return new OrdersByProcessRawResult();
+            }
+
+            var candidateProdIds = candidateTasks
+                .Where(t => t.prod_id != null)
+                .Select(t => t.prod_id!.Value)
+                .Distinct()
+                .ToList();
+
+            if (candidateProdIds.Count == 0)
+            {
+                return new OrdersByProcessRawResult();
+            }
+
+            // 3. Tìm production ứng viên
+            var candidateProductions = await _db.productions
+                .AsNoTracking()
+                .Where(p => candidateProdIds.Contains(p.prod_id))
+                .ToListAsync(ct);
+
+            // 4. Tìm order liên quan qua prod_orders
+            var candidateProdOrders = await _db.prod_orders
+                .AsNoTracking()
+                .Where(po =>
+                    candidateProdIds.Contains(po.prod_id) ||
+                    (po.single_prod_id != null && candidateProdIds.Contains(po.single_prod_id.Value)))
+                .Select(po => new ProdOrderLiteRaw
+                {
+                    order_id = po.order_id,
+                    prod_id = po.prod_id,
+                    single_prod_id = po.single_prod_id
+                })
+                .ToListAsync(ct);
+
+            var orderIdsFromProductions = candidateProductions
+                .Where(p => p.order_id != null)
+                .Select(p => p.order_id!.Value)
+                .Distinct()
+                .ToList();
+
+            var orderIdsFromProdOrders = candidateProdOrders
+                .Select(x => x.order_id)
+                .Distinct()
+                .ToList();
+
+            var orderIdsFromOrderProductionId = await _db.orders
+                .AsNoTracking()
+                .Where(o =>
+                    o.production_id != null &&
+                    candidateProdIds.Contains(o.production_id.Value))
+                .Select(o => o.order_id)
+                .Distinct()
+                .ToListAsync(ct);
+
+            var candidateOrderIds = orderIdsFromProductions
+                .Concat(orderIdsFromProdOrders)
+                .Concat(orderIdsFromOrderProductionId)
+                .Distinct()
+                .ToList();
+
+            if (candidateOrderIds.Count == 0)
+            {
+                return new OrdersByProcessRawResult();
+            }
+
+            // 5. Lấy orders
+            var orders = await _db.orders
+                .AsNoTracking()
+                .Where(o => candidateOrderIds.Contains(o.order_id))
+                .OrderByDescending(o => o.order_date)
+                .ThenByDescending(o => o.order_id)
+                .ToListAsync(ct);
+
+            if (orders.Count == 0)
+            {
+                return new OrdersByProcessRawResult();
+            }
+
+            var orderIds = orders
+                .Select(o => o.order_id)
+                .Distinct()
+                .ToList();
+
+            // 6. Lấy production_id gắn trực tiếp trong orders
+            var orderProductionIds = orders
+                .Where(o => o.production_id != null)
+                .Select(o => o.production_id!.Value)
+                .Distinct()
+                .ToList();
+
+            // 7. Lấy prod_orders theo order
+            var prodOrders = await _db.prod_orders
+                .AsNoTracking()
+                .Where(po => orderIds.Contains(po.order_id))
+                .Select(po => new ProdOrderLiteRaw
+                {
+                    order_id = po.order_id,
+                    prod_id = po.prod_id,
+                    single_prod_id = po.single_prod_id
+                })
+                .ToListAsync(ct);
+
+            var prodIdsFromProdOrders = prodOrders
+                .Select(x => x.prod_id)
+                .Concat(
+                    prodOrders
+                        .Where(x => x.single_prod_id != null)
+                        .Select(x => x.single_prod_id!.Value)
+                )
+                .Distinct()
+                .ToList();
+
+            // 8. Gom toàn bộ production liên quan tới order
+            var allRelatedProdIds = orderProductionIds
+                .Concat(prodIdsFromProdOrders)
+                .Concat(
+                    candidateProductions
+                        .Where(p => p.order_id != null && orderIds.Contains(p.order_id.Value))
+                        .Select(p => p.prod_id)
+                )
+                .Distinct()
+                .ToList();
+
+            var productions = await _db.productions
+                .AsNoTracking()
+                .Where(p =>
+                    allRelatedProdIds.Contains(p.prod_id) ||
+                    (p.order_id != null && orderIds.Contains(p.order_id.Value)))
+                .ToListAsync(ct);
+
+            var productionIds = productions
+                .Select(p => p.prod_id)
+                .Distinct()
+                .ToList();
+
+            // 9. Lấy tasks của các production
+            var tasks = await _db.tasks
+                .AsNoTracking()
+                .Where(t =>
+                    t.prod_id != null &&
+                    productionIds.Contains(t.prod_id.Value))
+                .OrderBy(t => t.seq_num)
+                .ThenBy(t => t.task_id)
+                .ToListAsync(ct);
+
+            // 10. Lấy process info cho task
+            var processIdsOfTasks = tasks
+                .Where(t => t.process_id != null)
+                .Select(t => t.process_id!.Value)
+                .Distinct()
+                .ToList();
+
+            var processRows = await _db.product_type_processes
+                .AsNoTracking()
+                .Where(p => processIdsOfTasks.Contains(p.process_id))
+                .Select(p => new
+                {
+                    p.process_id,
+                    p.process_code,
+                    p.process_name
+                })
+                .ToListAsync(ct);
+
+            var taskProcesses = tasks
+                .Select(t =>
+                {
+                    var p = t.process_id == null
+                        ? null
+                        : processRows.FirstOrDefault(x => x.process_id == t.process_id.Value);
+
+                    return new TaskProcessLiteRaw
+                    {
+                        task_id = t.task_id,
+                        process_id = t.process_id,
+                        process_code = p?.process_code,
+                        process_name = p?.process_name
+                    };
+                })
+                .ToList();
+
+            return new OrdersByProcessRawResult
+            {
+                Orders = orders,
+                Productions = productions,
+                Tasks = tasks,
+                ProdOrders = prodOrders,
+                TaskProcesses = taskProcesses
+            };
+        }
     }
 }
