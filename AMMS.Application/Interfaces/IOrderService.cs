@@ -28,5 +28,8 @@ namespace AMMS.Application.Interfaces
     int page,
     int pageSize,
     CancellationToken ct = default);
+
+        Task<PagedResultLite<OrdersByProcessDto>> GetOrdersByCurrentProcessAsync(string processCode, int page, int pageSize, CancellationToken ct = default);
+        Task<PagedResultLite<OrderFullTrackingDto>> GetAllOrdersProductionTrackingAsync(int page, int pageSize, CancellationToken ct = default);
     }
 }
