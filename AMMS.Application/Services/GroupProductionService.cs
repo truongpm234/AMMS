@@ -370,6 +370,8 @@ namespace AMMS.Application.Services
                 segment.DepartmentCode,
                 ct);
 
+            var inheritedProdMethod = ResolveSegmentProductionMethodOrThrow(segment);
+
             var groupProd = new production
             {
                 code = groupCode,
@@ -383,12 +385,12 @@ namespace AMMS.Application.Services
                 note = string.IsNullOrWhiteSpace(note)
                     ? $"Group {segment.DepartmentName}: {codesCsv}"
                     : $"{note} | Group {segment.DepartmentName}: {codesCsv}",
-
                 prod_kind = "GROUP",
-                prod_method = "GROUP",
+                prod_method = inheritedProdMethod,
                 group_process_codes = codesCsv,
                 group_total_qty = segment.Members.Sum(x => x.Item.quantity)
             };
+
             await _db.productions.AddAsync(groupProd, ct);
             await _db.SaveChangesAsync(ct);
 
@@ -691,6 +693,7 @@ namespace AMMS.Application.Services
     CancellationToken ct)
         {
             var member = segment.Members.First();
+            var inheritedProdMethod = ResolveSegmentProductionMethodOrThrow(segment);
             var now = AppTime.NowVnUnspecified();
             var codesCsv = string.Join(",", segment.ProcessCodes);
 
@@ -714,14 +717,9 @@ namespace AMMS.Application.Services
                     : $"{note} | Split {segment.DepartmentName}: {codesCsv}",
 
                 prod_kind = "SPLIT",
-                prod_method = "SPLIT",
+                prod_method = inheritedProdMethod,
                 group_process_codes = codesCsv,
                 group_total_qty = member.Item.quantity,
-
-                /*
-                 * Nếu bạn đang dùng end_date như estimated finish thì giữ.
-                 * Nếu end_date là actual end trong hệ thống của bạn, nên đổi sang field riêng estimated_end_date.
-                 */
                 end_date = plannedEnd
             };
 
@@ -3184,6 +3182,60 @@ namespace AMMS.Application.Services
             return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
         }
 
+        private static string? NormalizeProductionMethod(string? method)
+        {
+            var value = (method ?? "")
+                .Trim()
+                .ToUpperInvariant();
 
+            return value switch
+            {
+                "SUB" => "SUB",
+                "NVL" => "NVL",
+                "BOTH" => "BOTH",
+                _ => null
+            };
+        }
+
+        private static string ResolveSegmentProductionMethodOrThrow(ProductionPlanSegment segment)
+        {
+            if (segment == null)
+                throw new InvalidOperationException("segment is required.");
+
+            if (segment.Members == null || segment.Members.Count == 0)
+                throw new InvalidOperationException("Segment không có order member.");
+
+            var methods = segment.Members
+                .Select(x => NormalizeProductionMethod(x.SingleProd.prod_method))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (methods.Count == 0)
+            {
+                var orderIds = segment.Members
+                    .Select(x => x.Order.order_id)
+                    .Distinct()
+                    .OrderBy(x => x)
+                    .ToList();
+
+                throw new InvalidOperationException(
+                    $"Không xác định được prod_method SUB/NVL/BOTH từ production SINGLE gốc. Orders: {string.Join(",", orderIds)}");
+            }
+
+            if (methods.Count > 1)
+            {
+                var detail = segment.Members
+                    .Select(x => $"order_id={x.Order.order_id}, single_prod_id={x.SingleProd.prod_id}, prod_method={x.SingleProd.prod_method}")
+                    .ToList();
+
+                throw new InvalidOperationException(
+                    "Không thể tạo production GROUP/SPLIT từ các order có prod_method khác nhau. " +
+                    "prod_method chỉ được là SUB/NVL/BOTH và phải thống nhất trong cùng segment. " +
+                    $"Chi tiết: {string.Join(" | ", detail)}");
+            }
+
+            return methods[0]!;
+        }
     }
 }
