@@ -1259,34 +1259,41 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         public async Task<OrdersByProcessRawResult> GetOrdersByProcessCodeRawAsync(
-    string processCode,
+    string? processCode,
     CancellationToken ct = default)
         {
             processCode = (processCode ?? "").Trim().ToUpperInvariant();
 
-            if (string.IsNullOrWhiteSpace(processCode))
+            var hasProcessFilter = !string.IsNullOrWhiteSpace(processCode);
+
+            List<task> candidateTasks;
+
+            if (hasProcessFilter)
             {
-                return new OrdersByProcessRawResult();
+                var matchedProcessIds = await _db.product_type_processes
+                    .AsNoTracking()
+                    .Where(p =>
+                        p.process_code != null &&
+                        p.process_code.ToUpper() == processCode)
+                    .Select(p => p.process_id)
+                    .Distinct()
+                    .ToListAsync(ct);
+
+                candidateTasks = await _db.tasks
+                    .AsNoTracking()
+                    .Where(t =>
+                        (t.process_id != null && matchedProcessIds.Contains(t.process_id.Value)) ||
+                        ((t.name ?? "").ToUpper() == processCode) ||
+                        ((t.machine ?? "").ToUpper() == processCode))
+                    .ToListAsync(ct);
             }
-
-            // 1. Tìm process_id trong product_type_process theo process_code
-            var matchedProcessIds = await _db.product_type_processes
-                .AsNoTracking()
-                .Where(p =>
-                    p.process_code != null &&
-                    p.process_code.ToUpper() == processCode)
-                .Select(p => p.process_id)
-                .Distinct()
-                .ToListAsync(ct);
-
-            // 2. Tìm task có liên quan đến công đoạn
-            var candidateTasks = await _db.tasks
-                .AsNoTracking()
-                .Where(t =>
-                    (t.process_id != null && matchedProcessIds.Contains(t.process_id.Value)) ||
-                    ((t.name ?? "").ToUpper() == processCode) ||
-                    ((t.machine ?? "").ToUpper() == processCode))
-                .ToListAsync(ct);
+            else
+            {
+                candidateTasks = await _db.tasks
+                    .AsNoTracking()
+                    .Where(t => t.prod_id != null)
+                    .ToListAsync(ct);
+            }
 
             if (candidateTasks.Count == 0)
             {
@@ -1304,13 +1311,11 @@ namespace AMMS.Infrastructure.Repositories
                 return new OrdersByProcessRawResult();
             }
 
-            // 3. Tìm production ứng viên
             var candidateProductions = await _db.productions
                 .AsNoTracking()
                 .Where(p => candidateProdIds.Contains(p.prod_id))
                 .ToListAsync(ct);
 
-            // 4. Tìm order liên quan qua prod_orders
             var candidateProdOrders = await _db.prod_orders
                 .AsNoTracking()
                 .Where(po =>
@@ -1355,7 +1360,6 @@ namespace AMMS.Infrastructure.Repositories
                 return new OrdersByProcessRawResult();
             }
 
-            // 5. Lấy orders
             var orders = await _db.orders
                 .AsNoTracking()
                 .Where(o => candidateOrderIds.Contains(o.order_id))
@@ -1373,14 +1377,12 @@ namespace AMMS.Infrastructure.Repositories
                 .Distinct()
                 .ToList();
 
-            // 6. Lấy production_id gắn trực tiếp trong orders
             var orderProductionIds = orders
                 .Where(o => o.production_id != null)
                 .Select(o => o.production_id!.Value)
                 .Distinct()
                 .ToList();
 
-            // 7. Lấy prod_orders theo order
             var prodOrders = await _db.prod_orders
                 .AsNoTracking()
                 .Where(po => orderIds.Contains(po.order_id))
@@ -1402,7 +1404,6 @@ namespace AMMS.Infrastructure.Repositories
                 .Distinct()
                 .ToList();
 
-            // 8. Gom toàn bộ production liên quan tới order
             var allRelatedProdIds = orderProductionIds
                 .Concat(prodIdsFromProdOrders)
                 .Concat(
@@ -1425,7 +1426,6 @@ namespace AMMS.Infrastructure.Repositories
                 .Distinct()
                 .ToList();
 
-            // 9. Lấy tasks của các production
             var tasks = await _db.tasks
                 .AsNoTracking()
                 .Where(t =>
@@ -1435,7 +1435,6 @@ namespace AMMS.Infrastructure.Repositories
                 .ThenBy(t => t.task_id)
                 .ToListAsync(ct);
 
-            // 10. Lấy process info cho task
             var processIdsOfTasks = tasks
                 .Where(t => t.process_id != null)
                 .Select(t => t.process_id!.Value)
