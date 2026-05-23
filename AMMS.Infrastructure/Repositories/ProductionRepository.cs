@@ -4396,47 +4396,15 @@ namespace AMMS.Infrastructure.Repositories
                 aliases.Contains(NormalizeMaterialCodeForDetail(m.name)));
         }
 
-        public async Task<ImportReceiveSourceDto?> GetImportReceiveSourceByOrderIdAsync(int orderId, CancellationToken ct = default)
+        public async Task<ImportReceiveSourceDto?> GetImportReceiveSourceByOrderIdAsync(
+    int orderId,
+    CancellationToken ct = default)
         {
-            var prod = await _db.productions
-                .AsNoTracking()
-                .Where(x => x.order_id == orderId)
+            var sources = await GetImportReceiveSourcesByOrderIdAsync(orderId, ct);
+
+            return sources
                 .OrderByDescending(x => x.prod_id)
-                .FirstOrDefaultAsync(ct);
-
-            if (prod == null || !prod.order_id.HasValue)
-                return null;
-
-            var order = await _db.orders
-                .AsNoTracking()
-                .FirstOrDefaultAsync(x => x.order_id == orderId, ct);
-
-            if (order == null)
-                return null;
-
-            var items = await (
-                from oi in _db.order_items.AsNoTracking()
-                join pt in _db.product_types.AsNoTracking()
-                    on oi.product_type_id equals pt.product_type_id into ptJoin
-                from pt in ptJoin.DefaultIfEmpty()
-                where oi.order_id == orderId
-                orderby oi.item_id
-                select new ImportReceiveItemDto
-                {
-                    item_id = oi.item_id,
-                    product_name = oi.product_name,
-                    quantity = oi.quantity,
-                    packaging_standard = pt != null ? pt.packaging_standard : null
-                }
-            ).ToListAsync(ct);
-
-            return new ImportReceiveSourceDto
-            {
-                prod_id = prod.prod_id,
-                order_id = order.order_id,
-                order_code = order.code ?? string.Empty,
-                items = items
-            };
+                .FirstOrDefault();
         }
 
         public async Task<bool> SaveImportReceivePathAsync(int prodId, string path, CancellationToken ct = default)
@@ -4447,6 +4415,123 @@ namespace AMMS.Infrastructure.Repositories
             prod.import_recieve_path = path;
             await _db.SaveChangesAsync(ct);
             return true;
+        }
+
+        public async Task<List<ImportReceiveSourceDto>> GetImportReceiveSourcesByOrderIdAsync(
+    int orderId,
+    CancellationToken ct = default)
+        {
+            if (orderId <= 0)
+                return new List<ImportReceiveSourceDto>();
+
+            var order = await _db.orders
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.order_id == orderId, ct);
+
+            if (order == null)
+                return new List<ImportReceiveSourceDto>();
+
+            // 1. Production riêng gắn trực tiếp với order
+            var directProdIds = await _db.productions
+                .AsNoTracking()
+                .Where(x =>
+                    x.order_id == orderId &&
+                    (
+                        x.prod_kind == null ||
+                        x.prod_kind.ToUpper() != "GROUP"
+                    ))
+                .Select(x => x.prod_id)
+                .ToListAsync(ct);
+
+            // 2. Production được gắn ở orders.production_id
+            // Nhưng vẫn phải check không phải GROUP
+            var orderProductionIds = new List<int>();
+
+            if (order.production_id.HasValue && order.production_id.Value > 0)
+            {
+                var isGroupProduction = await _db.productions
+                    .AsNoTracking()
+                    .AnyAsync(x =>
+                        x.prod_id == order.production_id.Value &&
+                        x.prod_kind != null &&
+                        x.prod_kind.ToUpper() == "GROUP",
+                        ct);
+
+                if (!isGroupProduction)
+                    orderProductionIds.Add(order.production_id.Value);
+            }
+
+            // 3. Nếu order có nằm trong prod_orders:
+            // po.prod_id là production ghép GROUP => KHÔNG lấy
+            // po.single_prod_id là production riêng của order nếu có => CÓ THỂ lấy
+            var singleProdIdsFromProdOrders = await _db.prod_orders
+                .AsNoTracking()
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.single_prod_id != null &&
+                    x.single_prod_id.Value > 0 &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
+                .Select(x => x.single_prod_id!.Value)
+                .Distinct()
+                .ToListAsync(ct);
+
+            var allProdIds = directProdIds
+                .Concat(orderProductionIds)
+                .Concat(singleProdIdsFromProdOrders)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            if (allProdIds.Count == 0)
+                return new List<ImportReceiveSourceDto>();
+
+            // 4. Lấy production cuối cùng và loại bỏ GROUP lần nữa để chắc chắn
+            var productions = await _db.productions
+                .AsNoTracking()
+                .Where(x =>
+                    allProdIds.Contains(x.prod_id) &&
+                    (
+                        x.prod_kind == null ||
+                        x.prod_kind.ToUpper() != "GROUP"
+                    ))
+                .OrderBy(x => x.prod_id)
+                .ToListAsync(ct);
+
+            if (productions.Count == 0)
+                return new List<ImportReceiveSourceDto>();
+
+            var items = await (
+                from oi in _db.order_items.AsNoTracking()
+
+                join pt in _db.product_types.AsNoTracking()
+                    on oi.product_type_id equals pt.product_type_id into ptJoin
+                from pt in ptJoin.DefaultIfEmpty()
+
+                where oi.order_id == orderId
+
+                orderby oi.item_id
+
+                select new ImportReceiveItemDto
+                {
+                    item_id = oi.item_id,
+                    product_name = oi.product_name,
+                    quantity = oi.quantity,
+                    packaging_standard = pt != null ? pt.packaging_standard : null
+                }
+            ).ToListAsync(ct);
+
+            var result = productions.Select(prod => new ImportReceiveSourceDto
+            {
+                prod_id = prod.prod_id,
+                order_id = order.order_id,
+                order_code = order.code ?? "",
+                items = items
+            }).ToList();
+
+            return result;
         }
 
         private static BothStageQuantityContext ResolveBothStageQuantityContext(
