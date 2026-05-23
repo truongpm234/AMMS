@@ -40,5 +40,6 @@ namespace AMMS.Infrastructure.Interfaces
         Task<ProductionDetailDto?> GetProductionDetailByProdIdAsync(
             int prodId,
             CancellationToken ct = default);
+        Task<List<ImportReceiveSourceDto>> GetImportReceiveSourcesByOrderIdAsync(int orderId, CancellationToken ct = default);
     }
 }
