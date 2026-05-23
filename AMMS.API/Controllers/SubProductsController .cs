@@ -108,16 +108,6 @@ namespace AMMS.API.Controllers
             return Ok(result);
         }
 
-        /*
-         * Tạo 1 file PDF chung cho nhiều sub_product_id.
-         *
-         * Method dùng PUT thay vì POST để tránh case FE bắt buộc POST phải có body đặc biệt.
-         *
-         * Body:
-         * {
-         *   "sub_product_ids": [1, 2, 3]
-         * }
-         */
         [HttpPut("generate-import-receipts")]
         public async Task<IActionResult> GenerateImportReceipts(
             [FromBody] GenerateSubProductImportReceiptsRequestDto dto,
@@ -157,18 +147,6 @@ namespace AMMS.API.Controllers
             }
         }
 
-        /*
-         * Nhập kho bán thành phẩm pending.
-         *
-         * Đổi từ POST sang PUT.
-         * Không cần body.
-         *
-         * Nhập tất cả pending:
-         * PUT /api/SubProducts/import-pending
-         *
-         * Nhập một số id:
-         * PUT /api/SubProducts/import-pending?ids=1&ids=2&ids=3
-         */
         [HttpPut("import-pending")]
         public async Task<IActionResult> ImportPending(
             [FromQuery] List<int>? ids,

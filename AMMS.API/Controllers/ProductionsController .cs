@@ -458,6 +458,52 @@ namespace AMMS.API.Controllers
             }
         }
 
+        [HttpPut("mark-importing/{prodId:int}")]
+        public async Task<IActionResult> MarkProductionImportingByProdId(
+    int prodId,
+    CancellationToken ct)
+        {
+            try
+            {
+                var result = await _service.ForceSetProductionImportingByProdIdAsync(
+                    prodId,
+                    ct);
+
+                if (result == null)
+                {
+                    return NotFound(new
+                    {
+                        message = "Production not found.",
+                        prod_id = prodId
+                    });
+                }
+
+                await _hub.Clients.All.SendAsync(
+                    "update-ui",
+                    new { message = "update UI" },
+                    ct);
+
+                return Ok(result);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message,
+                    prod_id = prodId
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    message = "Mark production importing failed",
+                    detail = ex.Message,
+                    prod_id = prodId
+                });
+            }
+        }
+
         [HttpPut("delivery/{orderId:int}")]
         public async Task<IActionResult> SetDelivery(int orderId, CancellationToken ct)
         {

@@ -363,8 +363,7 @@ namespace AMMS.Application.Services
 
             /*
              * GROUP production không có order_id trực tiếp.
-             * Lấy order đầu tiên trong prod_orders để lấy size/product_type.
-             * Logic group của bạn đang ghép theo cùng loại/kích thước nên cách này không phá flow.
+             * Lấy order đầu tiên trong prod_orders để lấy product_type/size.
              */
             if (!sourceOrderId.HasValue)
             {
@@ -403,23 +402,34 @@ namespace AMMS.Application.Services
                 if (qty <= 0)
                     continue;
 
-                var processCode = NormSubProductProcess(input.input_code);
+                /*
+                 * input.input_code là stage BTP bị dư.
+                 * Ví dụ input_code=IN => product_process phải là RALO,CAT,IN.
+                 */
+                var targetProcessCode = NormSubProductProcess(input.input_code);
 
-                if (string.IsNullOrWhiteSpace(processCode))
+                if (string.IsNullOrWhiteSpace(targetProcessCode))
                     continue;
+
+                var processPath = await ResolveSubProductProcessPathAsync(
+                    sourceOrderId,
+                    prod.prod_id,
+                    targetProcessCode,
+                    ct);
+
+                if (string.IsNullOrWhiteSpace(processPath))
+                    processPath = targetProcessCode;
 
                 var pending = new sub_product
                 {
                     product_type_id = productTypeId.Value,
                     width = item?.width,
                     length = item?.length,
-                    product_process = processCode,
+                    product_process = processPath,
                     quantity = qty,
 
                     /*
-                     * Quan trọng:
                      * Chưa nhập kho thật nên không active.
-                     * Không ảnh hưởng flow chọn SUB/BOTH hiện tại.
                      */
                     is_active = false,
                     is_imported = false,
@@ -431,13 +441,81 @@ namespace AMMS.Application.Services
 
                     description =
                         $"BTP dư từ task_id={currentTask.task_id}, prod_id={prod.prod_id}, " +
-                        $"process={processCode}, qty_left={input.quantity_left}, tạo lúc {now:yyyy-MM-dd HH:mm:ss}.",
+                        $"target_process={targetProcessCode}, product_process={processPath}, " +
+                        $"qty_left={input.quantity_left}, tạo lúc {now:yyyy-MM-dd HH:mm:ss}.",
 
                     updated_at = now
                 };
 
                 await _db.sub_products.AddAsync(pending, ct);
             }
+        }
+
+        private async Task<string> ResolveSubProductProcessPathAsync(
+    int? sourceOrderId,
+    int prodId,
+    string? targetProcessCode,
+    CancellationToken ct)
+        {
+            var target = NormSubProductProcess(targetProcessCode);
+
+            if (string.IsNullOrWhiteSpace(target))
+                return "";
+
+            var route = new List<string>();
+
+            if (sourceOrderId.HasValue)
+            {
+                var csv = await _db.order_items
+                    .AsNoTracking()
+                    .Where(x => x.order_id == sourceOrderId.Value)
+                    .OrderBy(x => x.item_id)
+                    .Select(x => x.production_process)
+                    .FirstOrDefaultAsync(ct);
+
+                route = ParseSubProductProcessRoute(csv);
+            }
+
+            if (route.Count == 0)
+            {
+                var taskCodes = await (
+                    from t in _db.tasks.AsNoTracking()
+                    join pp0 in _db.product_type_processes.AsNoTracking()
+                        on t.process_id equals pp0.process_id into ppj
+                    from pp in ppj.DefaultIfEmpty()
+                    where t.prod_id == prodId
+                    orderby t.seq_num, t.task_id
+                    select pp != null ? pp.process_code : null
+                ).ToListAsync(ct);
+
+                route = taskCodes
+                    .Select(NormSubProductProcess)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .ToList();
+            }
+
+            if (route.Count == 0)
+                return target;
+
+            var idx = route.FindIndex(x =>
+                string.Equals(x, target, StringComparison.OrdinalIgnoreCase));
+
+            if (idx < 0)
+                return target;
+
+            return string.Join(",", route.Take(idx + 1));
+        }
+
+        private static List<string> ParseSubProductProcessRoute(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormSubProductProcess)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
         }
 
         private static int ToSubProductQty(decimal quantityLeft)

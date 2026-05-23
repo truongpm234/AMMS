@@ -136,6 +136,22 @@ namespace AMMS.Application.Services
                     continue;
                 }
 
+                //Case SUB
+
+                var waitingImporting = await IsFinishedSubHeadProductionWaitingImportingAsync(
+                    item.prod_id,
+                    ct);
+
+                if (waitingImporting)
+                {
+                    item.can_start = false;
+                    item.can_start_message =
+                        $"Production {item.prod_id} là production đầu RALO,CAT,IN đã Finished toàn bộ task " +
+                        "nhưng production_status chưa Importing. " +
+                        $"Gọi PUT /api/Productions/mark-importing/{item.prod_id} trước.";
+                    continue;
+                }
+
                 var isGroup =
                     string.Equals(item.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase);
 
@@ -792,6 +808,74 @@ namespace AMMS.Application.Services
             return methods.Count == 1
                 ? methods[0]
                 : null;
+        }
+
+        private static readonly HashSet<string> SubHeadCodesForService = new(StringComparer.OrdinalIgnoreCase)
+{
+    "RALO",
+    "CAT",
+    "IN"
+};
+
+        private async Task<bool> IsFinishedSubHeadProductionWaitingImportingAsync(
+            int prodId,
+            CancellationToken ct)
+        {
+            var prod = await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.prod_id == prodId, ct);
+
+            if (prod == null)
+                return false;
+
+            if (string.Equals(prod.status, "Importing", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var tasks = await (
+                from t in _db.tasks.AsNoTracking()
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+                where t.prod_id == prodId
+                orderby t.seq_num, t.task_id
+                select new
+                {
+                    process_code = pp != null ? pp.process_code : null,
+                    t.status,
+                    t.end_time
+                }
+            ).ToListAsync(ct);
+
+            if (tasks.Count == 0)
+                return false;
+
+            var codes = tasks
+                .Select(x => NormCodeForService(x.process_code))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            if (codes.Count == 0)
+                return false;
+
+            var isSubHead = codes.All(x => SubHeadCodesForService.Contains(x));
+
+            if (!isSubHead)
+                return false;
+
+            var allFinished = tasks.All(x =>
+                string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                x.end_time != null);
+
+            return allFinished;
+        }
+
+        private static string NormCodeForService(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
         }
 
         private async Task ApplyAutoProductionMethodAsync(
@@ -2425,6 +2509,159 @@ namespace AMMS.Application.Services
             }
         }
 
+        public async Task<ForceProductionImportingResponseDto?> ForceSetProductionImportingByProdIdAsync(
+    int prodId,
+    CancellationToken ct = default)
+        {
+            var strategy = _db.Database.CreateExecutionStrategy();
+
+            return await strategy.ExecuteAsync(async () =>
+            {
+                await using var tx = await _db.Database.BeginTransactionAsync(ct);
+
+                var prod = await _db.productions
+                    .FirstOrDefaultAsync(x => x.prod_id == prodId, ct);
+
+                if (prod == null)
+                    return null;
+
+                if (string.Equals(prod.status, "Completed", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(prod.status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(prod.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"Không thể chuyển Importing vì production đang ở trạng thái {prod.status}.");
+                }
+
+                var tasks = await _db.tasks
+                    .Where(x => x.prod_id == prodId)
+                    .Select(x => new
+                    {
+                        x.status,
+                        x.start_time,
+                        x.end_time
+                    })
+                    .ToListAsync(ct);
+
+                if (tasks.Count == 0)
+                    throw new InvalidOperationException("Production chưa có task.");
+
+                var allFinished = tasks.All(x =>
+                    string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                    x.end_time != null);
+
+                if (!allFinished)
+                {
+                    throw new InvalidOperationException(
+                        "Chỉ được chuyển Importing khi tất cả task của production đã Finished.");
+                }
+
+                var now = AppTime.NowVnUnspecified();
+
+                var finishedAt = tasks
+                    .Where(x => x.end_time != null)
+                    .Select(x => x.end_time!.Value)
+                    .DefaultIfEmpty(now)
+                    .Max();
+
+                prod.status = "Importing";
+                prod.end_date ??= finishedAt;
+                prod.actual_start_date ??= tasks
+                    .Where(x => x.start_time != null)
+                    .Select(x => x.start_time!.Value)
+                    .DefaultIfEmpty(finishedAt)
+                    .Min();
+
+                prod.created_at ??= now;
+                prod.planned_start_date ??= now;
+
+                var orderIds = new List<int>();
+
+                var isGroup = string.Equals(
+                    prod.prod_kind,
+                    "GROUP",
+                    StringComparison.OrdinalIgnoreCase);
+
+                if (isGroup)
+                {
+                    orderIds = await _db.prod_orders
+                        .AsNoTracking()
+                        .Where(x =>
+                            x.prod_id == prod.prod_id &&
+                            x.status == "Active")
+                        .Select(x => x.order_id)
+                        .Distinct()
+                        .ToListAsync(ct);
+                }
+                else if (prod.order_id.HasValue)
+                {
+                    orderIds.Add(prod.order_id.Value);
+                }
+
+                orderIds = orderIds
+                    .Where(x => x > 0)
+                    .Distinct()
+                    .ToList();
+
+                var updatedOrderCount = 0;
+                var updatedRequestCount = 0;
+
+                if (orderIds.Count > 0)
+                {
+                    var orders = await _db.orders
+                        .Where(x => orderIds.Contains(x.order_id))
+                        .ToListAsync(ct);
+
+                    foreach (var order in orders)
+                    {
+                        if (string.Equals(order.status, "Completed", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(order.status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(order.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        order.status = "Importing";
+                        updatedOrderCount++;
+                    }
+
+                    var requests = await _db.order_requests
+                        .Where(x =>
+                            x.order_id.HasValue &&
+                            orderIds.Contains(x.order_id.Value))
+                        .ToListAsync(ct);
+
+                    foreach (var req in requests)
+                    {
+                        if (string.Equals(req.process_status, "Completed", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(req.process_status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(req.process_status, "Cancel", StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        req.process_status = "Importing";
+                        updatedRequestCount++;
+                    }
+                }
+
+                await _db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
+
+                return new ForceProductionImportingResponseDto
+                {
+                    success = true,
+                    prod_id = prod.prod_id,
+                    production_code = prod.code,
+                    production_status = "Importing",
+                    order_ids = orderIds,
+                    updated_order_count = updatedOrderCount,
+                    updated_request_count = updatedRequestCount,
+                    importing_at = finishedAt,
+                    message = "Đã hoàn thành lệnh sản xuất."
+                };
+            });
+        }
         private readonly IWebHostEnvironment _env;
     }
 }

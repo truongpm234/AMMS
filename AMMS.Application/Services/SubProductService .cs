@@ -196,8 +196,8 @@ namespace AMMS.Application.Services
         }
 
         public async Task<SubProductImportReceiptBatchResponseDto> GenerateImportReceiptsAsync(
-            List<int> subProductIds,
-            CancellationToken ct = default)
+    List<int> subProductIds,
+    CancellationToken ct = default)
         {
             subProductIds = (subProductIds ?? new List<int>())
                 .Where(x => x > 0)
@@ -207,11 +207,28 @@ namespace AMMS.Application.Services
             if (subProductIds.Count == 0)
                 throw new ArgumentException("sub_product_ids is required");
 
-            var items = await _db.sub_products
-                .Include(x => x.product_type)
-                .Where(x => subProductIds.Contains(x.id))
-                .OrderBy(x => x.id)
-                .ToListAsync(ct);
+            var items = await (
+                from sp in _db.sub_products.AsNoTracking()
+                join pt0 in _db.product_types.AsNoTracking()
+                    on sp.product_type_id equals pt0.product_type_id into ptj
+                from pt in ptj.DefaultIfEmpty()
+                where subProductIds.Contains(sp.id)
+                orderby sp.id
+                select new SubProductImportReceiptPdfItem
+                {
+                    id = sp.id,
+                    product_type_id = sp.product_type_id,
+                    product_type_name = pt != null ? pt.name : null,
+                    width = sp.width,
+                    length = sp.length,
+                    product_process = sp.product_process,
+                    quantity = sp.quantity,
+                    source_order_id = sp.source_order_id,
+                    source_prod_id = sp.source_prod_id,
+                    source_task_id = sp.source_task_id,
+                    description = sp.description
+                }
+            ).ToListAsync(ct);
 
             if (items.Count == 0)
                 throw new InvalidOperationException("Sub products not found");
@@ -222,12 +239,15 @@ namespace AMMS.Application.Services
             if (missingIds.Count > 0)
                 throw new InvalidOperationException($"Sub product not found: {string.Join(", ", missingIds)}");
 
-            var pdfBytes = SubProductImportReceiptPdfHelper.GeneratePdf(items);
-
             var now = AppTime.NowVnUnspecified();
-            var batchKey = $"{now:yyyyMMddHHmmss}";
-            var fileName = $"phieu-nhap-ban-thanh-pham-{batchKey}.pdf";
-            var publicId = $"sub-products/import-receipts/batch-{batchKey}";
+            var receiptNo = $"PNBTP-{now:yyyyMMddHHmmss}";
+            var fileName = $"phieu-nhap-ban-thanh-pham-{now:yyyyMMddHHmmss}.pdf";
+            var publicId = $"sub-products/import-receipts/{receiptNo}";
+
+            var pdfBytes = SubProductImportReceiptPdfHelper.GeneratePdf(
+                items,
+                receiptNo,
+                now);
 
             await using var ms = new MemoryStream(pdfBytes);
 
@@ -237,13 +257,11 @@ namespace AMMS.Application.Services
                 "application/pdf",
                 publicId);
 
-            foreach (var item in items)
-            {
-                item.import_file = cloudUrl;
-                item.updated_at = now;
-            }
-
-            await _db.SaveChangesAsync(ct);
+            await _db.sub_products
+                .Where(x => subProductIds.Contains(x.id))
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.import_file, cloudUrl)
+                    .SetProperty(x => x.updated_at, now), ct);
 
             return new SubProductImportReceiptBatchResponseDto
             {
@@ -256,14 +274,12 @@ namespace AMMS.Application.Services
                 {
                     sub_product_id = x.id,
                     product_type_id = x.product_type_id,
-                    product_type_name = x.product_type?.name,
+                    product_type_name = x.product_type_name,
                     width = x.width,
                     length = x.length,
                     product_process = x.product_process,
                     quantity = x.quantity,
-                    is_active = x.is_active,
-                    is_imported = x.is_imported,
-                    import_file = x.import_file
+                    import_file = cloudUrl
                 }).ToList()
             };
         }

@@ -18,22 +18,14 @@ namespace AMMS.Application.Interfaces
         Task<ProductionWasteReportDto?> GetProductionWasteAsync(int prodId, CancellationToken ct = default);
         Task<bool> SetProductionDeliveryAsync(int orderId, CancellationToken ct = default);
         Task<bool> SetCompletedAsync(int orderId, CancellationToken ct = default);
-        Task<int?> StartProductionAndPromoteFirstTaskByProdIdAsync(
-            int prodId,
-            CancellationToken ct = default);
+        Task<int?> StartProductionAndPromoteFirstTaskByProdIdAsync(int prodId, CancellationToken ct = default);
         Task<List<MachineScheduleBoardDto>> GetMachineScheduleBoardAsync(DateTime from, DateTime to, CancellationToken ct = default);
         Task<ProductionReadyCheckResponse?> GetProductionReadyAsync(int orderId, CancellationToken ct = default);
         Task<GenerateImportReceiveResponse?> GenerateImportReceiveAsync(int orderId, CancellationToken ct = default);
         Task<SetProductionMethodResponse?> SetProductionMethodAsync(SetProductionMethodRequest req, CancellationToken ct = default);
         Task<int?> ScheduleTasksAfterMethodAsync(int orderId, CancellationToken ct = default);
-        Task<bool> SetProductionReadyAsync(
-    int orderId,
-    bool isProductionReady,
-    string? gmNote = null,
-    string? proposedProductionMethod = null,
-    CancellationToken ct = default);
-        Task<ProductionDetailDto?> GetProductionDetailByProdIdAsync(
-                int prodId,
-                CancellationToken ct = default);
+        Task<bool> SetProductionReadyAsync(int orderId, bool isProductionReady, string? gmNote = null, string? proposedProductionMethod = null, CancellationToken ct = default);
+        Task<ProductionDetailDto?> GetProductionDetailByProdIdAsync(int prodId, CancellationToken ct = default);
+        Task<ForceProductionImportingResponseDto?> ForceSetProductionImportingByProdIdAsync(int prodId, CancellationToken ct = default);
     }
 }

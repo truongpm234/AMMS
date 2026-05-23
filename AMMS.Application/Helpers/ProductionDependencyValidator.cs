@@ -119,6 +119,31 @@ public static class ProductionDependencyValidator
     .AsNoTracking()
     .FirstOrDefaultAsync(x => x.prod_id == currentTask.prod_id.Value, ct);
 
+        if (prod == null)
+        {
+            return new ProductionDependencyCheckResult
+            {
+                can_start = false,
+                issues = new List<ProductionDependencyIssueDto>
+        {
+            new()
+            {
+                current_task_id = taskId,
+                message = $"Không tìm thấy production của task {taskId}."
+            }
+        }
+            };
+        }
+
+        var subHeadGate = await CheckSubHeadProductionMustBeImportingAsync(
+            db,
+            prod,
+            currentTask.task_id,
+            ct);
+
+        if (!subHeadGate.can_start)
+            return subHeadGate;
+
         var isGroupProduction =
             prod != null &&
             string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase);
@@ -209,6 +234,172 @@ public static class ProductionDependencyValidator
         }
 
         return result;
+    }
+
+    private static readonly HashSet<string> SubHeadCodes = new(StringComparer.OrdinalIgnoreCase)
+{
+    "RALO",
+    "CAT",
+    "IN"
+};
+
+    private static async Task<ProductionDependencyCheckResult> CheckSubHeadProductionMustBeImportingAsync(
+        AppDbContext db,
+        production currentProd,
+        int currentTaskId,
+        CancellationToken ct)
+    {
+        var currentCodes = await GetProductionProcessCodesAsync(db, currentProd.prod_id, ct);
+
+        /*
+         * Nếu chính production hiện tại là production đầu RALO,CAT,IN
+         * thì không tự chặn chính nó.
+         */
+        if (IsSubHeadProductionByCodes(currentCodes))
+        {
+            return new ProductionDependencyCheckResult
+            {
+                can_start = true
+            };
+        }
+
+        var orderIds = await ResolveOrderIdsOfTaskAsync(db, currentProd.prod_id, ct);
+
+        if (orderIds.Count == 0)
+        {
+            return new ProductionDependencyCheckResult
+            {
+                can_start = true
+            };
+        }
+
+        var result = new ProductionDependencyCheckResult
+        {
+            can_start = true
+        };
+
+        foreach (var orderId in orderIds)
+        {
+            var relatedProds = await db.productions
+                .AsNoTracking()
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.prod_id != currentProd.prod_id &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
+                .Select(x => new
+                {
+                    x.prod_id,
+                    x.code,
+                    x.status,
+                    x.prod_method,
+                    x.prod_kind
+                })
+                .ToListAsync(ct);
+
+            foreach (var p in relatedProds)
+            {
+                var codes = await GetProductionProcessCodesAsync(db, p.prod_id, ct);
+
+                var isSubHead =
+                    IsSubHeadProductionByCodes(codes) ||
+                    string.Equals(p.prod_method, "SUB", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(p.prod_method, "BOTH", StringComparison.OrdinalIgnoreCase);
+
+                if (!isSubHead)
+                    continue;
+
+                var allTasksFinished = await AreAllProductionTasksFinishedAsync(
+                    db,
+                    p.prod_id,
+                    ct);
+
+                if (!allTasksFinished)
+                {
+                    result.can_start = false;
+                    result.issues.Add(new ProductionDependencyIssueDto
+                    {
+                        order_id = orderId,
+                        current_task_id = currentTaskId,
+                        message =
+                            $"Order {orderId}: production đầu SUB/RALO-CAT-IN chưa hoàn thành task. " +
+                            $"prod_id={p.prod_id}, status={p.status}."
+                    });
+
+                    continue;
+                }
+
+                if (!string.Equals(p.status, "Importing", StringComparison.OrdinalIgnoreCase))
+                {
+                    result.can_start = false;
+                    result.issues.Add(new ProductionDependencyIssueDto
+                    {
+                        order_id = orderId,
+                        current_task_id = currentTaskId,
+                        message =
+                            $"Order {orderId}: production đầu RALO,CAT,IN đã Finished task nhưng chưa chuyển Importing. " +
+                            $"Vui lòng gọi API PUT /api/Productions/mark-importing/{p.prod_id} trước khi start production sau. " +
+                            $"Current prod_id={p.prod_id}, status={p.status}."
+                    });
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private static async Task<List<string>> GetProductionProcessCodesAsync(
+        AppDbContext db,
+        int prodId,
+        CancellationToken ct)
+    {
+        var rows = await (
+            from t in db.tasks.AsNoTracking()
+            join pp0 in db.product_type_processes.AsNoTracking()
+                on t.process_id equals pp0.process_id into ppj
+            from pp in ppj.DefaultIfEmpty()
+            where t.prod_id == prodId
+            orderby t.seq_num, t.task_id
+            select pp != null ? pp.process_code : null
+        ).ToListAsync(ct);
+
+        return rows
+            .Select(Norm)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToList();
+    }
+
+    private static bool IsSubHeadProductionByCodes(List<string> codes)
+    {
+        if (codes == null || codes.Count == 0)
+            return false;
+
+        return codes.All(x => SubHeadCodes.Contains(Norm(x)));
+    }
+
+    private static async Task<bool> AreAllProductionTasksFinishedAsync(
+        AppDbContext db,
+        int prodId,
+        CancellationToken ct)
+    {
+        var tasks = await db.tasks
+            .AsNoTracking()
+            .Where(x => x.prod_id == prodId)
+            .Select(x => new
+            {
+                x.status,
+                x.end_time
+            })
+            .ToListAsync(ct);
+
+        if (tasks.Count == 0)
+            return false;
+
+        return tasks.All(x =>
+            string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+            x.end_time != null);
     }
 
     private static async Task<(bool ok, string message)> CheckSingleProductionLogicalPreviousDoneAsync(
