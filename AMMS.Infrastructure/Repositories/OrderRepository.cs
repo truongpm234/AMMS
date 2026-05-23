@@ -38,21 +38,24 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             var orders = await (
-                from o in _db.orders.AsNoTracking()
+    from o in _db.orders.AsNoTracking()
 
-                join q in _db.quotes.AsNoTracking()
-                    on o.quote_id equals q.quote_id into qj
-                from q in qj.DefaultIfEmpty()
+    join q in _db.quotes.AsNoTracking()
+        on o.quote_id equals q.quote_id into qj
+    from q in qj.DefaultIfEmpty()
 
-                join r in _db.order_requests.AsNoTracking()
-                    on o.order_id equals r.order_id into rj
-                from r in rj.DefaultIfEmpty()
+    join r in _db.order_requests.AsNoTracking()
+        on o.order_id equals r.order_id into rj
+    from r in rj.DefaultIfEmpty()
 
-                join p in _db.productions.AsNoTracking()
-                    on o.production_id equals p.prod_id into pj
-                from p in pj.DefaultIfEmpty()
+    let p = _db.productions.AsNoTracking()
+        .Where(x =>
+            (o.production_id != null && x.prod_id == o.production_id.Value) ||
+            (x.order_id != null && x.order_id.Value == o.order_id))
+        .OrderByDescending(x => x.prod_id)
+        .FirstOrDefault()
 
-                orderby o.order_date descending, o.order_id descending
+    orderby o.order_date descending, o.order_id descending
 
     select new
     {
@@ -63,13 +66,17 @@ namespace AMMS.Infrastructure.Repositories
         Status = o.status ?? "",
         is_production_ready = o.is_production_ready,
         customer_name = r != null ? (r.customer_name ?? "") : "Khách hàng",
+
         is_full_process = p != null ? (bool?)p.is_full_process : null,
+
         import_recieve_path = p != null ? p.import_recieve_path : null,
+
         production_method = p != null ? p.prod_method : null,
         sub_product_id = p != null ? p.sub_product_id : null,
         layout_confirmed = o.layout_confirmed,
         sub_product_used_qty = p != null ? p.sub_product_used_qty : 0,
         nvl_qty = p != null ? p.nvl_qty : 0,
+
         FirstItem = _db.order_items.AsNoTracking()
             .Where(i => i.order_id == o.order_id)
             .OrderBy(i => i.item_id)
