@@ -1093,7 +1093,7 @@ namespace AMMS.Application.Services
                 var mats = await BuildConsumableMaterialsAsync(singleCtx, ct);
                 var refs = await BuildReferenceInputsForGroupLinkAsync(
                     singleCtx,
-                    link.order_id,
+                    link,
                     link.process_code ?? groupTask.process?.process_code,
                     ct);
 
@@ -1185,7 +1185,7 @@ namespace AMMS.Application.Services
 
         private async Task<List<TaskReferenceInputDto>> BuildReferenceInputsForGroupLinkAsync(
     TaskEstimateContext ctx,
-    int orderId,
+    task_link link,
     string? currentProcessCode,
     CancellationToken ct)
         {
@@ -1194,7 +1194,7 @@ namespace AMMS.Application.Services
             if (string.IsNullOrWhiteSpace(currentCode))
                 return new List<TaskReferenceInputDto>();
 
-            var routeCodes = await ResolveRouteProcessCodesForOrderAsync(orderId, ct);
+            var routeCodes = await ResolveRouteProcessCodesForOrderAsync(link.order_id, ct);
 
             if (routeCodes.Count == 0)
                 return new List<TaskReferenceInputDto>();
@@ -1210,7 +1210,16 @@ namespace AMMS.Application.Services
 
             var previousCode = ProductionFlowHelper.Norm(routeCodes[currentIndex - 1]);
 
-            var (unit, qty) = ResolveReferenceInputShape(
+            var methodShape = await TryResolveReferenceInputShapeByProductionMethodAsync(
+                ctx: ctx,
+                currentProcessCode: currentCode,
+                previousProcessCode: previousCode,
+                currentStageIndex: currentIndex,
+                routeProcessCodes: routeCodes,
+                linkQtyPlan: link.qty_plan,
+                ct: ct);
+
+            var shape = methodShape ?? ResolveReferenceInputShape(
                 currentProcessCode: currentCode,
                 currentStageIndex: currentIndex,
                 routeProcessCodes: routeCodes,
@@ -1222,10 +1231,195 @@ namespace AMMS.Application.Services
         {
             input_code = previousCode,
             input_name = $"Bán thành phẩm từ công đoạn {previousCode}",
-            unit = unit,
-            estimated_qty = Math.Round(qty, 4)
+            unit = shape.unit,
+            estimated_qty = Math.Round(shape.qty, 4)
         }
     };
+        }
+
+        private async Task<(string unit, decimal qty)?> TryResolveReferenceInputShapeByProductionMethodAsync(
+    TaskEstimateContext ctx,
+    string? currentProcessCode,
+    string? previousProcessCode,
+    int currentStageIndex,
+    IReadOnlyList<string?> routeProcessCodes,
+    int? linkQtyPlan,
+    CancellationToken ct)
+        {
+            var method = NormBothProcessCodeForScan(ctx.Production.prod_method);
+            var currentCode = NormBothProcessCodeForScan(currentProcessCode);
+
+            if (string.IsNullOrWhiteSpace(method))
+                return null;
+
+            /*
+             * SUB:
+             * - Các công đoạn trước đã lấy từ bán thành phẩm.
+             * - Input tham chiếu cho PHU/CAN/BOI/BE/DUT/DAN phải theo số lượng sp,
+             *   không theo sheets_total của estimate.
+             */
+            if (method == "SUB")
+            {
+                if (IsDownstreamBtpStageForReference(currentCode))
+                {
+                    return (
+                        unit: "sp",
+                        qty: ResolveProductReferenceQty(ctx, linkQtyPlan)
+                    );
+                }
+
+                var subCodes = await ResolveSubProductProcessCodesForReferenceAsync(
+                    ctx.Production,
+                    ct);
+
+                if (IsCurrentAfterSubProductBoundary(
+                    currentCode,
+                    routeProcessCodes,
+                    subCodes))
+                {
+                    return (
+                        unit: "sp",
+                        qty: ResolveProductReferenceQty(ctx, linkQtyPlan)
+                    );
+                }
+
+                return null;
+            }
+
+            /*
+             * BOTH:
+             * - Nếu current stage nằm sau phần đã lấy từ sub_product
+             *   thì input cũng phải là số lượng sp đã đồng bộ.
+             * - Nếu vẫn đang ở phần NVL tự sản xuất thì giữ logic cũ.
+             */
+            if (method == "BOTH")
+            {
+                var subCodes = await ResolveSubProductProcessCodesForReferenceAsync(
+                    ctx.Production,
+                    ct);
+
+                if (subCodes.Count == 0)
+                {
+                    if (IsDownstreamBtpStageForReference(currentCode))
+                    {
+                        return (
+                            unit: "sp",
+                            qty: ResolveProductReferenceQty(ctx, linkQtyPlan)
+                        );
+                    }
+
+                    return null;
+                }
+
+                if (IsCurrentAfterSubProductBoundary(
+                    currentCode,
+                    routeProcessCodes,
+                    subCodes))
+                {
+                    return (
+                        unit: "sp",
+                        qty: ResolveProductReferenceQty(ctx, linkQtyPlan)
+                    );
+                }
+
+                return null;
+            }
+
+            /*
+             * NVL:
+             * giữ logic cũ: dùng sheets_total, n_up, number_of_plates...
+             */
+            return null;
+        }
+
+        private static bool IsDownstreamBtpStageForReference(string? processCode)
+        {
+            var code = NormBothProcessCodeForScan(processCode);
+
+            return code is
+                "PHU" or
+                "CAN" or
+                "CAN_MANG" or
+                "BOI" or
+                "BE" or
+                "DUT" or
+                "DAN";
+        }
+
+        private static decimal ResolveProductReferenceQty(
+            TaskEstimateContext ctx,
+            int? linkQtyPlan)
+        {
+            if (linkQtyPlan.HasValue && linkQtyPlan.Value > 0)
+                return linkQtyPlan.Value;
+
+            if (ctx.Request.quantity.HasValue && ctx.Request.quantity.Value > 0)
+                return ctx.Request.quantity.Value;
+
+            if (ctx.Production.group_total_qty > 0)
+                return ctx.Production.group_total_qty;
+
+            var nvlQty = ctx.Production.nvl_qty;
+            var subQty = ctx.Production.sub_product_used_qty;
+
+            if (nvlQty + subQty > 0)
+                return nvlQty + subQty;
+
+            return 1m;
+        }
+
+        private async Task<List<string>> ResolveSubProductProcessCodesForReferenceAsync(
+            production prod,
+            CancellationToken ct)
+        {
+            if (!prod.sub_product_id.HasValue || prod.sub_product_id.Value <= 0)
+                return new List<string>();
+
+            var processCsv = await _db.sub_products
+                .AsNoTracking()
+                .Where(x => x.id == prod.sub_product_id.Value)
+                .Select(x => x.product_process)
+                .FirstOrDefaultAsync(ct);
+
+            return ParseProcessRouteCsv(processCsv);
+        }
+
+        private static bool IsCurrentAfterSubProductBoundary(
+            string? currentProcessCode,
+            IReadOnlyList<string?> orderRouteCodes,
+            IReadOnlyList<string> subProductCodes)
+        {
+            if (orderRouteCodes == null || orderRouteCodes.Count == 0)
+                return false;
+
+            if (subProductCodes == null || subProductCodes.Count == 0)
+                return false;
+
+            var route = orderRouteCodes
+                .Select(NormBothProcessCodeForScan)
+                .ToList();
+
+            var currentCode = NormBothProcessCodeForScan(currentProcessCode);
+
+            var currentIndex = route.FindIndex(x =>
+                string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase));
+
+            if (currentIndex < 0)
+                return false;
+
+            var subIndexes = subProductCodes
+                .Select(NormBothProcessCodeForScan)
+                .Select(code => route.FindIndex(x =>
+                    string.Equals(x, code, StringComparison.OrdinalIgnoreCase)))
+                .Where(index => index >= 0)
+                .ToList();
+
+            if (subIndexes.Count == 0)
+                return false;
+
+            var subLastIndex = subIndexes.Max();
+
+            return currentIndex > subLastIndex;
         }
 
         private async Task<List<string?>> ResolveRouteProcessCodesForOrderAsync(
@@ -1594,11 +1788,23 @@ namespace AMMS.Application.Services
 
             var currentStageIndex = previousCtx.previous_stage_index + 1;
 
-            var (unit, qty) = ResolveReferenceInputShape(
+            var methodShape = await TryResolveReferenceInputShapeByProductionMethodAsync(
+    ctx: ctx,
+    currentProcessCode: currentCode,
+    previousProcessCode: previousCtx.previous_process_code,
+    currentStageIndex: currentStageIndex,
+    routeProcessCodes: previousCtx.route_process_codes,
+    linkQtyPlan: null,
+    ct: ct);
+
+            var shape = methodShape ?? ResolveReferenceInputShape(
                 currentProcessCode: currentCode,
                 currentStageIndex: currentStageIndex,
                 routeProcessCodes: previousCtx.route_process_codes,
                 ctx: ctx);
+
+            var unit = shape.unit;
+            var qty = shape.qty;
 
             var result = new List<TaskReferenceInputDto>();
 
