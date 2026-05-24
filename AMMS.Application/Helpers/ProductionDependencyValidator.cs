@@ -1,11 +1,5 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using AMMS.Infrastructure.DBContext;
+﻿using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
-using AMMS.Shared.Helpers;
 using Microsoft.EntityFrameworkCore;
 
 namespace AMMS.Application.Helpers;
@@ -41,6 +35,13 @@ public sealed class ProductionDependencyIssueDto
 
 public static class ProductionDependencyValidator
 {
+    private static readonly HashSet<string> SubHeadCodes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "RALO",
+        "CAT",
+        "IN"
+    };
+
     public static async Task<ProductionDependencyCheckResult> CheckProductionCanStartAsync(
         AppDbContext db,
         int prodId,
@@ -99,7 +100,7 @@ public static class ProductionDependencyValidator
             };
         }
 
-        if (!currentTask.prod_id.HasValue || currentTask.prod == null)
+        if (!currentTask.prod_id.HasValue)
         {
             return new ProductionDependencyCheckResult
             {
@@ -115,61 +116,24 @@ public static class ProductionDependencyValidator
             };
         }
 
-        var prod = await db.productions
-    .AsNoTracking()
-    .FirstOrDefaultAsync(x => x.prod_id == currentTask.prod_id.Value, ct);
+        var currentProd = await db.productions
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.prod_id == currentTask.prod_id.Value, ct);
 
-        if (prod == null)
+        if (currentProd == null)
         {
             return new ProductionDependencyCheckResult
             {
                 can_start = false,
                 issues = new List<ProductionDependencyIssueDto>
-        {
-            new()
-            {
-                current_task_id = taskId,
-                message = $"Không tìm thấy production của task {taskId}."
-            }
-        }
-            };
-        }
-
-        var subHeadGate = await CheckSubHeadProductionMustBeImportingAsync(
-            db,
-            prod,
-            currentTask.task_id,
-            ct);
-
-        if (!subHeadGate.can_start)
-            return subHeadGate;
-
-        var isGroupProduction =
-            prod != null &&
-            string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase);
-
-        if (!isGroupProduction)
-        {
-            var logical = await CheckSingleProductionLogicalPreviousDoneAsync(
-                db,
-                currentTask,
-                ct);
-
-            if (!logical.ok)
-            {
-                return new ProductionDependencyCheckResult
                 {
-                    can_start = false,
-                    issues = new List<ProductionDependencyIssueDto>
-    {
-        new()
-        {
-            current_task_id = taskId,
-            message = logical.message
-        }
-    }
-                };
-            }
+                    new()
+                    {
+                        current_task_id = taskId,
+                        message = $"Không tìm thấy production của task {taskId}."
+                    }
+                }
+            };
         }
 
         var currentProcessCode = Norm(currentTask.process?.process_code);
@@ -190,9 +154,74 @@ public static class ProductionDependencyValidator
             };
         }
 
-        var orderIds = await ResolveOrderIdsOfTaskAsync(db, currentTask.prod_id.Value, ct);
+        /*
+         * 1. Check riêng cho case SUB/BOTH:
+         * Production sau chỉ được start khi production đầu RALO,CAT,IN đã Importing.
+         *
+         * FIX quan trọng:
+         * Không được nhận diện production đầu SUB bằng prod_method = SUB/BOTH.
+         * Vì production SPLIT BE,DUT,DAN cũng kế thừa prod_method = SUB/BOTH.
+         * Chỉ nhận diện bằng actual path task của production đó.
+         */
+        var subHeadGate = await CheckSubHeadProductionMustBeImportingAsync(
+            db,
+            currentProd,
+            currentTask.task_id,
+            ct);
 
-        var result = new ProductionDependencyCheckResult();
+        if (!subHeadGate.can_start)
+            return subHeadGate;
+
+        /*
+         * 2. Check pipeline nội bộ trong cùng production.
+         * Ví dụ:
+         * - GROUP PHU,CAN: CAN chỉ được start khi PHU Finished.
+         * - SPLIT BE,DUT,DAN: DUT chỉ được start khi BE Finished.
+         * - SINGLE RALO,CAT,IN: CAT chỉ được start khi RALO Finished.
+         */
+        var internalPipeline = await CheckInternalProductionPipelineAsync(
+            db,
+            currentTask,
+            ct);
+
+        if (!internalPipeline.ok)
+        {
+            return new ProductionDependencyCheckResult
+            {
+                can_start = false,
+                issues = new List<ProductionDependencyIssueDto>
+                {
+                    new()
+                    {
+                        current_task_id = taskId,
+                        current_process_code = currentProcessCode,
+                        message = internalPipeline.message
+                    }
+                }
+            };
+        }
+
+        /*
+         * 3. Check pipeline logic theo order path.
+         * Đây là phần nối giữa các production:
+         * - GROUP PHU phải đợi SINGLE IN của từng order.
+         * - SPLIT BE phải đợi GROUP CAN.
+         *
+         * Nhưng không được check bừa theo order_id rồi lấy nhầm production sau.
+         * Phải tìm đúng previous process code theo order path.
+         */
+        var orderIds = await ResolveOrderIdsOfProductionAsync(
+            db,
+            currentProd.prod_id,
+            ct);
+
+        if (orderIds.Count == 0)
+            return new ProductionDependencyCheckResult { can_start = true };
+
+        var result = new ProductionDependencyCheckResult
+        {
+            can_start = true
+        };
 
         foreach (var orderId in orderIds)
         {
@@ -206,7 +235,7 @@ public static class ProductionDependencyValidator
             if (string.IsNullOrWhiteSpace(previousCode))
                 continue;
 
-            var previous = await FindProcessTaskForOrderAsync(
+            var previous = await FindPreviousStageForOrderAsync(
                 db,
                 orderId,
                 previousCode,
@@ -228,7 +257,8 @@ public static class ProductionDependencyValidator
                     previous_process_code = previousCode,
                     previous_task_id = previous?.task_id,
                     previous_task_status = previous?.status,
-                    message = $"Order {orderId}: công đoạn {currentProcessCode} chưa được bắt đầu vì công đoạn trước đó {previousCode} chưa Finished."
+                    message =
+                        $"Order {orderId}: công đoạn {currentProcessCode} chưa được bắt đầu vì công đoạn trước đó {previousCode} chưa Finished."
                 });
             }
         }
@@ -236,20 +266,16 @@ public static class ProductionDependencyValidator
         return result;
     }
 
-    private static readonly HashSet<string> SubHeadCodes = new(StringComparer.OrdinalIgnoreCase)
-{
-    "RALO",
-    "CAT",
-    "IN"
-};
-
     private static async Task<ProductionDependencyCheckResult> CheckSubHeadProductionMustBeImportingAsync(
         AppDbContext db,
         production currentProd,
         int currentTaskId,
         CancellationToken ct)
     {
-        var currentCodes = await GetProductionProcessCodesAsync(db, currentProd.prod_id, ct);
+        var currentCodes = await GetProductionProcessCodesAsync(
+            db,
+            currentProd.prod_id,
+            ct);
 
         /*
          * Nếu chính production hiện tại là production đầu RALO,CAT,IN
@@ -263,7 +289,24 @@ public static class ProductionDependencyValidator
             };
         }
 
-        var orderIds = await ResolveOrderIdsOfTaskAsync(db, currentProd.prod_id, ct);
+        /*
+         * Chỉ áp dụng rule này cho SUB/BOTH.
+         * NVL full process thì không cần bắt buộc production đầu SUB Importing.
+         */
+        var currentMethod = Norm(currentProd.prod_method);
+
+        if (currentMethod != "SUB" && currentMethod != "BOTH")
+        {
+            return new ProductionDependencyCheckResult
+            {
+                can_start = true
+            };
+        }
+
+        var orderIds = await ResolveOrderIdsOfProductionAsync(
+            db,
+            currentProd.prod_id,
+            ct);
 
         if (orderIds.Count == 0)
         {
@@ -280,40 +323,36 @@ public static class ProductionDependencyValidator
 
         foreach (var orderId in orderIds)
         {
-            var relatedProds = await db.productions
-                .AsNoTracking()
-                .Where(x =>
-                    x.order_id == orderId &&
-                    x.prod_id != currentProd.prod_id &&
-                    (
-                        x.status == null ||
-                        x.status.ToUpper() != "CANCELLED"
-                    ))
-                .Select(x => new
-                {
-                    x.prod_id,
-                    x.code,
-                    x.status,
-                    x.prod_method,
-                    x.prod_kind
-                })
-                .ToListAsync(ct);
+            /*
+             * FIX chính:
+             * Chỉ tìm production đầu bằng actual task path RALO/CAT/IN.
+             * Không dùng prod_method = SUB/BOTH để nhận diện.
+             */
+            var headProductions = await FindSubHeadProductionsByOrderAsync(
+                db,
+                orderId,
+                excludeProdId: currentProd.prod_id,
+                ct);
 
-            foreach (var p in relatedProds)
+            if (headProductions.Count == 0)
             {
-                var codes = await GetProductionProcessCodesAsync(db, p.prod_id, ct);
+                result.can_start = false;
+                result.issues.Add(new ProductionDependencyIssueDto
+                {
+                    order_id = orderId,
+                    current_task_id = currentTaskId,
+                    message =
+                        $"Order {orderId}: không tìm thấy production đầu RALO,CAT,IN để xác nhận đầu vào SUB."
+                });
 
-                var isSubHead =
-                    IsSubHeadProductionByCodes(codes) ||
-                    string.Equals(p.prod_method, "SUB", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(p.prod_method, "BOTH", StringComparison.OrdinalIgnoreCase);
+                continue;
+            }
 
-                if (!isSubHead)
-                    continue;
-
+            foreach (var head in headProductions)
+            {
                 var allTasksFinished = await AreAllProductionTasksFinishedAsync(
                     db,
-                    p.prod_id,
+                    head.prod_id,
                     ct);
 
                 if (!allTasksFinished)
@@ -324,14 +363,14 @@ public static class ProductionDependencyValidator
                         order_id = orderId,
                         current_task_id = currentTaskId,
                         message =
-                            $"Order {orderId}: production đầu SUB/RALO-CAT-IN chưa hoàn thành task. " +
-                            $"prod_id={p.prod_id}, status={p.status}."
+                            $"Order {orderId}: production đầu RALO,CAT,IN chưa hoàn thành task. " +
+                            $"prod_id={head.prod_id}, status={head.status}."
                     });
 
                     continue;
                 }
 
-                if (!string.Equals(p.status, "Importing", StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(head.status, "Importing", StringComparison.OrdinalIgnoreCase))
                 {
                     result.can_start = false;
                     result.issues.Add(new ProductionDependencyIssueDto
@@ -340,14 +379,322 @@ public static class ProductionDependencyValidator
                         current_task_id = currentTaskId,
                         message =
                             $"Order {orderId}: production đầu RALO,CAT,IN đã Finished task nhưng chưa chuyển Importing. " +
-                            $"Vui lòng gọi API PUT /api/Productions/mark-importing/{p.prod_id} trước khi start production sau. " +
-                            $"Current prod_id={p.prod_id}, status={p.status}."
+                            $"Vui lòng gọi API PUT /api/Productions/mark-importing/{head.prod_id} trước khi start production sau. " +
+                            $"Current prod_id={head.prod_id}, status={head.status}."
                     });
                 }
             }
         }
 
         return result;
+    }
+
+    private sealed class SubHeadProductionRef
+    {
+        public int prod_id { get; init; }
+
+        public string? code { get; init; }
+
+        public string? status { get; init; }
+    }
+
+    private static async Task<List<SubHeadProductionRef>> FindSubHeadProductionsByOrderAsync(
+        AppDbContext db,
+        int orderId,
+        int excludeProdId,
+        CancellationToken ct)
+    {
+        var candidates = await db.productions
+            .AsNoTracking()
+            .Where(x =>
+                x.order_id == orderId &&
+                x.prod_id != excludeProdId &&
+                (
+                    x.status == null ||
+                    x.status.ToUpper() != "CANCELLED"
+                ))
+            .Select(x => new
+            {
+                x.prod_id,
+                x.code,
+                x.status
+            })
+            .ToListAsync(ct);
+
+        var result = new List<SubHeadProductionRef>();
+
+        foreach (var p in candidates)
+        {
+            var codes = await GetProductionProcessCodesAsync(
+                db,
+                p.prod_id,
+                ct);
+
+            /*
+             * Chỉ nhận production có actual task path thuộc RALO,CAT,IN.
+             * Như vậy SPLIT BE,DUT,DAN sẽ không bị nhận nhầm dù prod_method = SUB.
+             */
+            if (!IsSubHeadProductionByCodes(codes))
+                continue;
+
+            result.Add(new SubHeadProductionRef
+            {
+                prod_id = p.prod_id,
+                code = p.code,
+                status = p.status
+            });
+        }
+
+        return result;
+    }
+
+    private static async Task<(bool ok, string message)> CheckInternalProductionPipelineAsync(
+        AppDbContext db,
+        task currentTask,
+        CancellationToken ct)
+    {
+        if (!currentTask.prod_id.HasValue)
+            return (false, "Task thiếu prod_id.");
+
+        if (!currentTask.seq_num.HasValue)
+            return (false, "Task thiếu seq_num.");
+
+        var currentProdId = currentTask.prod_id.Value;
+        var currentSeq = currentTask.seq_num.Value;
+
+        var previousUnfinishedTasks = await db.tasks
+            .AsNoTracking()
+            .Include(x => x.process)
+            .Where(x =>
+                x.prod_id == currentProdId &&
+                x.task_id != currentTask.task_id &&
+                x.seq_num.HasValue &&
+                x.seq_num.Value < currentSeq &&
+                (
+                    x.status == null ||
+                    x.status.ToUpper() != "FINISHED"
+                ))
+            .OrderBy(x => x.seq_num)
+            .ThenBy(x => x.task_id)
+            .ToListAsync(ct);
+
+        if (previousUnfinishedTasks.Count == 0)
+            return (true, "");
+
+        var first = previousUnfinishedTasks.First();
+
+        return (false,
+            $"Công đoạn trước trong cùng production chưa Finished: " +
+            $"{first.process?.process_code ?? first.name}, " +
+            $"task_id={first.task_id}, status={first.status}");
+    }
+
+    private sealed class PreviousStageTaskRef
+    {
+        public int? task_id { get; init; }
+
+        public int? prod_id { get; init; }
+
+        public string? prod_kind { get; init; }
+
+        public string? process_code { get; init; }
+
+        public string? status { get; init; }
+
+        public DateTime? end_time { get; init; }
+
+        public DateTime? created_at { get; init; }
+    }
+
+    private static async Task<PreviousStageTaskRef?> FindPreviousStageForOrderAsync(
+        AppDbContext db,
+        int orderId,
+        string previousProcessCode,
+        CancellationToken ct)
+    {
+        var previousCode = Norm(previousProcessCode);
+
+        /*
+         * 1. Tìm task trực tiếp trong production có order_id.
+         * Ví dụ:
+         * - SINGLE RALO,CAT,IN của order.
+         * - SPLIT BE,DUT,DAN của order.
+         */
+        var directTasks = await (
+            from t in db.tasks.AsNoTracking()
+
+            join p in db.productions.AsNoTracking()
+                on t.prod_id equals p.prod_id
+
+            join pp0 in db.product_type_processes.AsNoTracking()
+                on t.process_id equals pp0.process_id into ppj
+            from pp in ppj.DefaultIfEmpty()
+
+            where p.order_id == orderId
+                  && (
+                        p.status == null ||
+                        p.status.ToUpper() != "CANCELLED"
+                     )
+
+            select new PreviousStageTaskRef
+            {
+                task_id = t.task_id,
+                prod_id = p.prod_id,
+                prod_kind = p.prod_kind,
+                process_code = pp != null ? pp.process_code : null,
+                status = t.status,
+                end_time = t.end_time,
+                created_at = p.created_at
+            }
+        ).ToListAsync(ct);
+
+        var matchedDirect = PickBestPreviousStage(
+            directTasks,
+            previousCode);
+
+        if (matchedDirect != null)
+            return matchedDirect;
+
+        /*
+         * 2. Tìm task trong GROUP thông qua task_links.
+         * Vì GROUP không có order_id trực tiếp trong bảng productions,
+         * nên bắt buộc phải đi qua task_links/order_id.
+         *
+         * Đây là phần giúp SPLIT BE tìm được CAN của GROUP PHU,CAN.
+         */
+        var linkedGroupTasks = await (
+            from tl in db.task_links.AsNoTracking()
+
+            join gt in db.tasks.AsNoTracking()
+                on tl.group_task_id equals gt.task_id
+
+            join gp in db.productions.AsNoTracking()
+                on tl.group_prod_id equals gp.prod_id
+
+            join pp0 in db.product_type_processes.AsNoTracking()
+                on gt.process_id equals pp0.process_id into ppj
+            from pp in ppj.DefaultIfEmpty()
+
+            where tl.order_id == orderId
+                  && (
+                        tl.status == null ||
+                        tl.status.ToUpper() != "CANCELLED"
+                     )
+                  && (
+                        gp.status == null ||
+                        gp.status.ToUpper() != "CANCELLED"
+                     )
+
+            select new PreviousStageTaskRef
+            {
+                task_id = gt.task_id,
+                prod_id = gp.prod_id,
+                prod_kind = gp.prod_kind,
+                process_code = pp != null ? pp.process_code : tl.process_code,
+                status = gt.status,
+                end_time = gt.end_time,
+                created_at = gp.created_at
+            }
+        ).ToListAsync(ct);
+
+        var matchedGroup = PickBestPreviousStage(
+            linkedGroupTasks,
+            previousCode);
+
+        if (matchedGroup != null)
+            return matchedGroup;
+
+        /*
+         * 3. Fallback theo task_qtys.
+         * Dùng khi group task đã finish và có allocation output cho từng order.
+         */
+        var qtyRows = await db.task_qtys
+            .AsNoTracking()
+            .Where(x => x.order_id == orderId)
+            .Select(x => new PreviousStageTaskRef
+            {
+                task_id = x.group_task_id,
+                prod_id = null,
+                prod_kind = "GROUP_QTY",
+                process_code = x.process_code,
+                status = "Finished",
+                end_time = x.created_at,
+                created_at = x.created_at
+            })
+            .ToListAsync(ct);
+
+        return PickBestPreviousStage(
+            qtyRows,
+            previousCode);
+    }
+
+    private static PreviousStageTaskRef? PickBestPreviousStage(
+        List<PreviousStageTaskRef> rows,
+        string processCode)
+    {
+        var code = Norm(processCode);
+
+        return rows
+            .Where(x => string.Equals(
+                Norm(x.process_code),
+                code,
+                StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(x => IsFinished(x.status, x.end_time))
+            .ThenByDescending(x => x.end_time ?? x.created_at ?? DateTime.MinValue)
+            .ThenByDescending(x => x.task_id ?? 0)
+            .FirstOrDefault();
+    }
+
+    private static async Task<List<int>> ResolveOrderIdsOfProductionAsync(
+        AppDbContext db,
+        int prodId,
+        CancellationToken ct)
+    {
+        var prod = await db.productions
+            .AsNoTracking()
+            .Where(x => x.prod_id == prodId)
+            .Select(x => new
+            {
+                x.prod_id,
+                x.order_id,
+                x.prod_kind
+            })
+            .FirstOrDefaultAsync(ct);
+
+        if (prod == null)
+            return new List<int>();
+
+        if (prod.order_id.HasValue && prod.order_id.Value > 0)
+            return new List<int> { prod.order_id.Value };
+
+        /*
+         * GROUP không có order_id.
+         * Lấy member order từ prod_orders.
+         */
+        return await db.prod_orders
+            .AsNoTracking()
+            .Where(x =>
+                x.prod_id == prodId &&
+                x.status == "Active")
+            .Select(x => x.order_id)
+            .Distinct()
+            .OrderBy(x => x)
+            .ToListAsync(ct);
+    }
+
+    private static async Task<List<string>> GetOrderRouteAsync(
+        AppDbContext db,
+        int orderId,
+        CancellationToken ct)
+    {
+        var processCsv = await db.order_items
+            .AsNoTracking()
+            .Where(x => x.order_id == orderId)
+            .OrderBy(x => x.item_id)
+            .Select(x => x.production_process)
+            .FirstOrDefaultAsync(ct);
+
+        return ParseCodes(processCsv);
     }
 
     private static async Task<List<string>> GetProductionProcessCodesAsync(
@@ -357,17 +704,22 @@ public static class ProductionDependencyValidator
     {
         var rows = await (
             from t in db.tasks.AsNoTracking()
+
             join pp0 in db.product_type_processes.AsNoTracking()
                 on t.process_id equals pp0.process_id into ppj
             from pp in ppj.DefaultIfEmpty()
+
             where t.prod_id == prodId
+
             orderby t.seq_num, t.task_id
+
             select pp != null ? pp.process_code : null
         ).ToListAsync(ct);
 
         return rows
             .Select(Norm)
             .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
@@ -376,6 +728,17 @@ public static class ProductionDependencyValidator
         if (codes == null || codes.Count == 0)
             return false;
 
+        /*
+         * Production đầu SUB có path chỉ nằm trong RALO,CAT,IN.
+         * Ví dụ hợp lệ:
+         * - RALO,CAT,IN
+         * - RALO,IN
+         * - IN
+         *
+         * Không hợp lệ:
+         * - BE,DUT,DAN
+         * - PHU,CAN
+         */
         return codes.All(x => SubHeadCodes.Contains(Norm(x)));
     }
 
@@ -402,295 +765,33 @@ public static class ProductionDependencyValidator
             x.end_time != null);
     }
 
-    private static async Task<(bool ok, string message)> CheckSingleProductionLogicalPreviousDoneAsync(
-    AppDbContext db,
-    task currentTask,
-    CancellationToken ct)
-    {
-        if (!currentTask.prod_id.HasValue)
-            return (false, "Task thiếu prod_id.");
-
-        if (!currentTask.seq_num.HasValue)
-            return (false, "Task thiếu seq_num.");
-
-        var currentProdId = currentTask.prod_id.Value;
-        var currentSeq = currentTask.seq_num.Value;
-
-        var prod = await db.productions
-            .AsNoTracking()
-            .FirstOrDefaultAsync(x => x.prod_id == currentProdId, ct);
-
-        if (prod == null)
-            return (false, "Không tìm thấy production.");
-
-        /*
-         * Không được dùng:
-         * !string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase)
-         *
-         * Vì EF Core không translate được StringComparison.
-         */
-        var previousUnfinishedTasks = await db.tasks
-            .AsNoTracking()
-            .Include(x => x.process)
-            .Where(x =>
-                x.prod_id == currentProdId &&
-                x.task_id != currentTask.task_id &&
-                x.seq_num.HasValue &&
-                x.seq_num.Value < currentSeq &&
-                (
-                    x.status == null ||
-                    x.status.ToUpper() != "FINISHED"
-                ))
-            .OrderBy(x => x.seq_num)
-            .ThenBy(x => x.task_id)
-            .ToListAsync(ct);
-
-        if (previousUnfinishedTasks.Count > 0)
-        {
-            var first = previousUnfinishedTasks.First();
-
-            return (false,
-                $"Công đoạn trước chưa Finished: {first.process?.process_code ?? first.name}, " +
-                $"task_id={first.task_id}, status={first.status}");
-        }
-
-        if (!prod.order_id.HasValue)
-            return (true, "");
-
-        var orderId = prod.order_id.Value;
-
-        /*
-         * Lấy task_links trước.
-         * Không dùng Include group_task để tránh phụ thuộc navigation.
-         */
-        var previousGroupLinks = await db.task_links
-            .AsNoTracking()
-            .Where(x =>
-                x.single_prod_id == currentProdId &&
-                (
-                    x.status == null ||
-                    x.status.ToUpper() != "CANCELLED"
-                ))
-            .ToListAsync(ct);
-
-        if (previousGroupLinks.Count == 0)
-            return (true, "");
-
-        var groupTaskIds = previousGroupLinks
-            .Select(x => x.group_task_id)
-            .Distinct()
-            .ToList();
-
-        var groupTasks = await db.tasks
-            .AsNoTracking()
-            .Include(x => x.process)
-            .Where(x => groupTaskIds.Contains(x.task_id))
-            .ToDictionaryAsync(x => x.task_id, ct);
-
-        foreach (var link in previousGroupLinks)
-        {
-            if (!groupTasks.TryGetValue(link.group_task_id, out var groupTask))
-            {
-                return (false,
-                    $"Công đoạn ghép {link.process_code} chưa có group task hợp lệ.");
-            }
-
-            if (!groupTask.seq_num.HasValue)
-            {
-                return (false,
-                    $"Công đoạn ghép {link.process_code} thiếu seq_num.");
-            }
-
-            /*
-             * Chỉ check các group task nằm trước task hiện tại.
-             * Ví dụ:
-             * - Task hiện tại là DAN seq 8
-             * - Group PHU/CAN seq 4/5 phải Finished
-             */
-            if (groupTask.seq_num.Value >= currentSeq)
-                continue;
-
-            if (!string.Equals(groupTask.status, "Finished", StringComparison.OrdinalIgnoreCase))
-            {
-                return (false,
-                    $"Công đoạn ghép {link.process_code} chưa Finished. " +
-                    $"group_task_id={groupTask.task_id}, status={groupTask.status}");
-            }
-
-            var linkProcessCode = (link.process_code ?? "")
-                .Trim()
-                .ToUpperInvariant();
-
-            var hasQty = await db.task_qtys
-                .AsNoTracking()
-                .AnyAsync(x =>
-                    x.group_task_id == groupTask.task_id &&
-                    x.order_id == orderId &&
-                    x.process_code != null &&
-                    x.process_code.ToUpper() == linkProcessCode &&
-                    x.qty_good > 0,
-                    ct);
-
-            if (!hasQty)
-            {
-                return (false,
-                    $"Công đoạn ghép {link.process_code} đã Finished nhưng chưa có sản lượng phân bổ cho order {orderId}.");
-            }
-        }
-
-        return (true, "");
-    }
-
-    private static async Task<List<int>> ResolveOrderIdsOfTaskAsync(
-        AppDbContext db,
-        int prodId,
-        CancellationToken ct)
-    {
-        var prod = await db.productions
-            .AsNoTracking()
-            .FirstOrDefaultAsync(x => x.prod_id == prodId, ct);
-
-        if (prod == null)
-            return new List<int>();
-
-        if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
-        {
-            return await db.prod_orders
-                .AsNoTracking()
-                .Where(x =>
-                    x.prod_id == prodId &&
-                    x.status == "Active")
-                .Select(x => x.order_id)
-                .Distinct()
-                .ToListAsync(ct);
-        }
-
-        if (prod.order_id.HasValue)
-            return new List<int> { prod.order_id.Value };
-
-        return new List<int>();
-    }
-
-    private static async Task<List<string>> GetOrderRouteAsync(
-        AppDbContext db,
-        int orderId,
-        CancellationToken ct)
-    {
-        var processCsv = await db.order_items
-            .AsNoTracking()
-            .Where(x => x.order_id == orderId)
-            .OrderBy(x => x.item_id)
-            .Select(x => x.production_process)
-            .FirstOrDefaultAsync(ct);
-
-        return ParseCodes(processCsv);
-    }
-
     private static string? ResolvePreviousCode(
         List<string> route,
         string currentCode)
     {
-        var idx = route.FindIndex(x =>
-            string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase));
-
-        if (idx <= 0)
+        if (route == null || route.Count == 0)
             return null;
 
-        return route[idx - 1];
-    }
+        var current = Norm(currentCode);
 
-    private sealed class ProcessTaskRef
-    {
-        public int task_id { get; set; }
-
-        public int? prod_id { get; set; }
-
-        public string? prod_kind { get; set; }
-
-        public string? process_code { get; set; }
-
-        public string? status { get; set; }
-
-        public DateTime? end_time { get; set; }
-    }
-
-    private static async Task<ProcessTaskRef?> FindProcessTaskForOrderAsync(
-        AppDbContext db,
-        int orderId,
-        string processCode,
-        CancellationToken ct)
-    {
-        var directTasks = await (
-            from t in db.tasks.AsNoTracking()
-            join p in db.productions.AsNoTracking()
-                on t.prod_id equals p.prod_id
-            join pp in db.product_type_processes.AsNoTracking()
-                on t.process_id equals pp.process_id into ppj
-            from pp in ppj.DefaultIfEmpty()
-            where p.order_id == orderId
-            select new ProcessTaskRef
-            {
-                task_id = t.task_id,
-                prod_id = t.prod_id,
-                prod_kind = p.prod_kind,
-                process_code = pp != null ? pp.process_code : null,
-                status = t.status,
-                end_time = t.end_time
-            }
-        ).ToListAsync(ct);
-
-        var matched = directTasks
-            .Where(x => string.Equals(
-                Norm(x.process_code),
-                Norm(processCode),
-                StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(x => IsFinished(x.status, x.end_time))
-            .ThenByDescending(x => x.task_id)
-            .FirstOrDefault();
-
-        if (matched != null)
-            return matched;
-
-        var qtyRows = await db.task_qtys
-            .AsNoTracking()
-            .Where(x => x.order_id == orderId)
-            .ToListAsync(ct);
-
-        var hasGroupQty = qtyRows.Any(x =>
+        var index = route.FindIndex(x =>
             string.Equals(
-                Norm(x.process_code),
-                Norm(processCode),
-                StringComparison.OrdinalIgnoreCase) &&
-            x.qty_good > 0);
+                Norm(x),
+                current,
+                StringComparison.OrdinalIgnoreCase));
 
-        if (hasGroupQty)
-        {
-            return new ProcessTaskRef
-            {
-                task_id = 0,
-                prod_id = null,
-                prod_kind = "GROUP_QTY",
-                process_code = processCode,
-                status = "Finished",
-                end_time = AppTime.NowVnUnspecified()
-            };
-        }
+        if (index <= 0)
+            return null;
 
-        return null;
+        return route[index - 1];
     }
 
-    private static bool IsFinished(string? status, DateTime? endTime)
+    private static List<string> ParseCodes(string? raw)
     {
-        return string.Equals(status, "Finished", StringComparison.OrdinalIgnoreCase)
-               || endTime != null;
-    }
-
-    private static List<string> ParseCodes(string? csv)
-    {
-        if (string.IsNullOrWhiteSpace(csv))
+        if (string.IsNullOrWhiteSpace(raw))
             return new List<string>();
 
-        return csv
+        return raw
             .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(Norm)
             .Where(x => !string.IsNullOrWhiteSpace(x))
@@ -698,12 +799,18 @@ public static class ProductionDependencyValidator
             .ToList();
     }
 
-    private static string Norm(string? value)
+    private static string Norm(string? code)
     {
-        return (value ?? "")
+        return (code ?? "")
             .Trim()
             .ToUpperInvariant()
             .Replace(" ", "_")
             .Replace("-", "_");
+    }
+
+    private static bool IsFinished(string? status, DateTime? endTime)
+    {
+        return string.Equals(status, "Finished", StringComparison.OrdinalIgnoreCase)
+               || endTime != null;
     }
 }
