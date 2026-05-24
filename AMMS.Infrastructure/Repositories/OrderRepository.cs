@@ -38,21 +38,24 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             var orders = await (
-                from o in _db.orders.AsNoTracking()
+    from o in _db.orders.AsNoTracking()
 
-                join q in _db.quotes.AsNoTracking()
-                    on o.quote_id equals q.quote_id into qj
-                from q in qj.DefaultIfEmpty()
+    join q in _db.quotes.AsNoTracking()
+        on o.quote_id equals q.quote_id into qj
+    from q in qj.DefaultIfEmpty()
 
-                join r in _db.order_requests.AsNoTracking()
-                    on o.order_id equals r.order_id into rj
-                from r in rj.DefaultIfEmpty()
+    join r in _db.order_requests.AsNoTracking()
+        on o.order_id equals r.order_id into rj
+    from r in rj.DefaultIfEmpty()
 
-                join p in _db.productions.AsNoTracking()
-                    on o.production_id equals p.prod_id into pj
-                from p in pj.DefaultIfEmpty()
+    let p = _db.productions.AsNoTracking()
+        .Where(x =>
+            (o.production_id != null && x.prod_id == o.production_id.Value) ||
+            (x.order_id != null && x.order_id.Value == o.order_id))
+        .OrderByDescending(x => x.prod_id)
+        .FirstOrDefault()
 
-                orderby o.order_date descending, o.order_id descending
+    orderby o.order_date descending, o.order_id descending
 
     select new
     {
@@ -63,13 +66,17 @@ namespace AMMS.Infrastructure.Repositories
         Status = o.status ?? "",
         is_production_ready = o.is_production_ready,
         customer_name = r != null ? (r.customer_name ?? "") : "Khách hàng",
+
         is_full_process = p != null ? (bool?)p.is_full_process : null,
+
         import_recieve_path = p != null ? p.import_recieve_path : null,
+
         production_method = p != null ? p.prod_method : null,
         sub_product_id = p != null ? p.sub_product_id : null,
         layout_confirmed = o.layout_confirmed,
         sub_product_used_qty = p != null ? p.sub_product_used_qty : 0,
         nvl_qty = p != null ? p.nvl_qty : 0,
+
         FirstItem = _db.order_items.AsNoTracking()
             .Where(i => i.order_id == o.order_id)
             .OrderBy(i => i.item_id)
@@ -1252,34 +1259,41 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         public async Task<OrdersByProcessRawResult> GetOrdersByProcessCodeRawAsync(
-    string processCode,
+    string? processCode,
     CancellationToken ct = default)
         {
             processCode = (processCode ?? "").Trim().ToUpperInvariant();
 
-            if (string.IsNullOrWhiteSpace(processCode))
+            var hasProcessFilter = !string.IsNullOrWhiteSpace(processCode);
+
+            List<task> candidateTasks;
+
+            if (hasProcessFilter)
             {
-                return new OrdersByProcessRawResult();
+                var matchedProcessIds = await _db.product_type_processes
+                    .AsNoTracking()
+                    .Where(p =>
+                        p.process_code != null &&
+                        p.process_code.ToUpper() == processCode)
+                    .Select(p => p.process_id)
+                    .Distinct()
+                    .ToListAsync(ct);
+
+                candidateTasks = await _db.tasks
+                    .AsNoTracking()
+                    .Where(t =>
+                        (t.process_id != null && matchedProcessIds.Contains(t.process_id.Value)) ||
+                        ((t.name ?? "").ToUpper() == processCode) ||
+                        ((t.machine ?? "").ToUpper() == processCode))
+                    .ToListAsync(ct);
             }
-
-            // 1. Tìm process_id trong product_type_process theo process_code
-            var matchedProcessIds = await _db.product_type_processes
-                .AsNoTracking()
-                .Where(p =>
-                    p.process_code != null &&
-                    p.process_code.ToUpper() == processCode)
-                .Select(p => p.process_id)
-                .Distinct()
-                .ToListAsync(ct);
-
-            // 2. Tìm task có liên quan đến công đoạn
-            var candidateTasks = await _db.tasks
-                .AsNoTracking()
-                .Where(t =>
-                    (t.process_id != null && matchedProcessIds.Contains(t.process_id.Value)) ||
-                    ((t.name ?? "").ToUpper() == processCode) ||
-                    ((t.machine ?? "").ToUpper() == processCode))
-                .ToListAsync(ct);
+            else
+            {
+                candidateTasks = await _db.tasks
+                    .AsNoTracking()
+                    .Where(t => t.prod_id != null)
+                    .ToListAsync(ct);
+            }
 
             if (candidateTasks.Count == 0)
             {
@@ -1297,13 +1311,11 @@ namespace AMMS.Infrastructure.Repositories
                 return new OrdersByProcessRawResult();
             }
 
-            // 3. Tìm production ứng viên
             var candidateProductions = await _db.productions
                 .AsNoTracking()
                 .Where(p => candidateProdIds.Contains(p.prod_id))
                 .ToListAsync(ct);
 
-            // 4. Tìm order liên quan qua prod_orders
             var candidateProdOrders = await _db.prod_orders
                 .AsNoTracking()
                 .Where(po =>
@@ -1348,7 +1360,6 @@ namespace AMMS.Infrastructure.Repositories
                 return new OrdersByProcessRawResult();
             }
 
-            // 5. Lấy orders
             var orders = await _db.orders
                 .AsNoTracking()
                 .Where(o => candidateOrderIds.Contains(o.order_id))
@@ -1366,14 +1377,12 @@ namespace AMMS.Infrastructure.Repositories
                 .Distinct()
                 .ToList();
 
-            // 6. Lấy production_id gắn trực tiếp trong orders
             var orderProductionIds = orders
                 .Where(o => o.production_id != null)
                 .Select(o => o.production_id!.Value)
                 .Distinct()
                 .ToList();
 
-            // 7. Lấy prod_orders theo order
             var prodOrders = await _db.prod_orders
                 .AsNoTracking()
                 .Where(po => orderIds.Contains(po.order_id))
@@ -1395,7 +1404,6 @@ namespace AMMS.Infrastructure.Repositories
                 .Distinct()
                 .ToList();
 
-            // 8. Gom toàn bộ production liên quan tới order
             var allRelatedProdIds = orderProductionIds
                 .Concat(prodIdsFromProdOrders)
                 .Concat(
@@ -1418,7 +1426,6 @@ namespace AMMS.Infrastructure.Repositories
                 .Distinct()
                 .ToList();
 
-            // 9. Lấy tasks của các production
             var tasks = await _db.tasks
                 .AsNoTracking()
                 .Where(t =>
@@ -1428,7 +1435,6 @@ namespace AMMS.Infrastructure.Repositories
                 .ThenBy(t => t.task_id)
                 .ToListAsync(ct);
 
-            // 10. Lấy process info cho task
             var processIdsOfTasks = tasks
                 .Where(t => t.process_id != null)
                 .Select(t => t.process_id!.Value)

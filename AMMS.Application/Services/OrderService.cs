@@ -243,22 +243,20 @@ namespace AMMS.Application.Services
         }
 
         public async Task<PagedResultLite<OrdersByProcessDto>> GetOrdersByCurrentProcessAsync(
-    string processCode,
+    string? processCode,
     int page,
     int pageSize,
     CancellationToken ct = default)
         {
-            if (string.IsNullOrWhiteSpace(processCode))
-                throw new ArgumentException("processCode không được để trống");
-
             if (page <= 0) page = 1;
             if (pageSize <= 0) pageSize = 10;
             if (pageSize > 200) pageSize = 200;
 
+            var hasProcessFilter = !string.IsNullOrWhiteSpace(processCode);
             var normalizedProcessCode = NormalizeProcessCode(processCode);
 
             var raw = await _orderRepo.GetOrdersByProcessCodeRawAsync(
-                normalizedProcessCode,
+                hasProcessFilter ? normalizedProcessCode : null,
                 ct);
 
             var allData = raw.Orders.Select(o =>
@@ -304,7 +302,9 @@ namespace AMMS.Application.Services
 
                 var currentProcessCode = ResolveTaskProcessCode(currentTask, currentTaskProcess);
 
-                if (!IsSameProcessCode(currentProcessCode, normalizedProcessCode))
+                // Nếu có nhập processCode thì lọc theo công đoạn.
+                // Nếu không nhập processCode thì lấy tất cả công đoạn.
+                if (hasProcessFilter && !IsSameProcessCode(currentProcessCode, normalizedProcessCode))
                     return null;
 
                 var currentTaskId = currentTask.task_id;

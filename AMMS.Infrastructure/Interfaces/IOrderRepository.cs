@@ -29,7 +29,7 @@ namespace AMMS.Infrastructure.Interfaces
         Task<List<order_item>> GetOrderItemsByOrderIdAsync(int orderId, CancellationToken ct = default);
         Task<bool> IsOrderEnoughByOrderIdAsync(int orderId, CancellationToken ct = default);
         Task<OrderProductionTrackingRawResult> GetProductionTrackingByOrderStatusAsync(string status, int page, int pageSize, CancellationToken ct = default);
-        Task<OrdersByProcessRawResult> GetOrdersByProcessCodeRawAsync(string processCode, CancellationToken ct = default);
+        Task<OrdersByProcessRawResult> GetOrdersByProcessCodeRawAsync(string? processCode, CancellationToken ct = default);
         Task<AllOrdersProductionTrackingRawResult> GetAllOrdersProductionTrackingRawAsync(int page, int pageSize, CancellationToken ct = default);
     }
     public class OrderProductionTrackingRawResult

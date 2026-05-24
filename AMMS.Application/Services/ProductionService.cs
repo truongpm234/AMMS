@@ -1411,59 +1411,95 @@ namespace AMMS.Application.Services
                 .FirstOrDefaultAsync(ct);
         }
 
-        public async Task<GenerateImportReceiveResponse?> GenerateImportReceiveAsync(int orderId, CancellationToken ct = default)
+        public async Task<GenerateImportReceiveBatchResponse?> GenerateImportReceiveAsync(
+    int orderId,
+    CancellationToken ct = default)
         {
-            var source = await _repo.GetImportReceiveSourceByOrderIdAsync(orderId, ct);
-            if (source == null)
+            var sources = await _repo.GetImportReceiveSourcesByOrderIdAsync(orderId, ct);
+
+            if (sources == null || sources.Count == 0)
                 return null;
 
-            if (source.items == null || source.items.Count == 0)
+            if (sources.Any(x => x.items == null || x.items.Count == 0))
                 throw new InvalidOperationException("Đơn hàng không có item để tạo phiếu nhập kho.");
 
-            var safeOrderCode = string.IsNullOrWhiteSpace(source.order_code)
-                ? "NO_CODE"
-                : source.order_code.Trim();
-
-            var fileName = $"phieu_nhap_kho_{safeOrderCode}_{source.prod_id}.pdf";
+            var generatedFiles = new List<GenerateImportReceiveResponse>();
 
             var tempFolder = Path.Combine(Path.GetTempPath(), "amms-import-receives");
             Directory.CreateDirectory(tempFolder);
 
-            var tempFilePath = Path.Combine(tempFolder, fileName);
-
-            ImportReceivePdfHelper.Generate(tempFilePath, source);
-
-            var publicId = $"import-receives/phieu_nhap_kho_{safeOrderCode}_{source.prod_id}";
-
-            await using var fs = new FileStream(tempFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-
-            var cloudUrl = await _fileStorage.UploadRawWithPublicIdAsync(
-                fs,
-                fileName,
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                publicId);
-
-            var saved = await _repo.SaveImportReceivePathAsync(source.prod_id, cloudUrl, ct);
-            if (!saved)
-                throw new InvalidOperationException("Không lưu được đường dẫn phiếu nhập kho vào production.");
-
-            try
+            foreach (var source in sources)
             {
-                if (File.Exists(tempFilePath))
-                    File.Delete(tempFilePath);
-            }
-            catch
-            {
+                var safeOrderCode = string.IsNullOrWhiteSpace(source.order_code)
+                    ? "NO_CODE"
+                    : source.order_code.Trim();
+
+                var fileName = $"phieu_nhap_kho_{safeOrderCode}_{source.prod_id}.pdf";
+
+                var tempFilePath = Path.Combine(tempFolder, fileName);
+
+                ImportReceivePdfHelper.Generate(tempFilePath, source);
+
+                var publicId = $"import-receives/phieu_nhap_kho_{safeOrderCode}_{source.prod_id}";
+
+                string cloudUrl;
+
+                await using (var fs = new FileStream(
+                    tempFilePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read))
+                {
+                    cloudUrl = await _fileStorage.UploadRawWithPublicIdAsync(
+                        fs,
+                        fileName,
+                        "application/pdf",
+                        publicId);
+                }
+
+                var saved = await _repo.SaveImportReceivePathAsync(
+                    source.prod_id,
+                    cloudUrl,
+                    ct);
+
+                if (!saved)
+                    throw new InvalidOperationException(
+                        $"Không lưu được đường dẫn phiếu nhập kho vào production {source.prod_id}.");
+
+                try
+                {
+                    if (File.Exists(tempFilePath))
+                        File.Delete(tempFilePath);
+                }
+                catch
+                {
+                }
+
+                generatedFiles.Add(new GenerateImportReceiveResponse
+                {
+                    success = true,
+                    prod_id = source.prod_id,
+                    order_id = source.order_id,
+                    order_code = source.order_code,
+                    import_recieve_path = cloudUrl,
+                    message = $"Tạo phiếu nhập kho thành công cho production {source.prod_id}"
+                });
             }
 
-            return new GenerateImportReceiveResponse
+            var first = sources.FirstOrDefault();
+
+            return new GenerateImportReceiveBatchResponse
             {
                 success = true,
-                prod_id = source.prod_id,
-                order_id = source.order_id,
-                order_code = source.order_code,
-                import_recieve_path = cloudUrl,
-                message = "Tạo phiếu nhập kho thành công"
+                order_id = orderId,
+                order_code = first?.order_code,
+
+                total_productions = sources.Count,
+                generated_count = generatedFiles.Count,
+
+                files = generatedFiles,
+
+                message = $"Tạo thành công {generatedFiles.Count} phiếu nhập kho cho order {orderId}."
             };
         }
 

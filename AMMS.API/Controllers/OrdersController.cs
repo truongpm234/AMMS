@@ -311,7 +311,7 @@ CancellationToken ct)
 
         [HttpGet("by-current-process")]
         public async Task<IActionResult> GetOrdersByCurrentProcess(
-    [FromQuery] string processCode,
+    [FromQuery] string? processCode = null,
     [FromQuery] int page = 1,
     [FromQuery] int pageSize = 10,
     CancellationToken ct = default)

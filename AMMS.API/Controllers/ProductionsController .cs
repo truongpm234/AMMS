@@ -609,21 +609,34 @@ namespace AMMS.API.Controllers
 
             try
             {
-                var result = await _service.GenerateImportReceiveAsync(req.order_id, ct);
+                var result = await _service.GenerateImportReceiveAsync(
+                    req.order_id,
+                    ct);
 
                 if (result == null)
-                    return NotFound(new { message = "Production or order not found", orderId = req.order_id });
+                {
+                    return NotFound(new
+                    {
+                        message = "Production or order not found",
+                        orderId = req.order_id
+                    });
+                }
 
                 await _hub.Clients.Group(RealtimeGroups.ByRole("warehouse manager")).SendAsync(
                     "Importing",
-                    new { message = $"Đơn hàng {req.order_id} đã được sản xuất xong, chờ nhập kho" },
+                    new
+                    {
+                        message = $"Đơn hàng {req.order_id} đã tạo {result.generated_count} phiếu nhập kho, chờ nhập kho"
+                    },
                     ct);
+
                 await _noti.CreateNotfi(
-                                4,
-                                $"Đơn hàng {req.order_id} đã được sản xuất xong, chờ nhập kho",
-                                null,
-                                req.order_id,
-                                "Importing");
+                    4,
+                    $"Đơn hàng {req.order_id} đã tạo {result.generated_count} phiếu nhập kho, chờ nhập kho",
+                    null,
+                    req.order_id,
+                    "Importing");
+
                 return Ok(result);
             }
             catch (InvalidOperationException ex)
