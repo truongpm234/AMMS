@@ -101,7 +101,7 @@ namespace AMMS.Infrastructure.Repositories
                     nvl_qty = pr.nvl_qty,
                     gm_note = pr.gm_note,
                     mgr_note = pr.mgr_note,
-
+                    production_approval_flow = pr.production_approval_flow,
                     prod_kind = pr.prod_kind,
                     production_code = pr.code,
 
@@ -737,7 +737,9 @@ namespace AMMS.Infrastructure.Repositories
                     is_split_production = isSplitRow,
 
                     is_production_ready = isProductionReady,
-
+                    production_approval_flow = r.production_approval_flow,
+                    is_auto_production_approval = ProductionApprovalFlowHelper.IsAuto(r.production_approval_flow),
+                    production_approval_label = ProductionApprovalFlowHelper.Label(r.production_approval_flow),
                     production_method = r.production_method,
                     is_full_process = r.is_full_process,
                     sub_product_id = r.sub_product_id,
@@ -1061,12 +1063,12 @@ namespace AMMS.Infrastructure.Repositories
                 customer_name = header.customer_name ?? "Khách ẩn tên",
 
                 product_name = isGroupProduction
-                    ? "Lệnh sản xuất ghép"
-                    : header.first_item?.product_name,
+        ? "Lệnh sản xuất ghép"
+        : header.first_item?.product_name,
 
                 quantity = isGroupProduction
-                    ? header.pr.group_total_qty
-                    : header.first_item?.quantity ?? header.pr.group_total_qty,
+        ? header.pr.group_total_qty
+        : header.first_item?.quantity ?? header.pr.group_total_qty,
 
                 product_type_id = header.pr.product_type_id,
                 packaging_standard = header.packaging_standard,
@@ -1080,7 +1082,12 @@ namespace AMMS.Infrastructure.Repositories
                 sub_product_used_qty = header.pr.sub_product_used_qty,
                 nvl_qty = header.pr.nvl_qty,
                 sub_product_process = header.sp != null ? header.sp.product_process : null,
-                is_full_process = header.pr.is_full_process
+                sub_product_issue_file = header.pr.sub_product_issue_file,
+                is_full_process = header.pr.is_full_process,
+
+                production_approval_flow = header.pr.production_approval_flow,
+                is_auto_production_approval = ProductionApprovalFlowHelper.IsAuto(header.pr.production_approval_flow),
+                production_approval_label = ProductionApprovalFlowHelper.Label(header.pr.production_approval_flow)
             };
 
             order_request? orderReq = null;
@@ -1534,12 +1541,17 @@ namespace AMMS.Infrastructure.Repositories
                 length_mm = header.first_item?.i_length,
                 width_mm = header.first_item?.i_width,
                 height_mm = header.first_item?.i_height,
+
                 production_method = header.pr.prod_method,
                 sub_product_id = header.pr.sub_product_id,
                 sub_product_used_qty = header.pr.sub_product_used_qty,
                 nvl_qty = header.pr.nvl_qty,
                 sub_product_process = header.sp != null ? header.sp.product_process : null,
                 is_full_process = header.pr.is_full_process,
+
+                production_approval_flow = header.pr.production_approval_flow,
+                is_auto_production_approval = ProductionApprovalFlowHelper.IsAuto(header.pr.production_approval_flow),
+                production_approval_label = ProductionApprovalFlowHelper.Label(header.pr.production_approval_flow)
             };
 
             order_request? orderReq = null;
@@ -3457,8 +3469,8 @@ namespace AMMS.Infrastructure.Repositories
                 prod.mgr_note = string.IsNullOrWhiteSpace(req.mgr_note)
                     ? null
                     : req.mgr_note.Trim();
-
                 prod.gm_proposed_method = null;
+                prod.production_approval_flow = ProductionApprovalFlowHelper.ManualManager;
 
                 order.is_production_ready = true;
                 order.is_enough = true;
@@ -3486,6 +3498,11 @@ namespace AMMS.Infrastructure.Repositories
                         order_quantity = orderQty,
                         gm_note = prod.gm_note,
                         mgr_note = prod.mgr_note,
+
+                        production_approval_flow = prod.production_approval_flow,
+                        is_auto_production_approval = ProductionApprovalFlowHelper.IsAuto(prod.production_approval_flow),
+                        production_approval_label = ProductionApprovalFlowHelper.Label(prod.production_approval_flow),
+
                         message = "Đã duyệt sản xuất bằng NVL."
                     };
                 }
@@ -3502,7 +3519,18 @@ namespace AMMS.Infrastructure.Repositories
                         requireEnoughQty: true,
                         ct);
 
+                    if (selectedSubProduct.quantity < orderQty)
+                    {
+                        throw new InvalidOperationException(
+                            $"Không đủ tồn bán thành phẩm. SubProductId={selectedSubProduct.id}, " +
+                            $"tồn={selectedSubProduct.quantity}, cần={orderQty}.");
+                    }
+
+                    /*
+                     * Giữ logic core cũ: duyệt SUB thì trừ tồn BTP đúng orderQty.
+                     */
                     selectedSubProduct.quantity -= orderQty;
+                    selectedSubProduct.updated_at = AppTime.NowVnUnspecified();
 
                     prod.prod_method = "SUB";
                     prod.is_full_process = false;
@@ -3529,7 +3557,14 @@ namespace AMMS.Infrastructure.Repositories
                         order_quantity = orderQty,
                         gm_note = prod.gm_note,
                         mgr_note = prod.mgr_note,
-                        message = "Đã duyệt sản xuất bằng bán thành phẩm."
+
+                        production_approval_flow = prod.production_approval_flow,
+                        is_auto_production_approval = ProductionApprovalFlowHelper.IsAuto(prod.production_approval_flow),
+                        production_approval_label = ProductionApprovalFlowHelper.Label(prod.production_approval_flow),
+
+                        sub_product_issue_file = prod.sub_product_issue_file,
+
+                        message = "Đã duyệt sản xuất bằng bán thành phẩm và tạo phiếu xuất kho BTP."
                     };
                 }
                 else if (method == "BOTH")
@@ -3578,6 +3613,11 @@ namespace AMMS.Infrastructure.Repositories
                         order_quantity = orderQty,
                         gm_note = prod.gm_note,
                         mgr_note = prod.mgr_note,
+
+                        production_approval_flow = prod.production_approval_flow,
+                        is_auto_production_approval = ProductionApprovalFlowHelper.IsAuto(prod.production_approval_flow),
+                        production_approval_label = ProductionApprovalFlowHelper.Label(prod.production_approval_flow),
+
                         message = $"Đã duyệt sản xuất kết hợp. Dùng {subUseQty} bán thành phẩm, sản xuất thêm {nvlQty} bằng NVL."
                     };
                 }
@@ -3586,16 +3626,6 @@ namespace AMMS.Infrastructure.Repositories
                     throw new InvalidOperationException("Unsupported production method.");
                 }
 
-                /*
-                 * A4:
-                 * Reserve/trừ NVL ngay tại bước manager confirm method.
-                 *
-                 * NVL  => reserve/trừ toàn bộ NVL.
-                 * SUB  => không trừ NVL, chỉ trừ sub_product ở trên.
-                 * BOTH => trừ sub_product ở trên, reserve/trừ NVL cho phần còn thiếu.
-                 *
-                 * Phải nằm trong transaction này để nếu thiếu NVL thì rollback luôn cả confirm method.
-                 */
                 var confirmedEstimate = await LoadAcceptedEstimateOrThrowAsync(
                     orderReq,
                     ct);

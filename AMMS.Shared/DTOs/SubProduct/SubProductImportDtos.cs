@@ -47,6 +47,22 @@ namespace AMMS.Shared.DTOs.SubProduct
         public bool is_imported { get; set; }
 
         public string? import_file { get; set; }
+
+        public string? paper_material_code { get; set; }
+
+        public string? wave_material_code { get; set; }
+
+        public string? coating_material_code { get; set; }
+
+        public string? lamination_material_code { get; set; }
+
+        public string? material_signature { get; set; }
+
+        public int? cost_estimate_id { get; set; }
+
+        public decimal unit_cost_to_stage { get; set; }
+
+        public decimal total_cost_to_stage { get; set; }
     }
 
     public class ImportPendingSubProductsResponseDto
@@ -55,13 +71,26 @@ namespace AMMS.Shared.DTOs.SubProduct
 
         public int total_pending { get; set; }
 
-        public int merged_count { get; set; }
-
         public int activated_count { get; set; }
 
-        public List<ImportPendingSubProductRowDto> rows { get; set; } = new();
+        public int merged_count { get; set; }
 
-        public string message { get; set; } = "";
+        public string? message { get; set; }
+
+        public List<ImportPendingSubProductItemDto> items { get; set; } = new();
+    }
+
+    public class ImportPendingSubProductItemDto
+    {
+        public int source_sub_product_id { get; set; }
+
+        public int target_sub_product_id { get; set; }
+
+        public int quantity_imported { get; set; }
+
+        public string action { get; set; } = "";
+
+        public string? message { get; set; }
     }
 
     public class ImportPendingSubProductRowDto

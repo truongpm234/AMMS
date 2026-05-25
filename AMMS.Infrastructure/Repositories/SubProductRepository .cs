@@ -51,10 +51,14 @@ namespace AMMS.Infrastructure.Repositories
                 .AsQueryable();
 
             if (isActive.HasValue)
+            {
                 query = query.Where(x => x.is_active == isActive.Value);
+            }
 
             if (isImported.HasValue)
+            {
                 query = query.Where(x => x.is_imported == isImported.Value);
+            }
 
             var rows = await query
                 .OrderBy(x => x.is_imported)
@@ -66,19 +70,37 @@ namespace AMMS.Infrastructure.Repositories
                 .Select(x => new SubProductDto
                 {
                     id = x.id,
+
                     product_type_id = x.product_type_id,
                     product_type_name = x.product_type != null ? x.product_type.name : null,
+
                     width = x.width,
                     length = x.length,
                     product_process = x.product_process,
                     quantity = x.quantity,
+
                     is_active = x.is_active,
                     is_imported = x.is_imported,
                     import_file = x.import_file,
+
                     source_task_id = x.source_task_id,
                     source_task_log_id = x.source_task_log_id,
                     source_prod_id = x.source_prod_id,
                     source_order_id = x.source_order_id,
+                    source_process_code = x.source_process_code,
+
+                    paper_material_code = x.paper_material_code,
+                    wave_material_code = x.wave_material_code,
+                    coating_material_code = x.coating_material_code,
+                    lamination_material_code = x.lamination_material_code,
+                    material_signature = x.material_signature,
+
+                    cost_estimate_id = x.cost_estimate_id,
+                    unit_cost_to_stage = x.unit_cost_to_stage,
+                    total_cost_to_stage = x.total_cost_to_stage,
+
+                    imported_to_sub_product_id = x.imported_to_sub_product_id,
+
                     description = x.description,
                     updated_at = x.updated_at
                 })
@@ -87,7 +109,9 @@ namespace AMMS.Infrastructure.Repositories
             var hasNext = rows.Count > pageSize;
 
             if (hasNext)
+            {
                 rows.RemoveAt(rows.Count - 1);
+            }
 
             return new PagedResultLite<SubProductDto>
             {

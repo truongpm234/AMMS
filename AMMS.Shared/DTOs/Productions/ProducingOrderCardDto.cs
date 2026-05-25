@@ -37,11 +37,11 @@
         public int? group_total_qty { get; set; }
         public int production_id { get; set; }
         public DateTime? created_at { get; set; }
-
+        public string? production_approval_flow { get; set; }
+        public bool is_auto_production_approval { get; set; }
+        public string? production_approval_label { get; set; }
         public DateTime? start_date { get; set; }
-
         public DateTime? end_date { get; set; }
-
         public string? order_status { get; set; }
     }
 }

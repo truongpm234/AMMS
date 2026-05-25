@@ -48,12 +48,29 @@ namespace AMMS.Shared.DTOs.Productions
         public int nvl_qty { get; set; }
         public bool has_matched_sub_product { get; set; }
         public string? sub_product_message { get; set; }
+        public string? production_approval_flow { get; set; }
+        public bool is_auto_production_approval { get; set; }
+        public string? production_approval_label { get; set; }
         public int? selected_sub_product_id { get; set; }
         public int sub_product_used_qty { get; set; }
+        public string? sub_product_issue_file { get; set; }
         public MatchedSubProductDto? matched_sub_product { get; set; }
         public List<ProductionReadyMaterialDto> materials { get; set; } = new();
         public List<ProductionReadyMaterialDto> remaining_materials_for_both { get; set; } = new();
         public List<ProductionReadyMachineDto> machines { get; set; } = new();
+        public List<ProductionMethodCostOptionDto> method_cost_options { get; set; } = new();
+
+        public decimal? nvl_estimated_unit_cost { get; set; }
+
+        public decimal? sub_estimated_unit_cost { get; set; }
+
+        public decimal? both_estimated_unit_cost { get; set; }
+
+        public decimal? nvl_estimated_total_cost { get; set; }
+
+        public decimal? sub_estimated_total_cost { get; set; }
+
+        public decimal? both_estimated_total_cost { get; set; }
     }
 
     public class ProductionReadyMaterialDto

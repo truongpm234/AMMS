@@ -20,5 +20,10 @@ namespace AMMS.Shared.DTOs.Productions
         public string? mgr_note { get; set; }
         public string production_method { get; set; } = "";
         public string message { get; set; } = "";
+        public string? production_approval_flow { get; set; }
+
+        public bool is_auto_production_approval { get; set; }
+        public string? sub_product_issue_file { get; set; }
+        public string? production_approval_label { get; set; }
     }
 }

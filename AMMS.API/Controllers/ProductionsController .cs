@@ -247,7 +247,7 @@ namespace AMMS.API.Controllers
                         gm_note = req.gm_note,
                         gm_proposed_method = state.gm_proposed_method,
                         proposed_production_method = state.proposed_production_method,
-
+                        sub_product_issue_file = state.sub_product_issue_file,
                         selected_sub_product_id = state.selected_sub_product_id,
                         sub_product_used_qty = state.sub_product_used_qty,
                         nvl_qty = state.nvl_qty,
@@ -255,6 +255,16 @@ namespace AMMS.API.Controllers
                         can_use_nvl = state.can_use_nvl,
                         can_use_sub = state.can_use_sub,
                         can_use_both = state.can_use_both,
+
+                        method_cost_options = state.method_cost_options,
+
+                        nvl_estimated_unit_cost = state.nvl_estimated_unit_cost,
+                        sub_estimated_unit_cost = state.sub_estimated_unit_cost,
+                        both_estimated_unit_cost = state.both_estimated_unit_cost,
+
+                        nvl_estimated_total_cost = state.nvl_estimated_total_cost,
+                        sub_estimated_total_cost = state.sub_estimated_total_cost,
+                        both_estimated_total_cost = state.both_estimated_total_cost,
 
                         message = $"Auto confirmed production by {approvedMethod} and scheduled tasks."
                     });
@@ -276,25 +286,26 @@ namespace AMMS.API.Controllers
                     order_id = orderId,
                     production_id = state?.production_id,
                     prod_id = state?.production_id,
-
                     is_production_ready = false,
                     need_manager_approval = true,
-
                     event_type = "WAITING_MANAGER_APPROVAL",
                     approval_flow = "MANUAL_MULTI_OPTION",
-
                     gm_note = req.gm_note,
                     gm_proposed_method = state?.gm_proposed_method,
                     proposed_production_method = state?.proposed_production_method,
-
                     can_use_nvl = state?.can_use_nvl,
                     can_use_sub = state?.can_use_sub,
                     can_use_both = state?.can_use_both,
-
                     selected_sub_product_id = state?.selected_sub_product_id,
                     sub_product_used_qty = state?.sub_product_used_qty,
                     nvl_qty = state?.nvl_qty,
-
+                    method_cost_options = state?.method_cost_options,
+                    nvl_estimated_unit_cost = state?.nvl_estimated_unit_cost,
+                    sub_estimated_unit_cost = state?.sub_estimated_unit_cost,
+                    both_estimated_unit_cost = state?.both_estimated_unit_cost,
+                    nvl_estimated_total_cost = state?.nvl_estimated_total_cost,
+                    sub_estimated_total_cost = state?.sub_estimated_total_cost,
+                    both_estimated_total_cost = state?.both_estimated_total_cost,
                     message = "Sent production method approval request to manager."
                 });
             }
@@ -366,6 +377,11 @@ namespace AMMS.API.Controllers
 
                     event_type = "MANAGER_APPROVED",
                     approval_flow = "MANUAL_MULTI_OPTION",
+
+                    production_approval_flow = result.production_approval_flow,
+                    is_auto_production_approval = result.is_auto_production_approval,
+                    production_approval_label = result.production_approval_label,
+                    result.sub_product_issue_file,
 
                     result.is_full_process,
                     result.production_method,
@@ -703,6 +719,7 @@ namespace AMMS.API.Controllers
                 can_use_nvl = state.can_use_nvl,
                 can_use_sub = state.can_use_sub,
                 can_use_both = state.can_use_both,
+                sub_product_issue_file = state.sub_product_issue_file,
 
                 selected_sub_product_id = state.selected_sub_product_id,
                 sub_product_used_qty = state.sub_product_used_qty,
@@ -867,7 +884,7 @@ namespace AMMS.API.Controllers
                 production_method = method,
                 is_production_ready = true,
                 need_manager_approval = false,
-
+                sub_product_issue_file = result.sub_product_issue_file,
                 is_full_process = result.is_full_process,
                 sub_product_id = result.sub_product_id,
                 sub_product_used_qty = result.sub_product_used_qty,

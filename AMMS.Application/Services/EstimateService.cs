@@ -136,6 +136,31 @@ namespace AMMS.Application.Services
             {
                 if (value != null) setter(value);
             }
+            var resolvedCoatingMaterialCode = ResolveCoatingMaterialCode(
+    req.coating_material_code,
+    req.coating_type);
+
+            if (string.IsNullOrWhiteSpace(resolvedCoatingMaterialCode) &&
+                !string.IsNullOrWhiteSpace(previousEstimate?.coating_material_code))
+            {
+                resolvedCoatingMaterialCode = previousEstimate.coating_material_code;
+            }
+
+            var hasPhu = HasEstimateProcess(
+                req.production_processes ?? previousEstimate?.production_processes,
+                "PHU");
+
+            var hasCoatingQty =
+                (req.coating_glue_weight_kg ?? 0m) > 0m ||
+                (req.coating_glue_cost ?? 0m) > 0m;
+
+            if ((hasPhu || hasCoatingQty) && string.IsNullOrWhiteSpace(resolvedCoatingMaterialCode))
+            {
+                throw new ArgumentException(
+                    "Khi có công đoạn PHU hoặc có keo phủ, phải truyền coating_material_code hoặc coating_type hợp lệ.");
+            }
+
+            entity.coating_material_code = resolvedCoatingMaterialCode;
 
             var laminationMaterialIdInput =
     req.lamination_material_id ?? previousEstimate?.lamination_material_id;
@@ -191,7 +216,7 @@ namespace AMMS.Application.Services
             SetIfHasValue(req.coating_glue_rate_per_m2, v => entity.coating_glue_rate_per_m2 = v);
             SetIfNotNull(req.paper_code, v => entity.paper_code = v);
             SetIfNotNull(req.paper_name, v => entity.paper_name = v);
-            SetIfNotNull(req.coating_type, v => entity.coating_type = v);
+            SetIfNotNull(req.coating_type, v => entity.coating_type = v.Trim());
             SetIfNotNull(req.wave_type, v => entity.wave_type = v);
             SetIfHasValue(req.wave_sheets_used, v => entity.wave_sheets_used = v);
 
@@ -705,6 +730,55 @@ namespace AMMS.Application.Services
                 consultant_contract_path = url,
                 message = "Generate consultant contract successfully"
             };
+        }
+
+        private static string NormEstimateMaterialCode(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "";
+
+            var s = value.Trim().ToUpperInvariant();
+
+            s = s.Replace("Đ", "D");
+            s = s.Replace(" ", "_");
+            s = s.Replace("-", "_");
+
+            while (s.Contains("__"))
+                s = s.Replace("__", "_");
+
+            return s.Trim('_');
+        }
+
+        private static string? ResolveCoatingMaterialCode(string? coatingMaterialCode, string? coatingType)
+        {
+            if (!string.IsNullOrWhiteSpace(coatingMaterialCode))
+                return NormEstimateMaterialCode(coatingMaterialCode);
+
+            var raw = NormEstimateMaterialCode(coatingType);
+
+            return raw switch
+            {
+                "KEO_NUOC" or "KEO_PHU_NUOC" or "KEO_PHU_NUOC_" => "KEO_PHU_NUOC",
+
+                "KEO_DAU" or "KEO_PHU_DAU" => "KEO_PHU_DAU",
+
+                "UV" or "KEO_UV" or "PHU_UV" or "KEO_PHU_UV" => "KEO_PHU_UV",
+
+                _ => string.IsNullOrWhiteSpace(raw) ? null : raw
+            };
+        }
+
+        private static bool HasEstimateProcess(string? csv, string code)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return false;
+
+            var target = NormEstimateMaterialCode(code);
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormEstimateMaterialCode)
+                .Any(x => string.Equals(x, target, StringComparison.OrdinalIgnoreCase));
         }
 
         public async Task SaveConsultantContractPathAsync(int requestId, int estimateId, string consultantContractPath, CancellationToken ct = default)

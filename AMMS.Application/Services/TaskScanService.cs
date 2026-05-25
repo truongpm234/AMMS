@@ -116,7 +116,9 @@ namespace AMMS.Application.Services
                     .FirstOrDefaultAsync(x => x.task_id == taskId, ct)
                     ?? throw new InvalidOperationException("Task not found.");
 
-                var maxAllowed = groupInfo.prod?.group_total_qty ?? 0;
+                var maxAllowed = await ResolveMaxAllowedFinishQtyForTaskAsync(
+                    groupInfo,
+                    ct);
 
                 if (qtyGood <= 0)
                     throw new ArgumentOutOfRangeException(nameof(req.token), "qty_good phải lớn hơn 0.");
@@ -331,6 +333,124 @@ namespace AMMS.Application.Services
             return result;
         }
 
+        private async Task<int> ResolveMaxAllowedFinishQtyForTaskAsync(
+    task currentTask,
+    CancellationToken ct)
+        {
+            if (!currentTask.prod_id.HasValue)
+                return 1;
+
+            var prod = currentTask.prod ?? await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.prod_id == currentTask.prod_id.Value, ct);
+
+            if (prod == null)
+                return 1;
+
+            var currentCode = ProductionFlowHelper.Norm(
+                currentTask.process?.process_code);
+
+            /*
+             * GROUP:
+             * max_allowed phải tính theo tổng output sau công đoạn hiện tại
+             * của từng order, có cộng hao hụt SUB.
+             */
+            if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
+            {
+                var links = await _db.task_links
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.group_task_id == currentTask.task_id &&
+                        (
+                            x.status == null ||
+                            x.status.ToUpper() != "CANCELLED"
+                        ))
+                    .OrderBy(x => x.id)
+                    .ToListAsync(ct);
+
+                if (links.Count == 0)
+                    return Math.Max(prod.group_total_qty, 1);
+
+                decimal total = 0;
+
+                foreach (var link in links)
+                {
+                    var ctx = await GetGroupLinkEstimateContextAsync(
+                        currentTask,
+                        link,
+                        ct);
+
+                    if (ctx == null)
+                    {
+                        total += Math.Max(link.qty_plan, 1);
+                        continue;
+                    }
+
+                    var route = await ResolveRouteProcessCodesForOrderAsync(
+                        link.order_id,
+                        ct);
+
+                    var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
+                        ctx,
+                        link.process_code ?? currentCode,
+                        route,
+                        link.qty_plan,
+                        ct);
+
+                    /*
+                     * qty_good là output sau công đoạn hiện tại.
+                     */
+                    total += stageQty?.output_qty ?? Math.Max(link.qty_plan, 1);
+                }
+
+                return Math.Max((int)Math.Ceiling(total), 1);
+            }
+
+            /*
+             * SINGLE/SPLIT:
+             * nếu là SUB/BOTH downstream thì lấy output_qty.
+             */
+            var singleCtx = await GetTaskEstimateContextAsync(
+                currentTask.task_id,
+                ct);
+
+            if (singleCtx != null)
+            {
+                var route = await ResolveRouteProcessCodesForProductionAsync(
+                    singleCtx.Production,
+                    singleCtx.Task,
+                    ct);
+
+                var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
+                    singleCtx,
+                    currentCode,
+                    route,
+                    linkQtyPlan: null,
+                    ct);
+
+                if (stageQty != null)
+                    return Math.Max((int)Math.Ceiling(stageQty.output_qty), 1);
+            }
+
+            if (prod.group_total_qty > 0)
+                return prod.group_total_qty;
+
+            if (prod.order_id.HasValue)
+            {
+                var qty = await _db.order_items
+                    .AsNoTracking()
+                    .Where(x => x.order_id == prod.order_id.Value)
+                    .OrderBy(x => x.item_id)
+                    .Select(x => x.quantity)
+                    .FirstOrDefaultAsync(ct);
+
+                if (qty > 0)
+                    return qty;
+            }
+
+            return 1;
+        }
+
         private async Task CreatePendingSubProductsFromReferenceLeftoverAsync(
     List<TaskReferenceUsageInputDto> referenceInputs,
     task currentTask,
@@ -420,6 +540,15 @@ namespace AMMS.Application.Services
                 if (string.IsNullOrWhiteSpace(processPath))
                     processPath = targetProcessCode;
 
+                var signature = sourceOrderId.HasValue
+                    ? await SubProductCompatibilityHelper.BuildSignatureForOrderStageAsync(
+                        _db,
+                        sourceOrderId.Value,
+                        processPath,
+                        qty,
+                        ct)
+                    : null;
+
                 var pending = new sub_product
                 {
                     product_type_id = productTypeId.Value,
@@ -428,9 +557,6 @@ namespace AMMS.Application.Services
                     product_process = processPath,
                     quantity = qty,
 
-                    /*
-                     * Chưa nhập kho thật nên không active.
-                     */
                     is_active = false,
                     is_imported = false,
 
@@ -438,15 +564,26 @@ namespace AMMS.Application.Services
                     source_task_log_id = finishLog.log_id > 0 ? finishLog.log_id : null,
                     source_prod_id = prod.prod_id,
                     source_order_id = sourceOrderId,
+                    source_process_code = targetProcessCode,
+
+                    paper_material_code = signature?.paper_material_code,
+                    wave_material_code = signature?.wave_material_code,
+                    coating_material_code = signature?.coating_material_code,
+                    lamination_material_code = signature?.lamination_material_code,
+                    material_signature = signature?.material_signature,
+
+                    cost_estimate_id = signature?.cost_estimate_id,
+                    unit_cost_to_stage = signature?.unit_cost_to_stage ?? 0m,
+                    total_cost_to_stage = signature?.total_cost_to_stage ?? 0m,
 
                     description =
                         $"BTP dư từ task_id={currentTask.task_id}, prod_id={prod.prod_id}, " +
                         $"target_process={targetProcessCode}, product_process={processPath}, " +
-                        $"qty_left={input.quantity_left}, tạo lúc {now:yyyy-MM-dd HH:mm:ss}.",
+                        $"qty_left={input.quantity_left}, unit_cost={signature?.unit_cost_to_stage ?? 0m}, " +
+                        $"total_cost={signature?.total_cost_to_stage ?? 0m}, tạo lúc {now:yyyy-MM-dd HH:mm:ss}.",
 
                     updated_at = now
                 };
-
                 await _db.sub_products.AddAsync(pending, ct);
             }
         }
@@ -748,7 +885,11 @@ namespace AMMS.Application.Services
             if (links.Count == 0)
                 return;
 
-            var allocations = AllocateGroupQtyByLinks(groupQtyGood, links);
+            var allocations = await AllocateGroupQtyByExpectedOutputAsync(
+                groupTask,
+                groupQtyGood,
+                links,
+                ct);
 
             foreach (var link in links)
             {
@@ -805,6 +946,103 @@ namespace AMMS.Application.Services
                     now,
                     ct);
             }
+        }
+
+        private async Task<Dictionary<int, int>> AllocateGroupQtyByExpectedOutputAsync(
+    task groupTask,
+    int groupQtyGood,
+    List<task_link> links,
+    CancellationToken ct)
+        {
+            var weights = new List<(int orderId, decimal weight)>();
+
+            foreach (var link in links)
+            {
+                var ctx = await GetGroupLinkEstimateContextAsync(
+                    groupTask,
+                    link,
+                    ct);
+
+                if (ctx == null)
+                {
+                    weights.Add((link.order_id, Math.Max(link.qty_plan, 1)));
+                    continue;
+                }
+
+                var route = await ResolveRouteProcessCodesForOrderAsync(
+                    link.order_id,
+                    ct);
+
+                var currentCode = link.process_code ?? groupTask.process?.process_code;
+
+                var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
+                    ctx,
+                    currentCode,
+                    route,
+                    link.qty_plan,
+                    ct);
+
+                /*
+                 * Weight nên là output sau công đoạn hiện tại.
+                 * Nếu không phải SUB/BOTH downstream thì fallback về qty_plan cũ.
+                 */
+                var weight = stageQty?.output_qty ?? Math.Max(link.qty_plan, 1);
+
+                weights.Add((link.order_id, weight));
+            }
+
+            return AllocateQtyByWeights(groupQtyGood, weights);
+        }
+
+        private static Dictionary<int, int> AllocateQtyByWeights(
+            int totalQty,
+            List<(int orderId, decimal weight)> weights)
+        {
+            var result = new Dictionary<int, int>();
+
+            if (weights == null || weights.Count == 0)
+                return result;
+
+            var totalWeight = weights.Sum(x => x.weight);
+
+            if (totalWeight <= 0)
+            {
+                foreach (var item in weights)
+                    result[item.orderId] = 0;
+
+                return result;
+            }
+
+            var remaining = totalQty;
+
+            for (var i = 0; i < weights.Count; i++)
+            {
+                var item = weights[i];
+
+                int qty;
+
+                if (i == weights.Count - 1)
+                {
+                    qty = remaining;
+                }
+                else
+                {
+                    qty = (int)Math.Round(
+                        totalQty * (item.weight / totalWeight),
+                        MidpointRounding.AwayFromZero);
+
+                    if (qty < 0)
+                        qty = 0;
+
+                    if (qty > remaining)
+                        qty = remaining;
+                }
+
+                result[item.orderId] = qty;
+                remaining -= qty;
+            }
+
+            return result;
         }
 
         private static Dictionary<int, int> AllocateGroupQtyByLinks(
@@ -1246,90 +1484,111 @@ namespace AMMS.Application.Services
     int? linkQtyPlan,
     CancellationToken ct)
         {
-            var method = NormBothProcessCodeForScan(ctx.Production.prod_method);
-            var currentCode = NormBothProcessCodeForScan(currentProcessCode);
+            var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
+                ctx,
+                currentProcessCode,
+                routeProcessCodes,
+                linkQtyPlan,
+                ct);
 
-            if (string.IsNullOrWhiteSpace(method))
+            if (stageQty == null)
                 return null;
 
             /*
+             * reference_inputs là input cần đưa vào công đoạn hiện tại.
+             * Với SUB/BOTH sau boundary sub_product:
+             * - dùng sp
+             * - cộng hao hụt từ công đoạn hiện tại đến cuối path
+             */
+            return (
+                unit: stageQty.unit,
+                qty: stageQty.input_qty
+            );
+        }
+
+        private async Task<SubStageQtyResult?> ResolveSubOrBothDownstreamStageQtyAsync(
+    TaskEstimateContext ctx,
+    string? currentProcessCode,
+    IReadOnlyList<string?> routeProcessCodes,
+    int? linkQtyPlan,
+    CancellationToken ct)
+        {
+            var method = NormBothProcessCodeForScan(ctx.Production.prod_method);
+            var currentCode = NormBothProcessCodeForScan(currentProcessCode);
+
+            if (string.IsNullOrWhiteSpace(currentCode))
+                return null;
+
+            if (method != "SUB" && method != "BOTH")
+                return null;
+
+            if (!IsDownstreamBtpStageForReference(currentCode))
+                return null;
+
+            var subCodes = await ResolveSubProductProcessCodesForReferenceAsync(
+                ctx.Production,
+                ct);
+
+            /*
              * SUB:
-             * - Các công đoạn trước đã lấy từ bán thành phẩm.
-             * - Input tham chiếu cho PHU/CAN/BOI/BE/DUT/DAN phải theo số lượng sp,
-             *   không theo sheets_total của estimate.
+             * - Nếu có sub_product.product_process thì chỉ áp dụng từ công đoạn sau boundary.
+             * - Nếu chưa lấy được sub_product.product_process thì vẫn áp dụng cho PHU/CAN/BOI/BE/DUT/DAN.
              */
             if (method == "SUB")
             {
-                if (IsDownstreamBtpStageForReference(currentCode))
+                if (subCodes.Count > 0 &&
+                    !IsCurrentAfterSubProductBoundary(currentCode, routeProcessCodes, subCodes))
                 {
-                    return (
-                        unit: "sp",
-                        qty: ResolveProductReferenceQty(ctx, linkQtyPlan)
-                    );
+                    return null;
                 }
-
-                var subCodes = await ResolveSubProductProcessCodesForReferenceAsync(
-                    ctx.Production,
-                    ct);
-
-                if (IsCurrentAfterSubProductBoundary(
-                    currentCode,
-                    routeProcessCodes,
-                    subCodes))
-                {
-                    return (
-                        unit: "sp",
-                        qty: ResolveProductReferenceQty(ctx, linkQtyPlan)
-                    );
-                }
-
-                return null;
             }
 
             /*
              * BOTH:
-             * - Nếu current stage nằm sau phần đã lấy từ sub_product
-             *   thì input cũng phải là số lượng sp đã đồng bộ.
-             * - Nếu vẫn đang ở phần NVL tự sản xuất thì giữ logic cũ.
+             * - Chỉ áp dụng cho công đoạn nằm sau phần sub_product đã dùng.
+             * - Phần NVL tự sản xuất phía trước vẫn giữ logic estimate cũ.
              */
             if (method == "BOTH")
             {
-                var subCodes = await ResolveSubProductProcessCodesForReferenceAsync(
-                    ctx.Production,
-                    ct);
-
                 if (subCodes.Count == 0)
-                {
-                    if (IsDownstreamBtpStageForReference(currentCode))
-                    {
-                        return (
-                            unit: "sp",
-                            qty: ResolveProductReferenceQty(ctx, linkQtyPlan)
-                        );
-                    }
-
                     return null;
-                }
 
-                if (IsCurrentAfterSubProductBoundary(
-                    currentCode,
-                    routeProcessCodes,
-                    subCodes))
-                {
-                    return (
-                        unit: "sp",
-                        qty: ResolveProductReferenceQty(ctx, linkQtyPlan)
-                    );
-                }
-
-                return null;
+                if (!IsCurrentAfterSubProductBoundary(currentCode, routeProcessCodes, subCodes))
+                    return null;
             }
 
+            var productQty = ResolveProductReferenceQty(ctx, linkQtyPlan);
+
+            var sheetsBase = ResolveSheetsBaseForSubQty(
+                ctx,
+                productQty);
+
+            return SubProductionQuantityHelper.ResolveStageQty(
+                currentProcessCode: currentCode,
+                routeProcessCodes: routeProcessCodes,
+                productQty: productQty,
+                nUp: ctx.Estimate.n_up,
+                explicitSheetsBase: sheetsBase,
+                coatingType: ctx.Estimate.coating_type);
+        }
+
+        private static int ResolveSheetsBaseForSubQty(
+            TaskEstimateContext ctx,
+            decimal productQty)
+        {
+            var nUp = ctx.Estimate.n_up > 0 ? ctx.Estimate.n_up : 1;
+
             /*
-             * NVL:
-             * giữ logic cũ: dùng sheets_total, n_up, number_of_plates...
+             * Với SUB không dùng sheets_total vì sheets_total thường đã chứa waste cũ
+             * của flow NVL.
+             *
+             * Ưu tiên sheets_required nếu có.
+             * Nếu không có thì tự tính ceil(productQty / n_up).
              */
-            return null;
+            if (ctx.Estimate.sheets_required > 0)
+                return ctx.Estimate.sheets_required;
+
+            return (int)Math.Ceiling(productQty / nUp);
         }
 
         private static bool IsDownstreamBtpStageForReference(string? processCode)
@@ -1607,7 +1866,10 @@ namespace AMMS.Application.Services
             var processCode = (t.process?.process_code ?? "").Trim().ToUpperInvariant();
             var result = new List<TaskConsumableMaterialDto>();
             var bothScale = await ResolveBothConsumableScaleAsync(ctx, ct);
-
+            var subDownstreamMaterialScale = await ResolveSubDownstreamMaterialScaleAsync(
+                ctx,
+                processCode,
+                ct);
             async Task AddMaterialAsync(
     decimal estimatedQty,
     string fallbackCode,
@@ -1616,8 +1878,22 @@ namespace AMMS.Application.Services
     material? resolvedMaterial,
     bool ceilWhenBothRatio = false)
             {
+                /*
+                 * Scale cho BOTH phần NVL cũ.
+                 */
                 if (bothScale.ShouldScale)
                     estimatedQty = estimatedQty * bothScale.Ratio;
+
+                /*
+                 * Scale cho SUB/BOTH sau boundary sub_product.
+                 * Ví dụ PHU cần chạy 3145 sp thay vì 3000 sp,
+                 * keo phủ cũng scale theo 3145 / 3000.
+                 */
+                if (subDownstreamMaterialScale.HasValue &&
+                    subDownstreamMaterialScale.Value > 0)
+                {
+                    estimatedQty = estimatedQty * subDownstreamMaterialScale.Value;
+                }
 
                 if (estimatedQty <= 0)
                     return;
@@ -1704,17 +1980,20 @@ namespace AMMS.Application.Services
                     {
                         var coatingMat = await ResolveCoatingMaterialAsync(est, ct);
 
+                        var coatingCode = ResolveCoatingMaterialCodeForCompare(est);
+
                         await AddMaterialAsync(
                             estimatedQty: est.coating_glue_weight_kg,
-                            fallbackCode: NormalizeMaterialCode(est.coating_type),
-                            fallbackName: ProductionFlowHelper.ResolveCoatingDisplayName(est.coating_type),
-                            unit: "kg",
+                            fallbackCode: coatingCode ?? NormalizeMaterialCode(est.coating_type),
+                            fallbackName: coatingMat?.name
+                                ?? ProductionFlowHelper.ResolveCoatingDisplayName(est.coating_type),
+                            unit: coatingMat?.unit ?? "kg",
                             resolvedMaterial: coatingMat);
+
                         break;
                     }
 
                 case "CAN":
-                case "CAN_MANG":
                     {
                         var filmMat = await ResolveLaminationMaterialAsync(est, ct);
 
@@ -1773,6 +2052,62 @@ namespace AMMS.Application.Services
             }
 
             return result;
+        }
+
+        private async Task<decimal?> ResolveSubDownstreamMaterialScaleAsync(
+    TaskEstimateContext ctx,
+    string? currentProcessCode,
+    CancellationToken ct)
+        {
+            var route = await ResolveRouteProcessCodesForProductionAsync(
+                ctx.Production,
+                ctx.Task,
+                ct);
+
+            var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
+                ctx,
+                currentProcessCode,
+                route,
+                linkQtyPlan: null,
+                ct);
+
+            if (stageQty == null)
+                return null;
+
+            if (stageQty.product_qty <= 0)
+                return null;
+
+            var ratio = stageQty.input_qty / stageQty.product_qty;
+
+            if (ratio <= 0)
+                return null;
+
+            return ratio;
+        }
+
+        private async Task<List<string?>> ResolveRouteProcessCodesForProductionAsync(
+            production prod,
+            task currentTask,
+            CancellationToken ct)
+        {
+            if (prod.order_id.HasValue)
+            {
+                return await ResolveRouteProcessCodesForOrderAsync(
+                    prod.order_id.Value,
+                    ct);
+            }
+
+            var taskCodes = await (
+                from t in _db.tasks.AsNoTracking()
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+                where t.prod_id == prod.prod_id
+                orderby t.seq_num, t.task_id
+                select pp != null ? pp.process_code : null
+            ).ToListAsync(ct);
+
+            return taskCodes;
         }
 
         private async Task<List<TaskReferenceInputDto>> BuildReferenceInputsAsync(
@@ -1838,6 +2173,53 @@ namespace AMMS.Application.Services
             if (!currentTask.prod_id.HasValue)
                 return null;
 
+            var currentCode = ProductionFlowHelper.Norm(
+                currentTask.process?.process_code);
+
+            if (string.IsNullOrWhiteSpace(currentCode))
+                return null;
+
+            var prod = await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.prod_id == currentTask.prod_id.Value, ct);
+
+            /*
+             * Ưu tiên route thật của order.
+             * Quan trọng cho case SPLIT/GROUP/SUB vì production hiện tại có thể chỉ chứa
+             * BE,DUT,DAN hoặc PHU,CAN,BOI, không chứa đầy đủ RALO,CAT,IN.
+             */
+            if (prod?.order_id.HasValue == true)
+            {
+                var orderRoute = await ResolveRouteProcessCodesForOrderAsync(
+                    prod.order_id.Value,
+                    ct);
+
+                var normalizedRoute = orderRoute
+                    .Select(x => ProductionFlowHelper.Norm(x))
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Cast<string?>()
+                    .ToList();
+
+                var currentIndex = normalizedRoute.FindIndex(x =>
+                    string.Equals(
+                        ProductionFlowHelper.Norm(x),
+                        currentCode,
+                        StringComparison.OrdinalIgnoreCase));
+
+                if (currentIndex > 0)
+                {
+                    return new PreviousProcessContext
+                    {
+                        previous_process_code = ProductionFlowHelper.Norm(normalizedRoute[currentIndex - 1]),
+                        previous_stage_index = currentIndex - 1,
+                        route_process_codes = normalizedRoute
+                    };
+                }
+            }
+
+            /*
+             * Fallback: route theo task trong production hiện tại.
+             */
             var flow = await _db.tasks
                 .AsNoTracking()
                 .Include(x => x.process)
@@ -1856,28 +2238,51 @@ namespace AMMS.Application.Services
             if (flow.Count == 0)
                 return null;
 
-            var currentIndex = flow.FindIndex(x => x.task_id == currentTask.task_id);
-            if (currentIndex <= 0)
+            var currentFlowIndex = flow.FindIndex(x => x.task_id == currentTask.task_id);
+            if (currentFlowIndex <= 0)
                 return null;
 
-            var prev = flow[currentIndex - 1];
+            var prev = flow[currentFlowIndex - 1];
 
             return new PreviousProcessContext
             {
                 previous_process_code = ProductionFlowHelper.Norm(prev.process_code),
-                previous_stage_index = currentIndex - 1,
+                previous_stage_index = currentFlowIndex - 1,
                 route_process_codes = flow.Select(x => x.process_code).ToList()
             };
         }
 
         private async Task<material?> ResolveCoatingMaterialAsync(cost_estimate est, CancellationToken ct)
         {
-            var codes = new List<string>
-    {
-        NormalizeMaterialCode(est.coating_type)
-    };
+            var codes = new List<string?>();
+
+            if (!string.IsNullOrWhiteSpace(est.coating_material_code))
+                codes.Add(est.coating_material_code);
+
+            codes.Add(ResolveCoatingMaterialCodeForCompare(est));
+
+            codes.Add(est.coating_type);
 
             return await ResolveMaterialByCodesOrNamesAsync(ct, codes);
+        }
+
+        private static string? ResolveCoatingMaterialCodeForCompare(cost_estimate? est)
+        {
+            if (est == null)
+                return null;
+
+            if (!string.IsNullOrWhiteSpace(est.coating_material_code))
+                return NormalizeMaterialCode(est.coating_material_code);
+
+            var raw = NormalizeMaterialCode(est.coating_type);
+
+            return raw switch
+            {
+                "KEO_NUOC" or "KEO_PHU_NUOC" => "KEO_PHU_NUOC",
+                "KEO_DAU" or "KEO_PHU_DAU" => "KEO_PHU_DAU",
+                "UV" or "KEO_UV" or "PHU_UV" or "KEO_PHU_UV" => "KEO_PHU_UV",
+                _ => string.IsNullOrWhiteSpace(raw) ? null : raw
+            };
         }
 
         private async Task<material?> ResolveWaveMaterialAsync(cost_estimate est, CancellationToken ct)

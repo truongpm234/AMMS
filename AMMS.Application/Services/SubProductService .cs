@@ -36,17 +36,34 @@ namespace AMMS.Application.Services
                 id = entity.id,
                 product_type_id = entity.product_type_id,
                 product_type_name = entity.product_type?.name,
+
                 width = entity.width,
                 length = entity.length,
                 product_process = entity.product_process,
                 quantity = entity.quantity,
+
                 is_active = entity.is_active,
                 is_imported = entity.is_imported,
                 import_file = entity.import_file,
+
                 source_task_id = entity.source_task_id,
                 source_task_log_id = entity.source_task_log_id,
                 source_prod_id = entity.source_prod_id,
                 source_order_id = entity.source_order_id,
+                source_process_code = entity.source_process_code,
+
+                paper_material_code = entity.paper_material_code,
+                wave_material_code = entity.wave_material_code,
+                coating_material_code = entity.coating_material_code,
+                lamination_material_code = entity.lamination_material_code,
+                material_signature = entity.material_signature,
+
+                cost_estimate_id = entity.cost_estimate_id,
+                unit_cost_to_stage = entity.unit_cost_to_stage,
+                total_cost_to_stage = entity.total_cost_to_stage,
+
+                imported_to_sub_product_id = entity.imported_to_sub_product_id,
+
                 description = entity.description,
                 updated_at = entity.updated_at
             };
@@ -81,10 +98,7 @@ namespace AMMS.Application.Services
                     : NormalizeProcess(dto.product_process),
                 quantity = dto.quantity ?? 0,
                 is_active = dto.is_active ?? true,
-
-                // Dòng tạo tay được xem là tồn kho thật.
                 is_imported = true,
-
                 description = string.IsNullOrWhiteSpace(dto.description)
                     ? null
                     : dto.description.Trim(),
@@ -207,61 +221,57 @@ namespace AMMS.Application.Services
             if (subProductIds.Count == 0)
                 throw new ArgumentException("sub_product_ids is required");
 
-            var items = await (
-                from sp in _db.sub_products.AsNoTracking()
-                join pt0 in _db.product_types.AsNoTracking()
-                    on sp.product_type_id equals pt0.product_type_id into ptj
-                from pt in ptj.DefaultIfEmpty()
-                where subProductIds.Contains(sp.id)
-                orderby sp.id
-                select new SubProductImportReceiptPdfItem
-                {
-                    id = sp.id,
-                    product_type_id = sp.product_type_id,
-                    product_type_name = pt != null ? pt.name : null,
-                    width = sp.width,
-                    length = sp.length,
-                    product_process = sp.product_process,
-                    quantity = sp.quantity,
-                    source_order_id = sp.source_order_id,
-                    source_prod_id = sp.source_prod_id,
-                    source_task_id = sp.source_task_id,
-                    description = sp.description
-                }
-            ).ToListAsync(ct);
+            var items = await _db.sub_products
+                .Include(x => x.product_type)
+                .Where(x => subProductIds.Contains(x.id))
+                .OrderBy(x => x.id)
+                .ToListAsync(ct);
 
             if (items.Count == 0)
-                throw new InvalidOperationException("Sub products not found");
+                throw new InvalidOperationException("Không tìm thấy sub_product để tạo phiếu nhập bán thành phẩm.");
 
-            var foundIds = items.Select(x => x.id).ToHashSet();
-            var missingIds = subProductIds.Where(x => !foundIds.Contains(x)).ToList();
+            var foundIds = items
+                .Select(x => x.id)
+                .ToHashSet();
+
+            var missingIds = subProductIds
+                .Where(x => !foundIds.Contains(x))
+                .ToList();
 
             if (missingIds.Count > 0)
-                throw new InvalidOperationException($"Sub product not found: {string.Join(", ", missingIds)}");
+            {
+                throw new InvalidOperationException(
+                    $"Không tìm thấy sub_product: {string.Join(", ", missingIds)}");
+            }
 
             var now = AppTime.NowVnUnspecified();
             var receiptNo = $"PNBTP-{now:yyyyMMddHHmmss}";
-            var fileName = $"phieu-nhap-ban-thanh-pham-{now:yyyyMMddHHmmss}.pdf";
-            var publicId = $"sub-products/import-receipts/{receiptNo}";
+            var fileName = $"{receiptNo}.pdf";
+            var publicId = $"sub-product-imports/{receiptNo}";
 
             var pdfBytes = SubProductImportReceiptPdfHelper.GeneratePdf(
                 items,
                 receiptNo,
                 now);
 
-            await using var ms = new MemoryStream(pdfBytes);
+            string cloudUrl;
 
-            var cloudUrl = await _cloudinaryStorage.UploadRawWithPublicIdAsync(
-                ms,
-                fileName,
-                "application/pdf",
-                publicId);
+            await using (var stream = new MemoryStream(pdfBytes))
+            {
+                cloudUrl = await _cloudinaryStorage.UploadRawWithPublicIdAsync(
+                    stream,
+                    fileName,
+                    "application/pdf",
+                    publicId);
+            }
 
-            await _db.sub_products
-                .Where(x => subProductIds.Contains(x.id))
-                .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(x => x.import_file, cloudUrl)
-                    .SetProperty(x => x.updated_at, now), ct);
+            foreach (var item in items)
+            {
+                item.import_file = cloudUrl;
+                item.updated_at = now;
+            }
+
+            await _db.SaveChangesAsync(ct);
 
             return new SubProductImportReceiptBatchResponseDto
             {
@@ -269,24 +279,40 @@ namespace AMMS.Application.Services
                 import_file = cloudUrl,
                 file_name = fileName,
                 total_selected = items.Count,
-                message = $"Đã tạo phiếu nhập bán thành phẩm cho {items.Count} dòng.",
+
                 items = items.Select(x => new SubProductImportReceiptItemDto
                 {
                     sub_product_id = x.id,
                     product_type_id = x.product_type_id,
-                    product_type_name = x.product_type_name,
+                    product_type_name = x.product_type != null ? x.product_type.name : null,
+
                     width = x.width,
                     length = x.length,
                     product_process = x.product_process,
                     quantity = x.quantity,
-                    import_file = cloudUrl
-                }).ToList()
+
+                    is_active = x.is_active,
+                    is_imported = x.is_imported,
+                    import_file = x.import_file,
+
+                    paper_material_code = x.paper_material_code,
+                    wave_material_code = x.wave_material_code,
+                    coating_material_code = x.coating_material_code,
+                    lamination_material_code = x.lamination_material_code,
+                    material_signature = x.material_signature,
+
+                    cost_estimate_id = x.cost_estimate_id,
+                    unit_cost_to_stage = x.unit_cost_to_stage,
+                    total_cost_to_stage = x.total_cost_to_stage
+                }).ToList(),
+
+                message = $"Tạo phiếu nhập bán thành phẩm thành công cho {items.Count} dòng."
             };
         }
 
         public async Task<ImportPendingSubProductsResponseDto> ImportPendingSubProductsAsync(
-            List<int>? ids = null,
-            CancellationToken ct = default)
+    List<int>? ids = null,
+    CancellationToken ct = default)
         {
             ids = ids?
                 .Where(x => x > 0)
@@ -317,95 +343,128 @@ namespace AMMS.Application.Services
 
             if (pendings.Count == 0)
             {
-                response.message = "Không có bán thành phẩm chờ nhập kho.";
+                response.message = "Không có bán thành phẩm pending cần nhập kho.";
                 return response;
             }
 
-            var productTypeIds = pendings
-                .Select(x => x.product_type_id)
-                .Distinct()
-                .ToList();
-
-            var activeRows = await _db.sub_products
-                .Where(x =>
-                    x.is_active == true &&
-                    x.is_imported == true &&
-                    productTypeIds.Contains(x.product_type_id))
-                .ToListAsync(ct);
-
             foreach (var pending in pendings)
             {
-                var pendingProcess = NormalizeProcess(pending.product_process);
-                var importQty = pending.quantity;
+                pending.product_process = NormalizeProcess(pending.product_process);
 
-                var matchedActive = activeRows.FirstOrDefault(x =>
-                    x.id != pending.id &&
-                    x.product_type_id == pending.product_type_id &&
-                    x.width == pending.width &&
-                    x.length == pending.length &&
-                    NormalizeProcess(x.product_process) == pendingProcess);
+                pending.material_signature = string.IsNullOrWhiteSpace(pending.material_signature)
+                    ? SubProductCompatibilityHelper.BuildMaterialSignature(
+                        pending.paper_material_code,
+                        pending.wave_material_code,
+                        pending.coating_material_code,
+                        pending.lamination_material_code)
+                    : pending.material_signature;
 
-                if (matchedActive != null)
-                {
-                    matchedActive.quantity += importQty;
-                    matchedActive.updated_at = now;
+                pending.unit_cost_to_stage = Math.Round(pending.unit_cost_to_stage, 4);
+                pending.total_cost_to_stage = Math.Round(pending.unit_cost_to_stage * pending.quantity, 2);
 
-                    pending.quantity = 0;
-                    pending.is_imported = true;
-                    pending.is_active = false;
-                    pending.updated_at = now;
-                    pending.description = AppendDescription(
-                        pending.description,
-                        $"Đã nhập gộp vào sub_product_id={matchedActive.id} lúc {now:yyyy-MM-dd HH:mm:ss}.");
+                var active = await FindActiveMatchedSubProductForImportAsync(
+                    pending,
+                    ct);
 
-                    response.merged_count++;
-
-                    response.rows.Add(new ImportPendingSubProductRowDto
-                    {
-                        pending_sub_product_id = pending.id,
-                        merged_into_sub_product_id = matchedActive.id,
-                        action = "MERGED",
-                        quantity = importQty,
-                        product_type_id = pending.product_type_id,
-                        width = pending.width,
-                        length = pending.length,
-                        product_process = pending.product_process
-                    });
-                }
-                else
+                if (active == null)
                 {
                     pending.is_active = true;
                     pending.is_imported = true;
+                    pending.imported_to_sub_product_id = null;
                     pending.updated_at = now;
-                    pending.description = AppendDescription(
-                        pending.description,
-                        $"Đã chuyển thành tồn kho active lúc {now:yyyy-MM-dd HH:mm:ss}.");
-
-                    activeRows.Add(pending);
 
                     response.activated_count++;
 
-                    response.rows.Add(new ImportPendingSubProductRowDto
+                    response.items.Add(new ImportPendingSubProductItemDto
                     {
-                        pending_sub_product_id = pending.id,
-                        merged_into_sub_product_id = null,
+                        source_sub_product_id = pending.id,
+                        target_sub_product_id = pending.id,
+                        quantity_imported = pending.quantity,
                         action = "ACTIVATED",
-                        quantity = importQty,
-                        product_type_id = pending.product_type_id,
-                        width = pending.width,
-                        length = pending.length,
-                        product_process = pending.product_process
+                        message = "Không có dòng active trùng signature, chuyển chính dòng pending thành tồn kho active."
                     });
+
+                    continue;
                 }
+
+                var importQty = pending.quantity;
+
+                active.quantity += importQty;
+                active.total_cost_to_stage = Math.Round(active.unit_cost_to_stage * active.quantity, 2);
+                active.updated_at = now;
+
+                pending.quantity = 0;
+                pending.is_active = false;
+                pending.is_imported = true;
+                pending.imported_to_sub_product_id = active.id;
+                pending.updated_at = now;
+
+                response.merged_count++;
+
+                response.items.Add(new ImportPendingSubProductItemDto
+                {
+                    source_sub_product_id = pending.id,
+                    target_sub_product_id = active.id,
+                    quantity_imported = importQty,
+                    action = "MERGED",
+                    message = $"Đã gộp vào sub_product active id={active.id} vì trùng product_type, size, path, NVL signature và unit_cost."
+                });
             }
 
             await _db.SaveChangesAsync(ct);
 
             response.message =
-                $"Đã xử lý {response.total_pending} dòng chờ nhập kho. " +
-                $"Gộp vào tồn hiện có: {response.merged_count}, active mới: {response.activated_count}.";
+                $"Đã xử lý {pendings.Count} dòng pending. " +
+                $"Kích hoạt mới={response.activated_count}, gộp={response.merged_count}.";
 
             return response;
+        }
+
+        private async Task<sub_product?> FindActiveMatchedSubProductForImportAsync(
+    sub_product pending,
+    CancellationToken ct)
+        {
+            var process = NormalizeProcess(pending.product_process);
+
+            var materialSignature = string.IsNullOrWhiteSpace(pending.material_signature)
+                ? SubProductCompatibilityHelper.BuildMaterialSignature(
+                    pending.paper_material_code,
+                    pending.wave_material_code,
+                    pending.coating_material_code,
+                    pending.lamination_material_code)
+                : pending.material_signature;
+
+            var unitCost = Math.Round(pending.unit_cost_to_stage, 4);
+
+            var candidates = await _db.sub_products
+                .Where(x =>
+                    x.id != pending.id &&
+                    x.is_active == true &&
+                    x.is_imported == true &&
+                    x.product_type_id == pending.product_type_id &&
+                    x.width == pending.width &&
+                    x.length == pending.length &&
+                    x.quantity >= 0)
+                .ToListAsync(ct);
+
+            return candidates.FirstOrDefault(x =>
+                string.Equals(
+                    NormalizeProcess(x.product_process),
+                    process,
+                    StringComparison.OrdinalIgnoreCase)
+                &&
+                string.Equals(
+                    string.IsNullOrWhiteSpace(x.material_signature)
+                        ? SubProductCompatibilityHelper.BuildMaterialSignature(
+                            x.paper_material_code,
+                            x.wave_material_code,
+                            x.coating_material_code,
+                            x.lamination_material_code)
+                        : x.material_signature,
+                    materialSignature,
+                    StringComparison.OrdinalIgnoreCase)
+                &&
+                Math.Round(x.unit_cost_to_stage, 4) == unitCost);
         }
 
         private static string NormalizeProcess(string? value)

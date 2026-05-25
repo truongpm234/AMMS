@@ -51,6 +51,10 @@ public partial class production
 
     public int group_total_qty { get; set; } = 0;
 
+    public string? production_approval_flow { get; set; }
+
+    public string? sub_product_issue_file { get; set; }
+
     public virtual ICollection<prod_order> prod_orders { get; set; } = new List<prod_order>();
 
     public virtual sub_product? sub_product { get; set; }

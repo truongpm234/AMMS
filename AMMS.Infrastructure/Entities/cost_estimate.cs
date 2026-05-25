@@ -29,6 +29,9 @@ public partial class cost_estimate
 
     public string? coating_type { get; set; } = "KEO_NUOC";
 
+    [Column("coating_material_code")]
+    public string? coating_material_code { get; set; }
+
     public decimal mounting_glue_cost { get; set; }
 
     public decimal mounting_glue_weight_kg { get; set; }

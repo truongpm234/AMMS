@@ -2673,7 +2673,7 @@ namespace AMMS.Application.Services
 
             if (code == "PHU")
             {
-                var coating = row.Estimate?.coating_type;
+                var coating = ResolveCoatingMaterialCodeForGroup(row.Estimate);
 
                 return $"PHU:COATING={SafeKey(coating)}";
             }
@@ -2700,6 +2700,25 @@ namespace AMMS.Application.Services
             }
 
             return $"{code}:NO_MATERIAL_CHECK";
+        }
+
+        private static string? ResolveCoatingMaterialCodeForCompare(cost_estimate? est)
+        {
+            if (est == null)
+                return null;
+
+            if (!string.IsNullOrWhiteSpace(est.coating_material_code))
+                return NormProcessCode(est.coating_material_code);
+
+            var raw = NormProcessCode(est.coating_type);
+
+            return raw switch
+            {
+                "KEO_NUOC" or "KEO_PHU_NUOC" => "KEO_PHU_NUOC",
+                "KEO_DAU" or "KEO_PHU_DAU" => "KEO_PHU_DAU",
+                "UV" or "KEO_UV" or "PHU_UV" or "KEO_PHU_UV" => "KEO_PHU_UV",
+                _ => string.IsNullOrWhiteSpace(raw) ? null : raw
+            };
         }
 
         private async Task<List<GroupOrderRow>> LoadGroupOrderRowsAsync(
@@ -3236,6 +3255,25 @@ namespace AMMS.Application.Services
             }
 
             return methods[0]!;
+        }
+
+        private static string? ResolveCoatingMaterialCodeForGroup(cost_estimate? est)
+        {
+            if (est == null)
+                return null;
+
+            if (!string.IsNullOrWhiteSpace(est.coating_material_code))
+                return NormProcessCode(est.coating_material_code);
+
+            var raw = NormProcessCode(est.coating_type);
+
+            return raw switch
+            {
+                "KEO_NUOC" or "KEO_PHU_NUOC" => "KEO_PHU_NUOC",
+                "KEO_DAU" or "KEO_PHU_DAU" => "KEO_PHU_DAU",
+                "UV" or "KEO_UV" or "PHU_UV" or "KEO_PHU_UV" => "KEO_PHU_UV",
+                _ => string.IsNullOrWhiteSpace(raw) ? null : raw
+            };
         }
     }
 }

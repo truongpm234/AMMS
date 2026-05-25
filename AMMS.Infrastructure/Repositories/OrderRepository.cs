@@ -38,63 +38,95 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             var orders = await (
-    from o in _db.orders.AsNoTracking()
+                from o in _db.orders.AsNoTracking()
 
-    join q in _db.quotes.AsNoTracking()
-        on o.quote_id equals q.quote_id into qj
-    from q in qj.DefaultIfEmpty()
+                join q in _db.quotes.AsNoTracking()
+                    on o.quote_id equals q.quote_id into qj
+                from q in qj.DefaultIfEmpty()
 
-    join r in _db.order_requests.AsNoTracking()
-        on o.order_id equals r.order_id into rj
-    from r in rj.DefaultIfEmpty()
+                join r in _db.order_requests.AsNoTracking()
+                    on o.order_id equals r.order_id into rj
+                from r in rj.DefaultIfEmpty()
 
-    let p = _db.productions.AsNoTracking()
-        .Where(x =>
-            (o.production_id != null && x.prod_id == o.production_id.Value) ||
-            (x.order_id != null && x.order_id.Value == o.order_id))
-        .OrderByDescending(x => x.prod_id)
-        .FirstOrDefault()
+                orderby o.order_date descending, o.order_id descending
 
-    orderby o.order_date descending, o.order_id descending
+                select new
+                {
+                    o.order_id,
+                    o.code,
+                    o.order_date,
+                    o.delivery_date,
+                    Status = o.status ?? "",
+                    o.production_id,
 
-    select new
-    {
-        o.order_id,
-        o.code,
-        o.order_date,
-        o.delivery_date,
-        Status = o.status ?? "",
-        is_production_ready = o.is_production_ready,
-        customer_name = r != null ? (r.customer_name ?? "") : "Khách hàng",
+                    is_production_ready = o.is_production_ready,
+                    customer_name = r != null ? (r.customer_name ?? "") : "Khách hàng",
 
-        is_full_process = p != null ? (bool?)p.is_full_process : null,
+                    layout_confirmed = o.layout_confirmed,
 
-        import_recieve_path = p != null ? p.import_recieve_path : null,
-
-        production_method = p != null ? p.prod_method : null,
-        sub_product_id = p != null ? p.sub_product_id : null,
-        layout_confirmed = o.layout_confirmed,
-        sub_product_used_qty = p != null ? p.sub_product_used_qty : 0,
-        nvl_qty = p != null ? p.nvl_qty : 0,
-
-        FirstItem = _db.order_items.AsNoTracking()
-            .Where(i => i.order_id == o.order_id)
-            .OrderBy(i => i.item_id)
-            .Select(i => new
-            {
-                i.product_name,
-                i.product_type_id,
-                i.quantity
-            })
-            .FirstOrDefault()
-    }
-)
-.Skip(skip)
-.Take(take)
-.ToListAsync(ct);
+                    FirstItem = _db.order_items.AsNoTracking()
+                        .Where(i => i.order_id == o.order_id)
+                        .OrderBy(i => i.item_id)
+                        .Select(i => new
+                        {
+                            i.product_name,
+                            i.product_type_id,
+                            i.quantity
+                        })
+                        .FirstOrDefault()
+                }
+            )
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(ct);
 
             if (orders.Count == 0) return new List<OrderResponseDto>();
+            var pageOrderIds = orders
+    .Select(x => x.order_id)
+    .Distinct()
+    .ToList();
 
+            var orderProductionIds = orders
+                .Where(x => x.production_id.HasValue)
+                .Select(x => x.production_id!.Value)
+                .Distinct()
+                .ToList();
+
+            /*
+             * Lấy liên kết GROUP:
+             * - prod_id: production GROUP
+             * - single_prod_id: production SINGLE gốc của order
+             */
+            var prodOrderLinks = await _db.prod_orders
+                .AsNoTracking()
+                .Where(x => pageOrderIds.Contains(x.order_id))
+                .Where(x =>
+                    x.status == null ||
+                    x.status.ToUpper() != "CANCELLED")
+                .ToListAsync(ct);
+
+            var prodIdsFromProdOrders = prodOrderLinks
+                .SelectMany(x =>
+                    x.single_prod_id.HasValue
+                        ? new[] { x.prod_id, x.single_prod_id.Value }
+                        : new[] { x.prod_id })
+                .Distinct()
+                .ToList();
+
+            var allRelatedProdIds = orderProductionIds
+                .Concat(prodIdsFromProdOrders)
+                .Distinct()
+                .ToList();
+            var relatedProductionsAll = await _db.productions
+                .AsNoTracking()
+                .Where(p =>
+                    (
+                        p.order_id.HasValue &&
+                        pageOrderIds.Contains(p.order_id.Value)
+                    )
+                    ||
+                    allRelatedProdIds.Contains(p.prod_id))
+                .ToListAsync(ct);
             var orderIdsNeedCalc = orders
                 .Where(o => IsNotEnoughStatus(o.Status))
                 .Select(o => o.order_id)
@@ -231,6 +263,38 @@ namespace AMMS.Infrastructure.Repositories
                 {
                     canFulfill = true;
                 }
+                var linkedProdIds = prodOrderLinks
+    .Where(x => x.order_id == o.order_id)
+    .SelectMany(x =>
+        x.single_prod_id.HasValue
+            ? new[] { x.prod_id, x.single_prod_id.Value }
+            : new[] { x.prod_id })
+    .ToHashSet();
+
+                if (o.production_id.HasValue)
+                    linkedProdIds.Add(o.production_id.Value);
+
+                var relatedProductions = relatedProductionsAll
+                    .Where(p =>
+                        (
+                            p.order_id.HasValue &&
+                            p.order_id.Value == o.order_id
+                        )
+                        ||
+                        linkedProdIds.Contains(p.prod_id))
+                    .GroupBy(p => p.prod_id)
+                    .Select(g => g.First())
+                    .OrderBy(p => p.planned_start_date)
+                    .ThenBy(p => p.prod_id)
+                    .ToList();
+
+                /*
+                 * mainProduction chỉ để giữ tương thích các field cũ:
+                 * production_id, production_method, sub_product_id...
+                 */
+                var mainProduction = relatedProductions
+                    .OrderByDescending(p => p.prod_id)
+                    .FirstOrDefault();
 
                 return new OrderResponseDto
                 {
@@ -243,19 +307,70 @@ namespace AMMS.Infrastructure.Repositories
                     created_at = ToUtcString(o.order_date),
                     delivery_date = ToUtcString(o.delivery_date),
                     status = o.Status,
+
+                    /*
+                     * Field cũ: giữ 1 production chính/latest để FE cũ không lỗi.
+                     */
+                    production_id = mainProduction?.prod_id ?? o.production_id,
+
+                    /*
+                     * Field mới: toàn bộ production liên quan SINGLE / GROUP / SPLIT.
+                     */
+                    production_ids = relatedProductions
+        .Select(p => p.prod_id)
+        .Distinct()
+        .ToList(),
+
+                    productions = relatedProductions
+        .Select(p => new OrderPagedProductionDto
+        {
+            prod_id = p.prod_id,
+            code = p.code,
+            order_id = p.order_id,
+            manager_id = p.manager_id,
+
+            end_date = p.end_date,
+            status = p.status,
+            product_type_id = p.product_type_id,
+            note = p.note,
+            created_at = p.created_at,
+            planned_start_date = p.planned_start_date,
+            actual_start_date = p.actual_start_date,
+
+            is_full_process = p.is_full_process,
+            sub_product_used_qty = p.sub_product_used_qty,
+            import_recieve_path = p.import_recieve_path,
+            sub_product_id = p.sub_product_id,
+            nvl_qty = p.nvl_qty,
+
+            prod_method = p.prod_method,
+            gm_note = p.gm_note,
+            mgr_note = p.mgr_note,
+
+            prod_kind = p.prod_kind,
+            group_process_codes = p.group_process_codes,
+            group_total_qty = p.group_total_qty,
+            gm_proposed_method = p.gm_proposed_method
+        })
+        .ToList(),
+
                     can_fulfill = canFulfill,
                     is_production_ready = o.is_production_ready,
-                    is_full_process = o.is_full_process,
-                    production_method = o.production_method,
-                    sub_product_id = o.sub_product_id,
-                    sub_product_used_qty = o.sub_product_used_qty,
-                    layout_confirmed = o.layout_confirmed,
-                    nvl_qty = o.nvl_qty,
-                    missing_materials = canFulfill == false
-                        ? (missingMaterials ?? new List<MissingMaterialDto>())
-                        : null,
 
-                    import_recieve_path = o.import_recieve_path
+                    /*
+                     * Các field cũ lấy từ production chính/latest.
+                     */
+                    is_full_process = mainProduction?.is_full_process,
+                    production_method = mainProduction?.prod_method,
+                    sub_product_id = mainProduction?.sub_product_id,
+                    sub_product_used_qty = mainProduction?.sub_product_used_qty ?? 0,
+                    layout_confirmed = o.layout_confirmed,
+                    nvl_qty = mainProduction?.nvl_qty ?? 0,
+                    import_recieve_path = mainProduction?.import_recieve_path,
+
+                    missing_materials = canFulfill == false
+        ? (missingMaterials ?? new List<MissingMaterialDto>())
+        : null
                 };
             }).ToList();
         }

@@ -241,15 +241,19 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.status)
                 .HasMaxLength(20)
                 .HasDefaultValueSql("'Planned'::character varying");
-
+            entity.Property(e => e.sub_product_issue_file)
+                .HasColumnType("text");
             entity.HasOne(d => d.manager).WithMany(p => p.productions)
                 .HasForeignKey(d => d.manager_id)
                 .HasConstraintName("productions_manager_id_fkey");
-
             entity.HasOne(d => d.order).WithMany(p => p.productions)
                 .HasForeignKey(d => d.order_id)
                 .HasConstraintName("productions_order_id_fkey");
-
+            entity.Property(e => e.production_approval_flow)
+                .HasColumnName("production_approval_flow")
+                .HasMaxLength(50);
+            entity.HasIndex(e => e.production_approval_flow)
+                .HasDatabaseName("ix_productions_approval_flow");
             entity.HasOne(d => d.product_type).WithMany(p => p.productions)
                 .HasForeignKey(d => d.product_type_id)
                 .HasConstraintName("productions_product_type_id_fkey");
@@ -463,7 +467,9 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.created_at)
                 .HasDefaultValueSql("CURRENT_TIMESTAMP")
                 .HasColumnType("timestamp without time zone");
-
+            entity.Property(e => e.coating_type)
+                .HasMaxLength(100)
+                .HasDefaultValue("KEO_NUOC");
             entity.Property(e => e.estimated_finish_date)
                 .HasColumnType("timestamp without time zone");
 
@@ -820,6 +826,32 @@ public partial class AppDbContext : DbContext
             entity.Property(e => e.description)
                   .HasMaxLength(255);
 
+            entity.Property(e => e.source_process_code)
+                  .HasMaxLength(50);
+
+            entity.Property(e => e.paper_material_code)
+                  .HasMaxLength(100);
+
+            entity.Property(e => e.wave_material_code)
+                  .HasMaxLength(100);
+
+            entity.Property(e => e.coating_material_code)
+                  .HasMaxLength(100);
+
+            entity.Property(e => e.lamination_material_code)
+                  .HasMaxLength(100);
+
+            entity.Property(e => e.material_signature)
+                  .HasColumnType("text");
+
+            entity.Property(e => e.unit_cost_to_stage)
+                  .HasColumnType("numeric(18,4)")
+                  .HasDefaultValue(0m);
+
+            entity.Property(e => e.total_cost_to_stage)
+                  .HasColumnType("numeric(18,2)")
+                  .HasDefaultValue(0m);
+
             entity.Property(e => e.updated_at)
                   .HasColumnType("timestamp without time zone")
                   .HasDefaultValueSql("CURRENT_TIMESTAMP");
@@ -830,9 +862,19 @@ public partial class AppDbContext : DbContext
             entity.HasIndex(e => e.is_active)
                   .HasDatabaseName("ix_sub_product_is_active");
 
+            entity.HasIndex(e => e.material_signature)
+                  .HasDatabaseName("ix_sub_product_material_signature");
+
+            entity.HasOne(d => d.product_type)
+                  .WithMany(p => p.sub_products)
+                  .HasForeignKey(d => d.product_type_id)
+                  .OnDelete(DeleteBehavior.Restrict)
+                  .HasConstraintName("fk_sub_product_product_type");
+            entity.Property(e => e.updated_at)
+                  .HasColumnType("timestamp without time zone")
+                  .HasDefaultValueSql("CURRENT_TIMESTAMP");
             entity.HasIndex(e => e.is_imported)
                   .HasDatabaseName("ix_sub_product_is_imported");
-
             entity.HasIndex(e => new
             {
                 e.product_type_id,
@@ -843,12 +885,6 @@ public partial class AppDbContext : DbContext
                 e.is_imported
             })
             .HasDatabaseName("ix_sub_product_import_match");
-
-            entity.HasOne(d => d.product_type)
-                  .WithMany(p => p.sub_products)
-                  .HasForeignKey(d => d.product_type_id)
-                  .OnDelete(DeleteBehavior.Restrict)
-                  .HasConstraintName("fk_sub_product_product_type");
         });
 
         OnModelCreatingPartial(modelBuilder);

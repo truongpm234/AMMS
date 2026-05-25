@@ -420,6 +420,20 @@ namespace AMMS.Infrastructure.Repositories
     .Select(x => (string?)x.process?.process_code)
     .ToList();
 
+            if (est == null)
+                return null;
+
+            var subPolicy = await TryBuildSubOrBothDownstreamQtyPolicyAsync(
+                stage,
+                prod,
+                req,
+                est,
+                routeCodes,
+                ct);
+
+            if (subPolicy != null)
+                return subPolicy;
+
             var bothQtyContext = await ResolveBothProductionQtyContextAsync(
                 prod,
                 orderQty,
@@ -503,6 +517,7 @@ namespace AMMS.Infrastructure.Repositories
                 min_allowed = minAllowed,
                 max_allowed = maxAllowed,
                 suggested_qty = suggestedQty,
+                happy_case_qty = happyCaseQty,
 
                 order_qty = orderQty,
                 sheets_required = sheetsRequired,
@@ -511,10 +526,238 @@ namespace AMMS.Infrastructure.Repositories
                 n_up = nUp,
                 number_of_plates = numberOfPlates,
 
-                happy_case_qty = happyCaseQty,
                 stage_index = currentIndex,
-                stage_count = route.Count
+                stage_count = route.Count,
+
+                production_output_qty = suggestedQty,
+                production_output_unit = qtyProfile.QtyUnit,
+
+                input_mode = stage.input_mode,
+
+                allow_manual_input =
+        string.Equals(stage.input_mode, "MANUAL", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase),
+
+                can_use_manual_input =
+        string.Equals(stage.input_mode, "MANUAL", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase),
+
+                manual_input_optional = false,
+
+                is_group_production = string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase),
+                is_split_production = string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase),
+
+                group_prod_id = string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase)
+        ? prod.prod_id
+        : null,
+
+                split_prod_id = string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase)
+        ? prod.prod_id
+        : null,
+
+                group_total_qty = prod.group_total_qty,
+
+                manual_input_hint =
+        string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase)
+            ? "Task group cho phép nhập tay NVL, BTP input và output khi finish."
+            : null
             };
+        }
+
+        private async Task<TaskQtyPolicyDto?> TryBuildSubOrBothDownstreamQtyPolicyAsync(
+    task currentTask,
+    production prod,
+    order_request req,
+    cost_estimate est,
+    IReadOnlyList<string?> routeCodes,
+    CancellationToken ct)
+        {
+            var method = NormPolicyCode(prod.prod_method);
+            if (method != "SUB" && method != "BOTH")
+                return null;
+
+            var currentCode = NormPolicyCode(currentTask.process?.process_code);
+
+            if (currentCode is not ("PHU" or "CAN" or "CAN_MANG" or "BOI" or "BE" or "DUT" or "DAN"))
+                return null;
+
+            var subCodes = await ResolveSubProductProcessCodesForPolicyAsync(
+                prod,
+                ct);
+
+            if (method == "BOTH")
+            {
+                if (subCodes.Count == 0)
+                    return null;
+
+                if (!IsCurrentAfterSubBoundaryForPolicy(currentCode, routeCodes, subCodes))
+                    return null;
+            }
+
+            if (method == "SUB")
+            {
+                if (subCodes.Count > 0 &&
+                    !IsCurrentAfterSubBoundaryForPolicy(currentCode, routeCodes, subCodes))
+                {
+                    return null;
+                }
+            }
+
+            decimal productQty =
+    req.quantity.HasValue && req.quantity.Value > 0
+        ? req.quantity.Value
+        : prod.group_total_qty > 0
+            ? prod.group_total_qty
+            : Math.Max(
+                (decimal)(prod.sub_product_used_qty + prod.nvl_qty),
+                1m);
+
+            var nUp = est.n_up > 0 ? est.n_up : 1;
+
+            var sheetsBase = est.sheets_required > 0
+                ? est.sheets_required
+                : (int)Math.Ceiling(productQty / (decimal)nUp);
+
+            var stageQty = SubProductionQuantityHelper.ResolveStageQty(
+                currentProcessCode: currentCode,
+                routeProcessCodes: routeCodes,
+                productQty: productQty,
+                nUp: nUp,
+                explicitSheetsBase: sheetsBase,
+                coatingType: est.coating_type);
+
+            var suggested = Math.Max((int)Math.Ceiling(stageQty.output_qty), 1);
+
+            return new TaskQtyPolicyDto
+            {
+                task_id = currentTask.task_id,
+
+                process_code = currentTask.process?.process_code ?? currentCode,
+                process_name = currentTask.process?.process_name ?? currentCode,
+
+                qty_unit = "sp",
+
+                min_allowed = 1,
+                max_allowed = suggested,
+                suggested_qty = suggested,
+                happy_case_qty = suggested,
+
+                order_qty = (int)Math.Ceiling(productQty),
+
+                sheets_required = est.sheets_required,
+                sheets_waste = est.sheets_waste,
+                sheets_total = est.sheets_total,
+                n_up = nUp,
+                number_of_plates = req.number_of_plates ?? 0,
+
+                stage_index = routeCodes
+                .Select(NormPolicyCode)
+                .ToList()
+                .FindIndex(x => string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase)),
+
+                stage_count = routeCodes.Count,
+
+                production_output_qty = suggested,
+                production_output_unit = "sp",
+
+                input_mode = currentTask.input_mode,
+
+                allow_manual_input = true,
+                can_use_manual_input = true,
+                manual_input_optional = false,
+
+                is_group_production = string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase),
+                is_split_production = string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase),
+
+                group_prod_id = string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase)
+        ? prod.prod_id
+        : null,
+
+                split_prod_id = string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase)
+        ? prod.prod_id
+        : null,
+
+                group_total_qty = prod.group_total_qty,
+
+                manual_input_hint =
+        $"SUB/BOTH downstream: qty_good là output sau công đoạn {currentCode}. " +
+        $"ProductQty={stageQty.product_qty}, " +
+        $"CurrentWaste={stageQty.current_stage_waste_qty}, " +
+        $"DownstreamWaste={stageQty.downstream_waste_qty}, " +
+        $"InputQty={stageQty.input_qty}, OutputQty={stageQty.output_qty}."
+            };
+        }
+
+        private async Task<List<string>> ResolveSubProductProcessCodesForPolicyAsync(
+            production prod,
+            CancellationToken ct)
+        {
+            if (!prod.sub_product_id.HasValue || prod.sub_product_id.Value <= 0)
+                return new List<string>();
+
+            var csv = await _db.sub_products
+                .AsNoTracking()
+                .Where(x => x.id == prod.sub_product_id.Value)
+                .Select(x => x.product_process)
+                .FirstOrDefaultAsync(ct);
+
+            return ParsePolicyRoute(csv);
+        }
+
+        private static bool IsCurrentAfterSubBoundaryForPolicy(
+            string? currentProcessCode,
+            IReadOnlyList<string?> routeCodes,
+            IReadOnlyList<string> subCodes)
+        {
+            var route = (routeCodes ?? Array.Empty<string?>())
+                .Select(NormPolicyCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            if (route.Count == 0)
+                return false;
+
+            var current = NormPolicyCode(currentProcessCode);
+
+            var currentIndex = route.FindIndex(x =>
+                string.Equals(x, current, StringComparison.OrdinalIgnoreCase));
+
+            if (currentIndex < 0)
+                return false;
+
+            var subIndexes = subCodes
+                .Select(NormPolicyCode)
+                .Select(code => route.FindIndex(x =>
+                    string.Equals(x, code, StringComparison.OrdinalIgnoreCase)))
+                .Where(x => x >= 0)
+                .ToList();
+
+            if (subIndexes.Count == 0)
+                return false;
+
+            return currentIndex > subIndexes.Max();
+        }
+
+        private static List<string> ParsePolicyRoute(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormPolicyCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static string NormPolicyCode(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
         }
 
         public async Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken ct = default)

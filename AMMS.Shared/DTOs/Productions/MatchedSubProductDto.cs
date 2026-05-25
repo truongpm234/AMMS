@@ -27,5 +27,26 @@ namespace AMMS.Shared.DTOs.Productions
         public string? description { get; set; }
 
         public DateTime? updated_at { get; set; }
+        public bool is_imported { get; set; }
+
+        public string? import_file { get; set; }
+
+        public string? paper_material_code { get; set; }
+
+        public string? wave_material_code { get; set; }
+
+        public string? coating_material_code { get; set; }
+
+        public string? lamination_material_code { get; set; }
+
+        public string? material_signature { get; set; }
+
+        public int? cost_estimate_id { get; set; }
+
+        public decimal unit_cost_to_stage { get; set; }
+
+        public decimal total_cost_to_stage { get; set; }
+
+        public string? match_reason { get; set; }
     }
 }

@@ -27,6 +27,7 @@ namespace AMMS.Shared.DTOs.Estimates
         public decimal? coating_glue_weight_kg { get; set; }
         public decimal? coating_glue_rate_per_m2 { get; set; }
         public string? coating_type { get; set; }
+        public string? coating_material_code { get; set; }
         public string? paper_code { get; set; }
         public string? paper_name { get; set; }
         public string? wave_type { get; set; }
