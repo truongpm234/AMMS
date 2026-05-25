@@ -3,7 +3,6 @@ using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
-using AMMS.Infrastructure.Repositories;
 using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Enums;
 using AMMS.Shared.DTOs.Productions;
@@ -26,7 +25,6 @@ namespace AMMS.Application.Services
         private readonly IRequestRepository _requestRepo;
         private readonly ICloudinaryFileStorageService _fileStorage;
         private readonly IProductionSchedulingService _scheduling;
-
         public ProductionService(
             IHubContext<RealtimeHub> rt,
             IProductionRepository repo,
@@ -707,7 +705,8 @@ namespace AMMS.Application.Services
                         throw new InvalidOperationException(
                             $"Chỉ có một phương thức khả dụng là {onlyAvailableMethod}, không thể đề xuất {proposedMethod}.");
                     }
-
+                    await _rt.Clients.Group(RealtimeGroups.ByRole("production manager")).SendAsync("auto scheduled", new { message = $"Lệnh sản xuất {prod.prod_id} đã được tự động duyệt" });
+                    await _notiService.CreateNotfi(6, $"Lệnh sản xuất {prod.prod_id} đã được tự động duyệt", null, prod.prod_id, "Scheduled");
                     await ApplyAutoProductionMethodAsync(
                         ord,
                         prod,
