@@ -674,7 +674,15 @@ namespace AMMS.Application.Services
                     machines.Count > 0 &&
                     machines.All(x => x.machine_found && x.is_available);
 
-                var matchedSubProduct = await FindMatchedSubProductAsync(orderId, ct);
+                var validSubOptions = await FindValidSubProductOptionsAsync(
+                    orderId,
+                    orderQty,
+                    requireEnoughQty: false,
+                    ct);
+
+                var bestSubOption = validSubOptions.FirstOrDefault();
+
+                var matchedSubProduct = bestSubOption?.Sub;
                 var subQty = matchedSubProduct?.quantity ?? 0;
 
                 var canUseNvl =
@@ -752,9 +760,9 @@ namespace AMMS.Application.Services
                  * - Chỉ canUseBoth => auto BOTH
                  */
                 var onlyAvailableMethod = ResolveOnlyAvailableProductionMethod(
-                    canUseNvl,
-                    canUseSub,
-                    canUseBoth);
+    canUseNvl,
+    canUseSub,
+    canUseBoth);
 
                 if (optionCount == 1 && onlyAvailableMethod != null)
                 {
@@ -764,8 +772,13 @@ namespace AMMS.Application.Services
                         throw new InvalidOperationException(
                             $"Chỉ có một phương thức khả dụng là {onlyAvailableMethod}, không thể đề xuất {proposedMethod}.");
                     }
-                    await _rt.Clients.Group(RealtimeGroups.ByRole("production manager")).SendAsync("auto scheduled", new { message = $"Lệnh sản xuất {prod.prod_id} đã được tự động duyệt" });
-                    await _notiService.CreateNotfi(6, $"Lệnh sản xuất {prod.prod_id} đã được tự động duyệt", null, prod.prod_id, "Scheduled");
+
+                    /*
+                     * Giữ lại đề xuất GM nếu có.
+                     * Nếu GM không đề xuất gì thì có thể lưu chính method auto để tracking.
+                     */
+                    prod.gm_proposed_method ??= onlyAvailableMethod;
+
                     await ApplyAutoProductionMethodAsync(
                         ord,
                         prod,
@@ -776,30 +789,14 @@ namespace AMMS.Application.Services
                         ct);
 
                     prod.production_approval_flow = ProductionApprovalFlowHelper.AutoSingleOption;
+
                     var confirmedMethod = prod.prod_method;
 
                     if (!string.IsNullOrWhiteSpace(confirmedMethod))
                     {
-                        cost_estimate? confirmedEstimate = null;
-
-                        if (req.accepted_estimate_id.HasValue &&
-                            req.accepted_estimate_id.Value > 0)
-                        {
-                            confirmedEstimate = await _db.cost_estimates
-                                .FirstOrDefaultAsync(x =>
-                                    x.estimate_id == req.accepted_estimate_id.Value &&
-                                    x.order_request_id == req.order_request_id,
-                                    ct);
-                        }
-
-                        confirmedEstimate ??= await _db.cost_estimates
-                            .Where(x => x.order_request_id == req.order_request_id)
-                            .OrderByDescending(x => x.is_active)
-                            .ThenByDescending(x => x.estimate_id)
-                            .FirstOrDefaultAsync(ct);
-
-                        if (confirmedEstimate == null)
-                            throw new InvalidOperationException("Không tìm thấy cost_estimate để reserve NVL.");
+                        var confirmedEstimate = await LoadAcceptedEstimateOrThrowAsync(
+                            req,
+                            ct);
 
                         await ReserveMaterialsForConfirmedProductionMethodAsync(
                             prod,
@@ -816,7 +813,7 @@ namespace AMMS.Application.Services
                     await tx.CommitAsync(ct);
 
                     return true;
-                }
+            }
 
                 /*
                  * Nếu có từ 2 option trở lên:
@@ -949,6 +946,12 @@ namespace AMMS.Application.Services
         {
             method = (method ?? "").Trim().ToUpperInvariant();
 
+            /*
+             * Nếu GM đã đề xuất thì giữ nguyên.
+             * Nếu chưa có đề xuất thì ghi nhận method auto để tracking.
+             */
+            prod.gm_proposed_method ??= method;
+
             await RollbackPreviousSubProductSelectionAsync(prod, ct);
 
             if (method == "NVL")
@@ -960,8 +963,6 @@ namespace AMMS.Application.Services
                 prod.sub_product_id = null;
                 prod.sub_product_used_qty = 0;
                 prod.nvl_qty = orderQty;
-
-                prod.gm_proposed_method = null;
 
                 ord.is_enough = true;
                 ord.is_production_ready = true;
@@ -997,7 +998,6 @@ namespace AMMS.Application.Services
                 prod.sub_product_id = selectedSubProduct.id;
                 prod.sub_product_used_qty = orderQty;
                 prod.nvl_qty = 0;
-                prod.gm_proposed_method = null;
 
                 ord.is_enough = true;
                 ord.is_production_ready = true;
@@ -1043,14 +1043,13 @@ namespace AMMS.Application.Services
                     throw new InvalidOperationException("Bán thành phẩm đã đủ số lượng, nên dùng SUB thay vì BOTH.");
 
                 selectedSubProduct.quantity -= subUseQty;
+                selectedSubProduct.updated_at = AppTime.NowVnUnspecified();
 
                 prod.prod_method = "BOTH";
                 prod.is_full_process = null;
                 prod.sub_product_id = selectedSubProduct.id;
                 prod.sub_product_used_qty = subUseQty;
                 prod.nvl_qty = nvlQty;
-
-                prod.gm_proposed_method = null;
 
                 ord.is_enough = true;
                 ord.is_production_ready = true;
@@ -3307,6 +3306,34 @@ namespace AMMS.Application.Services
             await _db.SaveChangesAsync(ct);
 
             return url;
+        }
+
+        private async Task<cost_estimate> LoadAcceptedEstimateOrThrowAsync(
+    order_request orderReq,
+    CancellationToken ct)
+        {
+            cost_estimate? estimate = null;
+
+            if (orderReq.accepted_estimate_id.HasValue &&
+                orderReq.accepted_estimate_id.Value > 0)
+            {
+                estimate = await _db.cost_estimates
+                    .FirstOrDefaultAsync(x =>
+                        x.estimate_id == orderReq.accepted_estimate_id.Value &&
+                        x.order_request_id == orderReq.order_request_id,
+                        ct);
+            }
+
+            estimate ??= await _db.cost_estimates
+                .Where(x => x.order_request_id == orderReq.order_request_id)
+                .OrderByDescending(x => x.is_active)
+                .ThenByDescending(x => x.estimate_id)
+                .FirstOrDefaultAsync(ct);
+
+            if (estimate == null)
+                throw new InvalidOperationException("Không tìm thấy cost_estimate để reserve NVL.");
+
+            return estimate;
         }
 
         private readonly IWebHostEnvironment _env;

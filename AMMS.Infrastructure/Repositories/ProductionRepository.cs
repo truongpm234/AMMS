@@ -3469,7 +3469,6 @@ namespace AMMS.Infrastructure.Repositories
                 prod.mgr_note = string.IsNullOrWhiteSpace(req.mgr_note)
                     ? null
                     : req.mgr_note.Trim();
-                prod.gm_proposed_method = null;
                 prod.production_approval_flow = ProductionApprovalFlowHelper.ManualManager;
 
                 order.is_production_ready = true;
