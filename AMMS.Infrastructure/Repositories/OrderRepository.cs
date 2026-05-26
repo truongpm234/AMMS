@@ -306,10 +306,9 @@ namespace AMMS.Infrastructure.Repositories
                     production_approval_flow = mainProduction?.production_approval_flow,
                     production_id = mainProduction?.prod_id ?? o.production_id,
                     production_ids = relatedProductions
-        .Select(p => p.prod_id)
-        .Distinct()
-        .ToList(),
-
+                    .Select(p => p.prod_id)
+                    .Distinct()
+                    .ToList(),
                     productions = relatedProductions
         .Select(p => new OrderPagedProductionDto
         {

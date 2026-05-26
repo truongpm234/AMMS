@@ -20,5 +20,6 @@ namespace AMMS.Shared.DTOs.SubProduct
         public string? coating_material_code { get; set; }
         public string? lamination_material_code { get; set; }
         public decimal? unit_cost_to_stage { get; set; }
+        public string? material_signature { get; set; }
     }
 }

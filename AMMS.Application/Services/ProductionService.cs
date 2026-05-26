@@ -475,7 +475,7 @@ namespace AMMS.Application.Services
 
             if (!hasMatchedSubProduct)
             {
-                subMessage = "Không có bán thành phẩm phù hợp với đơn hàng theo product_type, kích thước, path, NVL signature và đơn giá.";
+                subMessage = "Không có bán thành phẩm phù hợp với đơn hàng theo product_type, kích thước, path và NVL signature.";
             }
             else if (subQty >= orderQty)
             {
@@ -1835,8 +1835,12 @@ namespace AMMS.Application.Services
 
             var orderId = prod.order_id.Value;
 
+            /*
+             * Quan trọng:
+             * Không dùng AsNoTracking ở đây vì caller sẽ trừ quantity của sub_product.
+             * Nếu AsNoTracking thì selectedSubProduct.quantity -= orderQty sẽ không được SaveChanges lưu lại.
+             */
             var sub = await _db.sub_products
-                .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.id == subId, ct);
 
             if (sub == null)
@@ -1862,8 +1866,13 @@ namespace AMMS.Application.Services
                 {
                     x.product_type_id,
                     x.production_process,
-                    width = EF.Property<int?>(x, "width_mm"),
-                    length = EF.Property<int?>(x, "length_mm")
+
+                    /*
+                     * Chỉ dùng fallback khi request thiếu print size.
+                     * Logic chính vẫn là print_width/print_length.
+                     */
+                    item_width = EF.Property<int?>(x, "width_mm"),
+                    item_length = EF.Property<int?>(x, "length_mm")
                 })
                 .FirstOrDefaultAsync(ct);
 
@@ -1873,8 +1882,37 @@ namespace AMMS.Application.Services
             if (sub.product_type_id != item.product_type_id.Value)
                 throw new InvalidOperationException("Bán thành phẩm khác loại sản phẩm.");
 
-            if (sub.width != item.width || sub.length != item.length)
-                throw new InvalidOperationException("Bán thành phẩm khác kích thước dài/rộng.");
+            /*
+             * sub_product.width/length phải so với kích thước bản in của order_request.
+             */
+            var expectedPrintWidth = orderReq.print_width_mm;
+            var expectedPrintLength = orderReq.print_length_mm;
+
+            /*
+             * Fallback legacy:
+             * Chỉ dùng order_item width/length nếu request chưa có print size.
+             * Nếu hệ thống bạn luôn có print_width_mm / print_length_mm thì có thể đổi thành throw.
+             */
+            if (!expectedPrintWidth.HasValue || expectedPrintWidth.Value <= 0)
+                expectedPrintWidth = item.item_width;
+
+            if (!expectedPrintLength.HasValue || expectedPrintLength.Value <= 0)
+                expectedPrintLength = item.item_length;
+
+            if (!expectedPrintWidth.HasValue || expectedPrintWidth.Value <= 0 ||
+                !expectedPrintLength.HasValue || expectedPrintLength.Value <= 0)
+            {
+                throw new InvalidOperationException(
+                    "Order chưa có kích thước bản in hợp lệ để xét bán thành phẩm.");
+            }
+
+            if (sub.width != expectedPrintWidth.Value || sub.length != expectedPrintLength.Value)
+            {
+                throw new InvalidOperationException(
+                    $"Bán thành phẩm khác kích thước bản in. " +
+                    $"Yêu cầu: {expectedPrintWidth.Value}x{expectedPrintLength.Value}, " +
+                    $"thực tế: {sub.width}x{sub.length}.");
+            }
 
             if (!SubProductCompatibilityHelper.IsSubPathUsableForOrderRoute(
                 sub.product_process,
@@ -1894,12 +1932,11 @@ namespace AMMS.Application.Services
             if (expected == null)
                 throw new InvalidOperationException("Không xác định được signature NVL/chi phí của order.");
 
-            if (!SubProductCompatibilityHelper.IsMaterialAndCostMatched(sub, expected))
+            if (!SubProductCompatibilityHelper.IsMaterialMatched(sub, expected))
             {
                 throw new InvalidOperationException(
-                    "Bán thành phẩm không hợp lệ vì khác loại NVL hoặc khác đơn giá tới stage. " +
-                    $"SubSignature={sub.material_signature}, ExpectedSignature={expected.material_signature}, " +
-                    $"SubUnitCost={sub.unit_cost_to_stage}, ExpectedUnitCost={expected.unit_cost_to_stage}.");
+                    "Bán thành phẩm không hợp lệ vì khác loại NVL. " +
+                    $"SubSignature={sub.material_signature}, ExpectedSignature={expected.material_signature}.");
             }
 
             return sub;
@@ -2663,7 +2700,7 @@ namespace AMMS.Application.Services
                 if (expected == null)
                     continue;
 
-                if (!SubProductCompatibilityHelper.IsMaterialAndCostMatched(sub, expected))
+                if (!SubProductCompatibilityHelper.IsMaterialMatchedForProductionSub(sub, expected))
                     continue;
 
                 result.Add(new ValidSubProductOption
@@ -2671,7 +2708,7 @@ namespace AMMS.Application.Services
                     Sub = sub,
                     ExpectedSignature = expected,
                     route_coverage_count = SubProductCompatibilityHelper.ParseRoute(sub.product_process).Count,
-                    reason = "Sub product hợp lệ: cùng product_type, kích thước, path, NVL signature và đơn giá tới stage."
+                    reason = "Sub product hợp lệ: cùng product_type, kích thước, path, NVL signature. Không xét đơn giá."
                 });
             }
 

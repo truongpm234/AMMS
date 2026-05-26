@@ -497,21 +497,39 @@ namespace AMMS.Application.Services
                     .FirstOrDefaultAsync(ct);
             }
 
-            var item = sourceOrderId.HasValue
-                ? await _db.order_items
-                    .AsNoTracking()
-                    .Where(x => x.order_id == sourceOrderId.Value)
-                    .OrderBy(x => x.item_id)
-                    .Select(x => new
-                    {
-                        x.product_type_id,
-                        width = EF.Property<int?>(x, "width_mm"),
-                        length = EF.Property<int?>(x, "length_mm")
-                    })
-                    .FirstOrDefaultAsync(ct)
-                : null;
+            var shape = sourceOrderId.HasValue
+    ? await (
+        from oi in _db.order_items.AsNoTracking()
+        join req0 in _db.order_requests.AsNoTracking()
+            on oi.order_id equals req0.order_id into reqj
+        from req0 in reqj.DefaultIfEmpty()
+        where oi.order_id == sourceOrderId.Value
+        orderby oi.item_id
+        select new
+        {
+            oi.product_type_id,
 
-            var productTypeId = prod.product_type_id ?? item?.product_type_id;
+            // Chuẩn chung của sub_product là kích thước bản in.
+            print_width = req0 != null ? req0.print_width_mm : null,
+            print_length = req0 != null ? req0.print_length_mm : null,
+
+            // Fallback nếu request chưa có print size.
+            item_width = EF.Property<int?>(oi, "width_mm"),
+            item_length = EF.Property<int?>(oi, "length_mm")
+        }
+    ).FirstOrDefaultAsync(ct)
+    : null;
+
+            var productTypeId = prod.product_type_id ?? shape?.product_type_id;
+
+            var subWidth = shape?.print_width;
+            var subLength = shape?.print_length;
+
+            if (!subWidth.HasValue || subWidth.Value <= 0)
+                subWidth = shape?.item_width;
+
+            if (!subLength.HasValue || subLength.Value <= 0)
+                subLength = shape?.item_length;
 
             if (!productTypeId.HasValue || productTypeId.Value <= 0)
                 return;
@@ -552,8 +570,8 @@ namespace AMMS.Application.Services
                 var pending = new sub_product
                 {
                     product_type_id = productTypeId.Value,
-                    width = item?.width,
-                    length = item?.length,
+                    width = subWidth,
+                    length = subLength,
                     product_process = processPath,
                     quantity = qty,
 
