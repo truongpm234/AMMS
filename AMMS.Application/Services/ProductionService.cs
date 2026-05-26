@@ -778,7 +778,8 @@ namespace AMMS.Application.Services
                      * Nếu GM không đề xuất gì thì có thể lưu chính method auto để tracking.
                      */
                     prod.gm_proposed_method ??= onlyAvailableMethod;
-
+                    await _rt.Clients.Group(RealtimeGroups.ByRole("production manager")).SendAsync("auto scheduled", new { message = $"Lệnh sản xuất {prod.prod_id} đã được tự động duyệt" });
+                    await _notiService.CreateNotfi(6, $"Lệnh sản xuất {prod.prod_id} đã được tự động duyệt", null, prod.prod_id, "Scheduled");
                     await ApplyAutoProductionMethodAsync(
                         ord,
                         prod,
@@ -813,7 +814,7 @@ namespace AMMS.Application.Services
                     await tx.CommitAsync(ct);
 
                     return true;
-            }
+                }
 
                 /*
                  * Nếu có từ 2 option trở lên:
