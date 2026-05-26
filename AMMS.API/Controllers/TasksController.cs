@@ -3,11 +3,9 @@ using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.DBContext;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Productions;
-using DocumentFormat.OpenXml.Office2010.CustomUI;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
-using System.Reflection.Metadata;
 using System.Security.Claims;
 using System.Text.Json;
 
@@ -839,6 +837,13 @@ public class TasksController : ControllerBase
                 task_ids = taskIds
             });
         }
+    }
+
+    [HttpGet("get-all-task")]
+    public async Task<IActionResult> GetAllTask()
+    {
+        var task = await _db.tasks.ToListAsync();
+        return Ok(task);
     }
 
     private static List<T> ParseJsonList<T>(string? json)
