@@ -291,7 +291,14 @@ namespace AMMS.Infrastructure.Repositories
                 var mainProduction = relatedProductions
                     .OrderByDescending(p => p.prod_id)
                     .FirstOrDefault();
-
+                var approvalProduction = relatedProductions
+    .OrderByDescending(p =>
+        p.prod_id == o.production_id ? 3 :
+        !string.IsNullOrWhiteSpace(p.gm_proposed_method) ? 2 :
+        !string.IsNullOrWhiteSpace(p.production_approval_flow) ? 1 :
+        0)
+    .ThenByDescending(p => p.prod_id)
+    .FirstOrDefault();
                 return new OrderResponseDto
                 {
                     order_id = o.order_id.ToString(),
@@ -304,6 +311,9 @@ namespace AMMS.Infrastructure.Repositories
                     delivery_date = ToUtcString(o.delivery_date),
                     status = o.Status,
                     production_approval_flow = mainProduction?.production_approval_flow,
+                    gm_proposed_method =
+                        approvalProduction?.gm_proposed_method
+                        ?? mainProduction?.gm_proposed_method,
                     production_id = mainProduction?.prod_id ?? o.production_id,
                     production_ids = relatedProductions
                     .Select(p => p.prod_id)

@@ -27,6 +27,7 @@ namespace AMMS.Shared.DTOs.Orders
         public int sub_product_used_qty { get; set; }
         public int nvl_qty { get; set; }
         public string? import_recieve_path { get; set; }
+        public string? gm_proposed_method { get; set; }
         public int? production_id { get; set; }
         public string? production_approval_flow { get; set; }
         public List<int> production_ids { get; set; } = new();
