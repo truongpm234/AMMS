@@ -1108,24 +1108,13 @@ namespace AMMS.API.Controllers
                     await _db.SaveChangesAsync();
                     await _rt.Clients.Group(RealtimeGroups.ByRole("consultant")).SendAsync("importing", new { message = $"Đơn hàng {order_id} đã được nhập kho, sẵn sàng giao" });
                     await _notiService.CreateNotfi(2, $"Đơn hàng {order_id} đã được nhập kho, sẵn sàng giao", req.assigned_consultant, req.order_request_id, "Finished");
+                    await _dealService.SendRemainingPaymentEmailAsync(order_id);
                     return Ok("Success");
                 }
             }
             catch (Exception e)
             {
                 return BadRequest(e);
-            }
-
-            try
-            {
-                _backgroundJobClient.Enqueue<DeliveryHandoverEmailJob>(
-                    x => x.RunAsync(order_id, CancellationToken.None));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex,
-                    "Failed to enqueue DeliveryHandoverEmailJob. orderId={OrderId}",
-                    order_id);
             }
             return BadRequest();
         }
