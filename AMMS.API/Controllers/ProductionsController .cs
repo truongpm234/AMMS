@@ -28,6 +28,7 @@ namespace AMMS.API.Controllers
         private readonly IDealService _dealService;
         private readonly IHubContext<RealtimeHub> _hub;
         private readonly NotificationService _noti;
+        private readonly DeliveryHandoverEmailJob _deliveryHandoverEmailJob;
         public ProductionsController(
     NotificationService noti,
     IHubContext<RealtimeHub> hub,
@@ -36,7 +37,8 @@ namespace AMMS.API.Controllers
     IBackgroundJobClient backgroundJobClient,
     ILogger<ProductionsController> logger,
     IMaterialService materialService,
-    IDealService dealService)
+    IDealService dealService,
+    DeliveryHandoverEmailJob deliveryHandoverEmailJob)
         {
             _noti = noti;
             _hub = hub;
@@ -46,6 +48,7 @@ namespace AMMS.API.Controllers
             _logger = logger;
             _materialService = materialService;
             _dealService = dealService;
+            _deliveryHandoverEmailJob = deliveryHandoverEmailJob;
         }
 
         private int? GetRoleId()
@@ -523,35 +526,43 @@ namespace AMMS.API.Controllers
         [HttpPut("delivery/{orderId:int}")]
         public async Task<IActionResult> SetDelivery(int orderId, CancellationToken ct)
         {
-            var remainingEmailSent = false;
+            var deliveryEmailSent = false;
+            string? deliveryEmailError = null;
 
             try
             {
-                await _dealService.SendRemainingPaymentEmailAsync(orderId, ct);
-                remainingEmailSent = true;
-
                 var ok = await _service.SetProductionDeliveryAsync(orderId, ct);
 
                 if (!ok)
-                    return NotFound(new { message = "Production not found for this orderId" });
+                {
+                    return NotFound(new
+                    {
+                        message = "Production not found for this orderId",
+                        order_id = orderId
+                    });
+                }
 
-                //try
-                //{
-                //    _backgroundJobClient.Enqueue<DeliveryHandoverEmailJob>(
-                //        x => x.RunAsync(orderId, CancellationToken.None));
-                //}
-                //catch (Exception ex)
-                //{
-                //    _logger.LogError(ex,
-                //        "Failed to enqueue DeliveryHandoverEmailJob. orderId={OrderId}",
-                //        orderId);
-                //}
+                try
+                {
+                    await _deliveryHandoverEmailJob.RunAsync(orderId, ct);
+                    deliveryEmailSent = true;
+                }
+                catch (Exception ex)
+                {
+                    deliveryEmailError = ex.Message;
+
+                    _logger.LogError(
+                        ex,
+                        "Failed to send delivery handover email. orderId={OrderId}",
+                        orderId);
+                }
 
                 return Ok(new
                 {
                     message = "Delivery confirmed successfully",
                     order_id = orderId,
-                    remaining_email_sent = remainingEmailSent
+                    delivery_handover_email_sent = deliveryEmailSent,
+                    delivery_handover_email_error = deliveryEmailError
                 });
             }
             catch (InvalidOperationException ex)
@@ -560,7 +571,8 @@ namespace AMMS.API.Controllers
                 {
                     message = ex.Message,
                     order_id = orderId,
-                    remaining_email_sent = remainingEmailSent
+                    delivery_handover_email_sent = deliveryEmailSent,
+                    delivery_handover_email_error = deliveryEmailError
                 });
             }
             catch (Exception ex)
@@ -570,7 +582,8 @@ namespace AMMS.API.Controllers
                     message = "Set delivery failed",
                     detail = ex.Message,
                     order_id = orderId,
-                    remaining_email_sent = remainingEmailSent
+                    delivery_handover_email_sent = deliveryEmailSent,
+                    delivery_handover_email_error = deliveryEmailError
                 });
             }
         }

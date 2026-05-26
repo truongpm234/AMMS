@@ -138,7 +138,7 @@ namespace AMMS.Application.Helpers
           </tr>
           <tr>
             <td style='padding:10px 0 6px 0;font-size:14px;color:#9a3412;font-weight:900;border-top:1px dashed #fdba74;'>Số tiền cần thanh toán còn lại</td>
-            <td style='padding:10px 0 6px 0;font-size:18px;color:#b45309;font-weight:900;text-align:right;border-top:1px dashed #fdba74;'>{VND(remainingAmount*100)}</td>
+            <td style='padding:10px 0 6px 0;font-size:18px;color:#b45309;font-weight:900;text-align:right;border-top:1px dashed #fdba74;'>{VND(remainingAmount)}</td>
           </tr>
         </table>
       </div>

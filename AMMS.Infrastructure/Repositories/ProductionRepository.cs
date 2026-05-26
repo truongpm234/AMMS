@@ -1220,31 +1220,17 @@ namespace AMMS.Infrastructure.Repositories
                 .ToListAsync(ct);
 
             var lastTask = tasks
-                .OrderByDescending(t => t.seq_num ?? 0)
-                .ThenByDescending(t => t.task_id)
-                .FirstOrDefault();
+    .OrderByDescending(t => t.seq_num ?? 0)
+    .ThenByDescending(t => t.task_id)
+    .FirstOrDefault();
 
-            if (lastTask != null
-                && string.Equals(lastTask.status, "Finished", StringComparison.OrdinalIgnoreCase)
-                && lastTask.end_time != null
-                && !string.Equals(header.pr.status, "Importing", StringComparison.OrdinalIgnoreCase))
-            {
-                var prodToUpdate = new production { prod_id = currentProdId };
-                _db.productions.Attach(prodToUpdate);
+            var allTasksFinished = tasks.Count > 0 &&
+                tasks.All(t =>
+                    string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                    t.end_time != null);
 
-                prodToUpdate.status = "Importing";
-                prodToUpdate.end_date = lastTask.end_time;
-
-                if (header.pr.actual_start_date == null)
-                    prodToUpdate.actual_start_date = lastTask.end_time;
-
-                await _db.SaveChangesAsync(ct);
-
-                dto.production_status = "Importing";
-                dto.end_date = lastTask.end_time;
-                dto.actual_start_date ??= lastTask.end_time;
-                dto.start_date ??= lastTask.end_time;
-            }
+            dto.all_tasks_finished = allTasksFinished;
+            dto.waiting_manual_importing = allTasksFinished && !string.Equals(header.pr.status, "Importing");
 
             var taskIds = tasks
                 .Select(x => x.task_id)

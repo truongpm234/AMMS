@@ -49,7 +49,9 @@
         public int nvl_qty { get; set; }
         public string? sub_product_process { get; set; }
         public string? production_approval_flow { get; set; }
+        public bool all_tasks_finished { get; set; }
 
+        public bool waiting_manual_importing { get; set; }
         public bool is_auto_production_approval { get; set; }
         public string? sub_product_issue_file { get; set; }
         public string? production_approval_label { get; set; } 
