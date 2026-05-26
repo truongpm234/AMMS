@@ -475,7 +475,7 @@ namespace AMMS.Application.Services
 
             if (!hasMatchedSubProduct)
             {
-                subMessage = "Không có bán thành phẩm phù hợp với đơn hàng theo product_type, kích thước, path, NVL signature và đơn giá.";
+                subMessage = "Không có bán thành phẩm phù hợp với đơn hàng theo product_type, kích thước, path và NVL signature.";
             }
             else if (subQty >= orderQty)
             {
@@ -1931,12 +1931,11 @@ namespace AMMS.Application.Services
             if (expected == null)
                 throw new InvalidOperationException("Không xác định được signature NVL/chi phí của order.");
 
-            if (!SubProductCompatibilityHelper.IsMaterialAndCostMatched(sub, expected))
+            if (!SubProductCompatibilityHelper.IsMaterialMatched(sub, expected))
             {
                 throw new InvalidOperationException(
-                    "Bán thành phẩm không hợp lệ vì khác loại NVL hoặc khác đơn giá tới stage. " +
-                    $"SubSignature={sub.material_signature}, ExpectedSignature={expected.material_signature}, " +
-                    $"SubUnitCost={sub.unit_cost_to_stage}, ExpectedUnitCost={expected.unit_cost_to_stage}.");
+                    "Bán thành phẩm không hợp lệ vì khác loại NVL. " +
+                    $"SubSignature={sub.material_signature}, ExpectedSignature={expected.material_signature}.");
             }
 
             return sub;
@@ -2700,7 +2699,7 @@ namespace AMMS.Application.Services
                 if (expected == null)
                     continue;
 
-                if (!SubProductCompatibilityHelper.IsMaterialAndCostMatched(sub, expected))
+                if (!SubProductCompatibilityHelper.IsMaterialMatchedForProductionSub(sub, expected))
                     continue;
 
                 result.Add(new ValidSubProductOption
@@ -2708,7 +2707,7 @@ namespace AMMS.Application.Services
                     Sub = sub,
                     ExpectedSignature = expected,
                     route_coverage_count = SubProductCompatibilityHelper.ParseRoute(sub.product_process).Count,
-                    reason = "Sub product hợp lệ: cùng product_type, kích thước, path, NVL signature và đơn giá tới stage."
+                    reason = "Sub product hợp lệ: cùng product_type, kích thước, path, NVL signature. Không xét đơn giá."
                 });
             }
 

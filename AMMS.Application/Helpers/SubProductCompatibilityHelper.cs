@@ -95,6 +95,29 @@ public static class SubProductCompatibilityHelper
         };
     }
 
+    public static bool IsMaterialMatchedForProductionSub(
+    sub_product sub,
+    SubProductStageSignature expected)
+    {
+        if (!Same(Norm(sub.paper_material_code), Norm(expected.paper_material_code)))
+            return false;
+
+        if (!Same(Norm(sub.wave_material_code), Norm(expected.wave_material_code)))
+            return false;
+
+        if (!Same(Norm(sub.coating_material_code), Norm(expected.coating_material_code)))
+            return false;
+
+        if (!Same(Norm(sub.lamination_material_code), Norm(expected.lamination_material_code)))
+            return false;
+
+        /*
+         * Không check unit_cost_to_stage.
+         * Logic này chỉ dùng để xét sub_product có hợp lệ cho order mới hay không.
+         */
+        return true;
+    }
+
     public static List<string> ParseRoute(string? csv)
     {
         if (string.IsNullOrWhiteSpace(csv))
@@ -280,24 +303,28 @@ public static class SubProductCompatibilityHelper
             $"LAMINATION={NormalizeMaterialCode(laminationCode) ?? "NONE"}";
     }
 
+    public static bool IsMaterialMatched(sub_product sub, SubProductStageSignature expected)
+    {
+        if (!Same(Norm(sub.paper_material_code), Norm(expected.paper_material_code)))
+            return false;
+
+        if (!Same(Norm(sub.wave_material_code), Norm(expected.wave_material_code)))
+            return false;
+
+        if (!Same(Norm(sub.coating_material_code), Norm(expected.coating_material_code)))
+            return false;
+
+        if (!Same(Norm(sub.lamination_material_code), Norm(expected.lamination_material_code)))
+            return false;
+
+        return true;
+    }
+
     public static bool IsMaterialAndCostMatched(
         sub_product sub,
         SubProductStageSignature expected)
     {
-        if (!SameMaterial(sub.paper_material_code, expected.paper_material_code))
-            return false;
-
-        if (!SameMaterial(sub.wave_material_code, expected.wave_material_code))
-            return false;
-
-        if (!SameMaterial(sub.coating_material_code, expected.coating_material_code))
-            return false;
-
-        if (!SameMaterial(sub.lamination_material_code, expected.lamination_material_code))
-            return false;
-
-        return Math.Round(sub.unit_cost_to_stage, 4)
-            == Math.Round(expected.unit_cost_to_stage, 4);
+        return IsMaterialMatched(sub, expected);
     }
 
     private static bool SameMaterial(string? a, string? b)
@@ -405,13 +432,12 @@ public static class SubProductCompatibilityHelper
     {
         return string.Join("|", new[]
         {
-            $"PT={x.product_type_id}",
-            $"W={x.width?.ToString() ?? "NULL"}",
-            $"L={x.length?.ToString() ?? "NULL"}",
-            $"PATH={string.Join(",", ParseRoute(x.product_process))}",
-            $"MAT={x.material_signature ?? BuildMaterialSignature(x.paper_material_code, x.wave_material_code, x.coating_material_code, x.lamination_material_code)}",
-            $"UNIT_COST={Math.Round(x.unit_cost_to_stage, 4).ToString(CultureInfo.InvariantCulture)}"
-        });
+        $"PT={x.product_type_id}",
+        $"W={x.width?.ToString() ?? "NULL"}",
+        $"L={x.length?.ToString() ?? "NULL"}",
+        $"PATH={string.Join(",", ParseRoute(x.product_process))}",
+        $"MAT={x.material_signature ?? BuildMaterialSignature(x.paper_material_code, x.wave_material_code, x.coating_material_code, x.lamination_material_code)}"
+    });
     }
 
     private static string NormCostProcessCode(string? code)

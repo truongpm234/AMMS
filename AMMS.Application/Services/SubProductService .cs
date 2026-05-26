@@ -495,6 +495,7 @@ namespace AMMS.Application.Services
 
             return new string(chars).Normalize(System.Text.NormalizationForm.FormC);
         }
+
         private async Task<sub_product?> FindActiveMatchedSubProductForImportAsync(
     sub_product pending,
     CancellationToken ct)
@@ -509,7 +510,7 @@ namespace AMMS.Application.Services
                     pending.lamination_material_code)
                 : pending.material_signature;
 
-            var unitCost = Math.Round(pending.unit_cost_to_stage, 4);
+            var pendingUnitCost = Math.Round(pending.unit_cost_to_stage, 4);
 
             var candidates = await _db.sub_products
                 .Where(x =>
@@ -523,23 +524,26 @@ namespace AMMS.Application.Services
                 .ToListAsync(ct);
 
             return candidates.FirstOrDefault(x =>
-                string.Equals(
-                    NormalizeProcess(x.product_process),
-                    process,
-                    StringComparison.OrdinalIgnoreCase)
-                &&
-                string.Equals(
-                    string.IsNullOrWhiteSpace(x.material_signature)
-                        ? SubProductCompatibilityHelper.BuildMaterialSignature(
-                            x.paper_material_code,
-                            x.wave_material_code,
-                            x.coating_material_code,
-                            x.lamination_material_code)
-                        : x.material_signature,
-                    materialSignature,
-                    StringComparison.OrdinalIgnoreCase)
-                &&
-                Math.Round(x.unit_cost_to_stage, 4) == unitCost);
+            {
+                var candidateProcess = NormalizeProcess(x.product_process);
+
+                var candidateSignature = string.IsNullOrWhiteSpace(x.material_signature)
+                    ? SubProductCompatibilityHelper.BuildMaterialSignature(
+                        x.paper_material_code,
+                        x.wave_material_code,
+                        x.coating_material_code,
+                        x.lamination_material_code)
+                    : x.material_signature;
+
+                var candidateUnitCost = Math.Round(x.unit_cost_to_stage, 4);
+
+                return
+                    string.Equals(candidateProcess, process, StringComparison.OrdinalIgnoreCase)
+                    &&
+                    string.Equals(candidateSignature, materialSignature, StringComparison.OrdinalIgnoreCase)
+                    &&
+                    candidateUnitCost == pendingUnitCost;
+            });
         }
 
         private static string NormalizeProcess(string? value)
