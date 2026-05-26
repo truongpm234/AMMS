@@ -2843,21 +2843,21 @@ namespace AMMS.Application.Services
                 {
                     method = "NVL",
                     is_available = false,
-                    reason = "Không tìm thấy cost_estimate để tính chi phí."
+                    reason = "Không tìm thấy cost_estimate đã chốt để tính chi phí."
                 });
 
                 result.Add(new ProductionMethodCostOptionDto
                 {
                     method = "SUB",
                     is_available = false,
-                    reason = "Không tìm thấy cost_estimate để tính chi phí."
+                    reason = "Không tìm thấy cost_estimate đã chốt để tính chi phí."
                 });
 
                 result.Add(new ProductionMethodCostOptionDto
                 {
                     method = "BOTH",
                     is_available = false,
-                    reason = "Không tìm thấy cost_estimate để tính chi phí."
+                    reason = "Không tìm thấy cost_estimate đã chốt để tính chi phí."
                 });
 
                 return result;
@@ -2865,54 +2865,57 @@ namespace AMMS.Application.Services
 
             orderQty = orderQty > 0 ? orderQty : 1;
 
-            var nvlUnitCost = await SubProductCompatibilityHelper.CalculateUnitCostForFullRouteAsync(
-                _db,
-                est.estimate_id,
-                orderRouteCsv,
-                orderQty,
-                ct);
+            var orderRoute = SubProductCompatibilityHelper.ParseRoute(
+                !string.IsNullOrWhiteSpace(orderRouteCsv)
+                    ? orderRouteCsv
+                    : est.production_processes);
 
-            var nvlTotalCost = Math.Round(nvlUnitCost * orderQty, 2);
+            var processCosts = await _db.cost_estimate_processes
+                .AsNoTracking()
+                .Where(x => x.estimate_id == est.estimate_id)
+                .Select(x => new EstimateProcessCostRow
+                {
+                    process_code = x.process_code,
+                    total_cost = x.total_cost
+                })
+                .ToListAsync(ct);
+
+            /*
+             * NVL:
+             * Theo yêu cầu: lấy thẳng final_total_cost từ báo giá đã chốt.
+             */
+            var nvlTotalCost = Money(est.final_total_cost);
+
+            if (nvlTotalCost <= 0m)
+            {
+                /*
+                 * Fallback cho dữ liệu cũ chưa có final_total_cost.
+                 * Fallback này cũng không cộng overhead/rush/discount.
+                 */
+                var nvlFallback = BuildMethodCostWithoutOverheadRushDiscount(
+                    est,
+                    materialCost: GetFullNvlMaterialCost(est),
+                    processCost: GetFullProcessCost(processCosts),
+                    orderQty: orderQty);
+
+                nvlTotalCost = nvlFallback.total_cost;
+            }
+
+            var nvlUnitCost = SafeUnitCost(nvlTotalCost, orderQty);
 
             result.Add(new ProductionMethodCostOptionDto
             {
                 method = "NVL",
                 is_available = true,
-                unit_cost = Math.Round(nvlUnitCost, 4),
+                unit_cost = nvlUnitCost,
                 total_cost = nvlTotalCost,
                 nvl_qty = orderQty,
-                reason = "Sản xuất toàn bộ từ NVL."
+                reason = "Sản xuất toàn bộ từ NVL. Total cost lấy từ final_total_cost của báo giá đã chốt."
             });
 
-            async Task<decimal> ResolveSubFullUnitCostAsync(ValidSubProductOption option)
-            {
-                var sub = option.Sub;
-
-                var subPathCodes = SubProductCompatibilityHelper.ParseRoute(sub.product_process);
-                var fullPathCodes = SubProductCompatibilityHelper.ParseRoute(orderRouteCsv);
-
-                var downstreamCodes = fullPathCodes
-                    .Where(x => !subPathCodes.Contains(x, StringComparer.OrdinalIgnoreCase))
-                    .ToList();
-
-                var downstreamUnitCost = downstreamCodes.Count == 0
-                    ? 0m
-                    : await SubProductCompatibilityHelper.CalculateUnitCostToStageAsync(
-                        _db,
-                        est.estimate_id,
-                        downstreamCodes,
-                        orderQty,
-                        ct);
-
-                /*
-                 * Chỉ dùng unit_cost_to_stage để hiển thị/tính cost option.
-                 * Không dùng unit_cost_to_stage để validate sub có hợp lệ hay không.
-                 */
-                return Math.Round(sub.unit_cost_to_stage + downstreamUnitCost, 4);
-            }
-
             /*
-             * SUB option: chỉ dùng sub đủ số lượng.
+             * SUB:
+             * Chỉ available nếu có BTP phù hợp và đủ quantity.
              */
             if (subOptionForSub == null)
             {
@@ -2926,26 +2929,45 @@ namespace AMMS.Application.Services
             else
             {
                 var sub = subOptionForSub.Sub;
-                var subFullUnitCost = await ResolveSubFullUnitCostAsync(subOptionForSub);
+
+                var subCost = BuildSubOrBothMethodCostWithoutOverheadRushDiscount(
+                    est,
+                    processCosts,
+                    orderRoute,
+                    sub,
+                    subUsedQty: orderQty,
+                    nvlQty: 0,
+                    orderQty: orderQty);
 
                 result.Add(new ProductionMethodCostOptionDto
                 {
                     method = "SUB",
                     is_available = true,
+
                     sub_product_id = sub.id,
                     sub_available_qty = sub.quantity,
                     sub_used_qty = orderQty,
                     nvl_qty = 0,
-                    unit_cost = subFullUnitCost,
-                    total_cost = Math.Round(subFullUnitCost * orderQty, 2),
-                    saving_vs_nvl_unit = Math.Round(nvlUnitCost - subFullUnitCost, 4),
-                    saving_vs_nvl_total = Math.Round((nvlUnitCost - subFullUnitCost) * orderQty, 2),
-                    reason = "Có thể dùng toàn bộ bán thành phẩm phù hợp."
+
+                    unit_cost = subCost.unit_cost,
+                    total_cost = subCost.total_cost,
+
+                    saving_vs_nvl_unit = Math.Round(nvlUnitCost - subCost.unit_cost, 4),
+                    saving_vs_nvl_total = Math.Round(nvlTotalCost - subCost.total_cost, 2),
+
+                    reason =
+                        $"SUB = giá trị BTP đã có + vật liệu/công đoạn còn thiếu + design_cost. " +
+                        $"Không tính overhead, rush, discount. " +
+                        $"SubPath={sub.product_process}. " +
+                        $"CoveredStages={string.Join(",", subCost.covered_stages)}. " +
+                        $"ExtraStages={string.Join(",", subCost.extra_stages)}."
                 });
             }
 
             /*
-             * BOTH option: chỉ dùng sub thiếu số lượng.
+             * BOTH:
+             * Dùng một phần BTP, phần thiếu sản xuất bằng NVL.
+             * Cũng không cộng overhead/rush/discount trong cost đề xuất.
              */
             if (subOptionForBoth == null)
             {
@@ -2959,6 +2981,7 @@ namespace AMMS.Application.Services
             else
             {
                 var sub = subOptionForBoth.Sub;
+
                 var subUseQty = Math.Min(sub.quantity, orderQty);
                 var nvlQty = orderQty - subUseQty;
 
@@ -2968,8 +2991,10 @@ namespace AMMS.Application.Services
                     {
                         method = "BOTH",
                         is_available = false,
+
                         sub_product_id = sub.id,
                         sub_available_qty = sub.quantity,
+
                         reason = nvlQty <= 0
                             ? "BTP đã đủ số lượng, nên chọn SUB thay vì BOTH."
                             : "BTP không có số lượng để kết hợp."
@@ -2977,27 +3002,37 @@ namespace AMMS.Application.Services
                 }
                 else
                 {
-                    var subFullUnitCost = await ResolveSubFullUnitCostAsync(subOptionForBoth);
-
-                    var bothTotal =
-                        subUseQty * subFullUnitCost +
-                        nvlQty * nvlUnitCost;
-
-                    var bothUnit = bothTotal / orderQty;
+                    var bothCost = BuildSubOrBothMethodCostWithoutOverheadRushDiscount(
+                        est,
+                        processCosts,
+                        orderRoute,
+                        sub,
+                        subUsedQty: subUseQty,
+                        nvlQty: nvlQty,
+                        orderQty: orderQty);
 
                     result.Add(new ProductionMethodCostOptionDto
                     {
                         method = "BOTH",
                         is_available = true,
+
                         sub_product_id = sub.id,
                         sub_available_qty = sub.quantity,
                         sub_used_qty = subUseQty,
                         nvl_qty = nvlQty,
-                        unit_cost = Math.Round(bothUnit, 4),
-                        total_cost = Math.Round(bothTotal, 2),
-                        saving_vs_nvl_unit = Math.Round(nvlUnitCost - bothUnit, 4),
-                        saving_vs_nvl_total = Math.Round(nvlTotalCost - bothTotal, 2),
-                        reason = $"Dùng {subUseQty} BTP, sản xuất thêm {nvlQty} bằng NVL."
+
+                        unit_cost = bothCost.unit_cost,
+                        total_cost = bothCost.total_cost,
+
+                        saving_vs_nvl_unit = Math.Round(nvlUnitCost - bothCost.unit_cost, 4),
+                        saving_vs_nvl_total = Math.Round(nvlTotalCost - bothCost.total_cost, 2),
+
+                        reason =
+                            $"BOTH dùng {subUseQty} BTP và sản xuất thêm {nvlQty} bằng NVL. " +
+                            $"Không tính overhead, rush, discount trong cost đề xuất. " +
+                            $"SubPath={sub.product_process}. " +
+                            $"CoveredStages={string.Join(",", bothCost.covered_stages)}. " +
+                            $"ExtraStagesForSubPart={string.Join(",", bothCost.extra_stages)}."
                     });
                 }
             }
@@ -3496,6 +3531,399 @@ namespace AMMS.Application.Services
                 PartialForBothOption = partialForBoth
             };
         }
+
+        private sealed class EstimateProcessCostRow
+        {
+            public string? process_code { get; set; }
+
+            public decimal total_cost { get; set; }
+        }
+
+        private sealed class MethodCostBuildResult
+        {
+            public decimal unit_cost { get; set; }
+
+            public decimal total_cost { get; set; }
+
+            public decimal material_cost { get; set; }
+
+            public decimal process_cost { get; set; }
+
+            public decimal design_cost { get; set; }
+
+            public decimal overhead_cost { get; set; }
+
+            public decimal rush_amount { get; set; }
+
+            public decimal discount_amount { get; set; }
+
+            public List<string> covered_stages { get; set; } = new();
+
+            public List<string> extra_stages { get; set; } = new();
+        }
+
+        private static MethodCostBuildResult BuildSubOrBothMethodCostWithoutOverheadRushDiscount(
+            cost_estimate est,
+            List<EstimateProcessCostRow> processCosts,
+            List<string> orderRoute,
+            sub_product sub,
+            int subUsedQty,
+            int nvlQty,
+            int orderQty)
+        {
+            orderQty = orderQty > 0 ? orderQty : 1;
+            subUsedQty = Math.Max(subUsedQty, 0);
+            nvlQty = Math.Max(nvlQty, 0);
+
+            var subPath = SubProductCompatibilityHelper.ParseRoute(sub.product_process);
+
+            /*
+             * Các công đoạn order còn thiếu sau phần BTP.
+             */
+            var extraStagesForSubPart = orderRoute
+                .Where(x => !IsStageCoveredBySub(x, subPath))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            /*
+             * 1. Giá trị BTP đã có.
+             *
+             * unit_cost_to_stage là giá 1 sản phẩm BTP tới stage sub.product_process.
+             * Ví dụ sub RALO,CAT,IN có unit_cost_to_stage = 3300
+             * => dùng 10.000 BTP thì giá trị BTP = 3300 * 10.000.
+             */
+            var subStageUnitCost = Money(sub.unit_cost_to_stage);
+
+            if (subStageUnitCost <= 0m)
+            {
+                /*
+                 * Fallback cho dữ liệu cũ chưa có unit_cost_to_stage.
+                 * Fallback chỉ tính material/process đã cover, không overhead/rush/discount.
+                 */
+                subStageUnitCost = EstimateCoveredUnitCostFromOrderWithoutOverheadRushDiscount(
+                    est,
+                    processCosts,
+                    orderRoute,
+                    subPath,
+                    orderQty);
+            }
+
+            var subProductValue = subStageUnitCost * subUsedQty;
+
+            /*
+             * 2. Chi phí hoàn thiện phần BTP.
+             *
+             * Nếu sub đã có RALO,CAT,IN thì không tính lại:
+             * - paper_cost
+             * - ink_cost
+             * - process cost RALO/CAT/IN
+             *
+             * Chỉ tính phần order có nhưng sub chưa có.
+             */
+            var subRatio = orderQty <= 0
+                ? 0m
+                : subUsedQty / (decimal)orderQty;
+
+            var remainingMaterialForSubPart =
+                GetRemainingMaterialCostAfterSub(est, orderRoute, subPath) * subRatio;
+
+            var remainingProcessForSubPart =
+                GetRemainingProcessCostAfterSub(processCosts, subPath) * subRatio;
+
+            /*
+             * 3. Phần NVL trong BOTH.
+             *
+             * Phần này sản xuất từ đầu nên lấy full material/process theo tỷ lệ nvlQty/orderQty.
+             * Vẫn không cộng overhead/rush/discount theo yêu cầu mới.
+             */
+            var nvlRatio = orderQty <= 0
+                ? 0m
+                : nvlQty / (decimal)orderQty;
+
+            var nvlMaterialPart =
+                GetFullNvlMaterialCost(est) * nvlRatio;
+
+            var nvlProcessPart =
+                GetFullProcessCost(processCosts) * nvlRatio;
+
+            /*
+             * materialCost ở đây bao gồm:
+             * - giá trị BTP đã có
+             * - vật liệu còn phải dùng để hoàn thiện BTP
+             * - vật liệu để sản xuất phần NVL nếu là BOTH
+             */
+            var methodMaterialCost =
+                subProductValue +
+                remainingMaterialForSubPart +
+                nvlMaterialPart;
+
+            var methodProcessCost =
+                remainingProcessForSubPart +
+                nvlProcessPart;
+
+            var built = BuildMethodCostWithoutOverheadRushDiscount(
+                est,
+                methodMaterialCost,
+                methodProcessCost,
+                orderQty);
+
+            built.covered_stages = subPath;
+            built.extra_stages = extraStagesForSubPart;
+
+            return built;
+        }
+
+        private static MethodCostBuildResult BuildMethodCostWithoutOverheadRushDiscount(
+            cost_estimate est,
+            decimal materialCost,
+            decimal processCost,
+            int orderQty)
+        {
+            orderQty = orderQty > 0 ? orderQty : 1;
+
+            materialCost = Money(materialCost);
+            processCost = Money(processCost);
+
+            /*
+             * Theo yêu cầu mới:
+             * Không tính:
+             * - overhead
+             * - rush
+             * - discount
+             *
+             * Chỉ cộng design_cost nếu báo giá có.
+             */
+            var designCost = Money(est.design_cost);
+
+            var total =
+                materialCost +
+                processCost +
+                designCost;
+
+            total = Math.Round(total, 2);
+
+            return new MethodCostBuildResult
+            {
+                material_cost = Math.Round(materialCost, 2),
+                process_cost = Math.Round(processCost, 2),
+                design_cost = Math.Round(designCost, 2),
+
+                overhead_cost = 0m,
+                rush_amount = 0m,
+                discount_amount = 0m,
+
+                total_cost = total,
+                unit_cost = SafeUnitCost(total, orderQty)
+            };
+        }
+
+        private static bool OrderNeedsAny(
+            List<string> orderRoute,
+            params string[] codes)
+        {
+            if (orderRoute == null || orderRoute.Count == 0)
+                return false;
+
+            var set = codes
+                .Select(SubProductCompatibilityHelper.Norm)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return orderRoute.Any(x => set.Contains(SubProductCompatibilityHelper.Norm(x)));
+        }
+
+        private static decimal SafeUnitCost(decimal totalCost, int qty)
+        {
+            qty = qty > 0 ? qty : 1;
+            return Math.Round(totalCost / qty, 4);
+        }
+
+        private static decimal Money(decimal value)
+        {
+            return value < 0m ? 0m : value;
+        }
+
+        private static decimal GetFullNvlMaterialCost(cost_estimate est)
+        {
+            /*
+             * Theo file tính giá:
+             * material_cost = paper + ink + coating + mounting glue + lamination.
+             */
+            var explicitSum =
+                Money(est.paper_cost) +
+                Money(est.ink_cost) +
+                Money(est.coating_glue_cost) +
+                Money(est.mounting_glue_cost) +
+                Money(est.lamination_cost);
+
+            var materialCost = Money(est.material_cost);
+
+            /*
+             * Ưu tiên material_cost nếu DB đã lưu tổng lớn hơn explicitSum.
+             */
+            return Math.Round(Math.Max(materialCost, explicitSum), 2);
+        }
+
+        private static decimal GetRemainingMaterialCostAfterSub(
+            cost_estimate est,
+            List<string> orderRoute,
+            List<string> subPath)
+        {
+            var total = 0m;
+
+            /*
+             * Paper:
+             * Nếu sub đã có từ CAT/IN trở đi thì không tính lại giấy.
+             */
+            if (OrderNeedsAny(orderRoute, "CAT", "IN", "PHU", "CAN", "CAN_MANG", "BOI", "BE", "DUT", "DAN") &&
+                !SubAlreadyContainsPaper(subPath))
+            {
+                total += Money(est.paper_cost);
+            }
+
+            /*
+             * Ink:
+             * Nếu sub đã có IN thì không tính lại mực.
+             */
+            if (OrderNeedsAny(orderRoute, "IN") &&
+                !IsStageCoveredBySub("IN", subPath))
+            {
+                total += Money(est.ink_cost);
+            }
+
+            /*
+             * Coating:
+             * Chỉ tính nếu order có PHU và sub chưa có PHU.
+             */
+            if (OrderNeedsAny(orderRoute, "PHU") &&
+                !IsStageCoveredBySub("PHU", subPath))
+            {
+                total += Money(est.coating_glue_cost);
+            }
+
+            /*
+             * Lamination:
+             * Chỉ tính nếu order có CAN/CAN_MANG và sub chưa có.
+             */
+            if (OrderNeedsAny(orderRoute, "CAN", "CAN_MANG") &&
+                !IsStageCoveredBySub("CAN", subPath) &&
+                !IsStageCoveredBySub("CAN_MANG", subPath))
+            {
+                total += Money(est.lamination_cost);
+            }
+
+            /*
+             * Mounting:
+             * Chỉ tính nếu order có BOI và sub chưa có BOI.
+             * Theo file giá bạn gửi, chi phí vật liệu BOI là mounting_glue_cost.
+             */
+            if (OrderNeedsAny(orderRoute, "BOI") &&
+                !IsStageCoveredBySub("BOI", subPath))
+            {
+                total += Money(est.mounting_glue_cost);
+            }
+
+            return Math.Round(total, 2);
+        }
+
+        private static decimal GetFullProcessCost(List<EstimateProcessCostRow> processCosts)
+        {
+            if (processCosts == null || processCosts.Count == 0)
+                return 0m;
+
+            return Math.Round(
+                processCosts.Sum(x => Money(x.total_cost)),
+                2);
+        }
+
+        private static decimal GetRemainingProcessCostAfterSub(
+            List<EstimateProcessCostRow> processCosts,
+            List<string> subPath)
+        {
+            if (processCosts == null || processCosts.Count == 0)
+                return 0m;
+
+            return Math.Round(
+                processCosts
+                    .Where(x => !IsProcessCostCoveredBySub(x.process_code, subPath))
+                    .Sum(x => Money(x.total_cost)),
+                2);
+        }
+
+        private static decimal EstimateCoveredUnitCostFromOrderWithoutOverheadRushDiscount(
+            cost_estimate est,
+            List<EstimateProcessCostRow> processCosts,
+            List<string> orderRoute,
+            List<string> subPath,
+            int orderQty)
+        {
+            orderQty = orderQty > 0 ? orderQty : 1;
+
+            var coveredMaterial =
+                GetFullNvlMaterialCost(est) -
+                GetRemainingMaterialCostAfterSub(est, orderRoute, subPath);
+
+            var coveredProcess =
+                GetFullProcessCost(processCosts) -
+                GetRemainingProcessCostAfterSub(processCosts, subPath);
+
+            var coveredTotal =
+                Math.Max(coveredMaterial, 0m) +
+                Math.Max(coveredProcess, 0m);
+
+            return SafeUnitCost(coveredTotal, orderQty);
+        }
+
+        private static bool IsProcessCostCoveredBySub(
+            string? processCode,
+            List<string> subPath)
+        {
+            var code = SubProductCompatibilityHelper.Norm(processCode);
+
+            if (string.IsNullOrWhiteSpace(code))
+                return false;
+
+            /*
+             * CAN/CAN_MANG có thể lệch mã giữa estimate và process.
+             */
+            if (code is "CAN" or "CAN_MANG")
+            {
+                return subPath.Any(x =>
+                    string.Equals(x, "CAN", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(x, "CAN_MANG", StringComparison.OrdinalIgnoreCase));
+            }
+
+            return subPath.Contains(code, StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static bool IsStageCoveredBySub(
+            string processCode,
+            List<string> subPath)
+        {
+            var code = SubProductCompatibilityHelper.Norm(processCode);
+
+            if (string.IsNullOrWhiteSpace(code))
+                return false;
+
+            if (code is "CAN" or "CAN_MANG")
+            {
+                return subPath.Any(x =>
+                    string.Equals(x, "CAN", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(x, "CAN_MANG", StringComparison.OrdinalIgnoreCase));
+            }
+
+            return subPath.Contains(code, StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static bool SubAlreadyContainsPaper(List<string> subPath)
+        {
+            /*
+             * RALO là bản/kẽm, chưa tính là BTP trên giấy.
+             * Từ CAT/IN trở đi thì BTP đã chứa giấy.
+             */
+            return subPath.Any(x =>
+                x is "CAT" or "IN" or "PHU" or "CAN" or "CAN_MANG" or "BOI" or "BE" or "DUT" or "DAN");
+        }
+
         private readonly IWebHostEnvironment _env;
     }
 }
