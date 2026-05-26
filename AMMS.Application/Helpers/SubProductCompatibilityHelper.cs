@@ -59,24 +59,6 @@ public static class SubProductCompatibilityHelper
         "RALO", "CAT", "IN", "PHU", "CAN", "CAN_MANG", "BOI", "BE", "DUT", "DAN"
     };
 
-    public static string? ResolveCoatingMaterialCode(cost_estimate? est)
-    {
-        if (est == null)
-            return null;
-
-        if (!string.IsNullOrWhiteSpace(est.coating_material_code))
-            return Norm(est.coating_material_code);
-
-        var raw = Norm(est.coating_type);
-
-        return raw switch
-        {
-            "KEO_NUOC" or "KEO_PHU_NUOC" => "KEO_PHU_NUOC",
-            "KEO_DAU" or "KEO_PHU_DAU" => "KEO_PHU_DAU",
-            "UV" or "KEO_UV" or "PHU_UV" or "KEO_PHU_UV" => "KEO_PHU_UV",
-            _ => string.IsNullOrWhiteSpace(raw) ? null : raw
-        };
-    }
 
     public static string Norm(string? value)
     {
@@ -214,11 +196,11 @@ public static class SubProductCompatibilityHelper
     }
 
     public static async Task<SubProductStageSignature?> BuildSignatureForOrderStageAsync(
-        AppDbContext db,
-        int orderId,
-        string? processPath,
-        int stageQuantity,
-        CancellationToken ct)
+    AppDbContext db,
+    int orderId,
+    string? processPath,
+    int stageQuantity,
+    CancellationToken ct)
     {
         var est = await LoadAcceptedEstimateByOrderIdAsync(db, orderId, ct);
         if (est == null)
@@ -234,12 +216,13 @@ public static class SubProductCompatibilityHelper
             orderQty,
             ct);
 
-        var paperCode = Norm(!string.IsNullOrWhiteSpace(est.paper_code)
-            ? est.paper_code
-            : est.paper_alternative);
+        var paperCode = NormalizeMaterialCode(
+            !string.IsNullOrWhiteSpace(est.paper_code)
+                ? est.paper_code
+                : est.paper_alternative);
 
         var waveCode = codes.Any(x => x == "BOI")
-            ? Norm(EstimateMaterialAlternativeHelper.ResolveWaveType(
+            ? NormalizeMaterialCode(EstimateMaterialAlternativeHelper.ResolveWaveType(
                 est.wave_alternative,
                 est.wave_type))
             : null;
@@ -249,11 +232,12 @@ public static class SubProductCompatibilityHelper
             : null;
 
         var laminationCode = codes.Any(x => x == "CAN" || x == "CAN_MANG")
-            ? Norm(!string.IsNullOrWhiteSpace(est.lamination_material_code)
-                ? est.lamination_material_code
-                : !string.IsNullOrWhiteSpace(est.lamination_material_name)
-                    ? est.lamination_material_name
-                    : est.lamination_material_id?.ToString())
+            ? NormalizeMaterialCode(
+                !string.IsNullOrWhiteSpace(est.lamination_material_code)
+                    ? est.lamination_material_code
+                    : !string.IsNullOrWhiteSpace(est.lamination_material_name)
+                        ? est.lamination_material_name
+                        : est.lamination_material_id?.ToString())
             : null;
 
         var sig = BuildMaterialSignature(
@@ -273,6 +257,106 @@ public static class SubProductCompatibilityHelper
             unit_cost_to_stage = Math.Round(unitCost, 4),
             total_cost_to_stage = Math.Round(unitCost * stageQuantity, 2)
         };
+    }
+
+    private static string? ResolveCoatingMaterialCode(cost_estimate est)
+    {
+        if (!string.IsNullOrWhiteSpace(est.coating_material_code))
+            return NormalizeMaterialCode(est.coating_material_code);
+
+        return NormalizeMaterialCode(est.coating_type);
+    }
+
+    public static string BuildMaterialSignature(
+        string? paperCode,
+        string? waveCode,
+        string? coatingCode,
+        string? laminationCode)
+    {
+        return
+            $"PAPER={NormalizeMaterialCode(paperCode) ?? "NONE"}|" +
+            $"WAVE={NormalizeMaterialCode(waveCode) ?? "NONE"}|" +
+            $"COATING={NormalizeMaterialCode(coatingCode) ?? "NONE"}|" +
+            $"LAMINATION={NormalizeMaterialCode(laminationCode) ?? "NONE"}";
+    }
+
+    public static bool IsMaterialAndCostMatched(
+        sub_product sub,
+        SubProductStageSignature expected)
+    {
+        if (!SameMaterial(sub.paper_material_code, expected.paper_material_code))
+            return false;
+
+        if (!SameMaterial(sub.wave_material_code, expected.wave_material_code))
+            return false;
+
+        if (!SameMaterial(sub.coating_material_code, expected.coating_material_code))
+            return false;
+
+        if (!SameMaterial(sub.lamination_material_code, expected.lamination_material_code))
+            return false;
+
+        return Math.Round(sub.unit_cost_to_stage, 4)
+            == Math.Round(expected.unit_cost_to_stage, 4);
+    }
+
+    private static bool SameMaterial(string? a, string? b)
+    {
+        var aa = NormalizeMaterialCode(a) ?? "NONE";
+        var bb = NormalizeMaterialCode(b) ?? "NONE";
+
+        return string.Equals(aa, bb, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static string? NormalizeMaterialCode(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        var s = RemoveDiacritics(value)
+            .Trim()
+            .ToUpperInvariant()
+            .Replace(" ", "_")
+            .Replace("-", "_");
+
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"_+", "_").Trim('_');
+
+        return s switch
+        {
+            "" => null,
+            "NONE" => null,
+            "NULL" => null,
+
+            "KEO_NUOC" => "KEO_PHU_NUOC",
+            "KEO_PHU_NUOC" => "KEO_PHU_NUOC",
+            "KEO_DAU" => "KEO_PHU_DAU",
+            "KEO_PHU_DAU" => "KEO_PHU_DAU",
+            "UV" => "KEO_PHU_UV",
+            "KEO_UV" => "KEO_PHU_UV",
+            "KEO_PHU_UV" => "KEO_PHU_UV",
+
+            "MANG_12_MIC" => "MANG_12MIC",
+            "MANG_12MIC" => "MANG_12MIC",
+
+            _ => s
+        };
+    }
+
+    private static string? NullIfEmpty(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    private static string RemoveDiacritics(string text)
+    {
+        var normalized = text.Normalize(System.Text.NormalizationForm.FormD);
+
+        var chars = normalized
+            .Where(ch => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch)
+                         != System.Globalization.UnicodeCategory.NonSpacingMark)
+            .ToArray();
+
+        return new string(chars).Normalize(System.Text.NormalizationForm.FormC);
     }
 
     public static async Task<decimal> CalculateUnitCostToStageAsync(
@@ -317,43 +401,6 @@ public static class SubProductCompatibilityHelper
             ct);
     }
 
-    public static bool IsMaterialAndCostMatched(
-        sub_product sub,
-        SubProductStageSignature expected)
-    {
-        if (!Same(Norm(sub.paper_material_code), Norm(expected.paper_material_code)))
-            return false;
-
-        if (!Same(Norm(sub.wave_material_code), Norm(expected.wave_material_code)))
-            return false;
-
-        if (!Same(Norm(sub.coating_material_code), Norm(expected.coating_material_code)))
-            return false;
-
-        if (!Same(Norm(sub.lamination_material_code), Norm(expected.lamination_material_code)))
-            return false;
-
-        var a = Math.Round(sub.unit_cost_to_stage, 4);
-        var b = Math.Round(expected.unit_cost_to_stage, 4);
-
-        return a == b;
-    }
-
-    public static string BuildMaterialSignature(
-        string? paper,
-        string? wave,
-        string? coating,
-        string? lamination)
-    {
-        return string.Join("|", new[]
-        {
-            $"PAPER={Norm(paper)}",
-            $"WAVE={Norm(wave)}",
-            $"COATING={Norm(coating)}",
-            $"LAMINATION={Norm(lamination)}"
-        });
-    }
-
     public static string BuildImportMergeKey(sub_product x)
     {
         return string.Join("|", new[]
@@ -365,11 +412,6 @@ public static class SubProductCompatibilityHelper
             $"MAT={x.material_signature ?? BuildMaterialSignature(x.paper_material_code, x.wave_material_code, x.coating_material_code, x.lamination_material_code)}",
             $"UNIT_COST={Math.Round(x.unit_cost_to_stage, 4).ToString(CultureInfo.InvariantCulture)}"
         });
-    }
-
-    private static string? NullIfEmpty(string? value)
-    {
-        return string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
     private static string NormCostProcessCode(string? code)
@@ -400,21 +442,4 @@ public static class SubProductCompatibilityHelper
             StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string RemoveDiacritics(string? text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-            return "";
-
-        var normalized = text.Normalize(NormalizationForm.FormD);
-        var sb = new StringBuilder();
-
-        foreach (var ch in normalized)
-        {
-            var uc = CharUnicodeInfo.GetUnicodeCategory(ch);
-            if (uc != UnicodeCategory.NonSpacingMark)
-                sb.Append(ch);
-        }
-
-        return sb.ToString().Normalize(NormalizationForm.FormC);
-    }
 }

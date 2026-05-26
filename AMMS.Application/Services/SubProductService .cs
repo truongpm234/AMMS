@@ -88,17 +88,44 @@ namespace AMMS.Application.Services
             if (!productTypeExists)
                 throw new ArgumentException($"product_type_id {dto.product_type_id} does not exist");
 
+            var processPath = NormalizeProcess(dto.product_process);
+
+            var paperCode = NormalizeMaterialCode(dto.paper_material_code);
+            var waveCode = NormalizeMaterialCode(dto.wave_material_code);
+            var coatingCode = NormalizeMaterialCode(dto.coating_material_code);
+            var laminationCode = NormalizeMaterialCode(dto.lamination_material_code);
+
+            var unitCost = Math.Round(dto.unit_cost_to_stage ?? 0m, 4);
+            var qty = dto.quantity ?? 0;
+
+            var signature = !string.IsNullOrWhiteSpace(dto.material_signature)
+                ? dto.material_signature.Trim()
+                : SubProductCompatibilityHelper.BuildMaterialSignature(
+                    paperCode,
+                    waveCode,
+                    coatingCode,
+                    laminationCode);
+
             var entity = new sub_product
             {
                 product_type_id = dto.product_type_id,
                 width = dto.width,
                 length = dto.length,
-                product_process = string.IsNullOrWhiteSpace(dto.product_process)
-                    ? null
-                    : NormalizeProcess(dto.product_process),
-                quantity = dto.quantity ?? 0,
+                product_process = string.IsNullOrWhiteSpace(processPath) ? null : processPath,
+                quantity = qty,
+
                 is_active = dto.is_active ?? true,
                 is_imported = true,
+
+                paper_material_code = NullIfEmpty(paperCode),
+                wave_material_code = NullIfEmpty(waveCode),
+                coating_material_code = NullIfEmpty(coatingCode),
+                lamination_material_code = NullIfEmpty(laminationCode),
+                material_signature = signature,
+
+                unit_cost_to_stage = unitCost,
+                total_cost_to_stage = Math.Round(unitCost * qty, 2),
+
                 description = string.IsNullOrWhiteSpace(dto.description)
                     ? null
                     : dto.description.Trim(),
@@ -420,6 +447,54 @@ namespace AMMS.Application.Services
             return response;
         }
 
+        private static string? NullIfEmpty(string? value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+        }
+
+        private static string? NormalizeMaterialCode(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            var s = RemoveDiacritics(value)
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+
+            s = System.Text.RegularExpressions.Regex.Replace(s, @"_+", "_").Trim('_');
+
+            return s switch
+            {
+                "NONE" => null,
+                "NULL" => null,
+
+                "KEO_NUOC" => "KEO_PHU_NUOC",
+                "KEO_PHU_NUOC" => "KEO_PHU_NUOC",
+                "KEO_PHU_DAU" => "KEO_PHU_DAU",
+                "KEO_DAU" => "KEO_PHU_DAU",
+                "UV" => "KEO_PHU_UV",
+                "KEO_UV" => "KEO_PHU_UV",
+                "KEO_PHU_UV" => "KEO_PHU_UV",
+
+                "MANG_12_MIC" => "MANG_12MIC",
+                "MANG_12MIC" => "MANG_12MIC",
+
+                _ => s
+            };
+        }
+
+        private static string RemoveDiacritics(string text)
+        {
+            var normalized = text.Normalize(System.Text.NormalizationForm.FormD);
+            var chars = normalized
+                .Where(ch => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch)
+                             != System.Globalization.UnicodeCategory.NonSpacingMark)
+                .ToArray();
+
+            return new string(chars).Normalize(System.Text.NormalizationForm.FormC);
+        }
         private async Task<sub_product?> FindActiveMatchedSubProductForImportAsync(
     sub_product pending,
     CancellationToken ct)
@@ -469,22 +544,19 @@ namespace AMMS.Application.Services
 
         private static string NormalizeProcess(string? value)
         {
-            return (value ?? "")
-                .Trim()
-                .ToUpperInvariant()
-                .Replace(" ", "_")
-                .Replace("-", "_");
+            return NormalizeProcessPath(value);
         }
 
-        private static string? AppendDescription(string? oldValue, string line)
+        private static string NormalizeProcessPath(string? value)
         {
-            if (string.IsNullOrWhiteSpace(oldValue))
-                return line.Length > 255 ? line[..255] : line;
+            if (string.IsNullOrWhiteSpace(value))
+                return "";
 
-            var value = oldValue.Trim();
-            var next = $"{value} | {line}";
-
-            return next.Length <= 255 ? next : next[..255];
+            return string.Join(",",
+                value.Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(x => x.Trim().ToUpperInvariant().Replace(" ", "_").Replace("-", "_"))
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
         }
     }
 }
