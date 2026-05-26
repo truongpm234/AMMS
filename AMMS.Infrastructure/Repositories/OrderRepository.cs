@@ -288,10 +288,6 @@ namespace AMMS.Infrastructure.Repositories
                     .ThenBy(p => p.prod_id)
                     .ToList();
 
-                /*
-                 * mainProduction chỉ để giữ tương thích các field cũ:
-                 * production_id, production_method, sub_product_id...
-                 */
                 var mainProduction = relatedProductions
                     .OrderByDescending(p => p.prod_id)
                     .FirstOrDefault();
@@ -307,15 +303,8 @@ namespace AMMS.Infrastructure.Repositories
                     created_at = ToUtcString(o.order_date),
                     delivery_date = ToUtcString(o.delivery_date),
                     status = o.Status,
-
-                    /*
-                     * Field cũ: giữ 1 production chính/latest để FE cũ không lỗi.
-                     */
+                    production_approval_flow = mainProduction?.production_approval_flow,
                     production_id = mainProduction?.prod_id ?? o.production_id,
-
-                    /*
-                     * Field mới: toàn bộ production liên quan SINGLE / GROUP / SPLIT.
-                     */
                     production_ids = relatedProductions
         .Select(p => p.prod_id)
         .Distinct()

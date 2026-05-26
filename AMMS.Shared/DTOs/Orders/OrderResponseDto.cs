@@ -28,6 +28,7 @@ namespace AMMS.Shared.DTOs.Orders
         public int nvl_qty { get; set; }
         public string? import_recieve_path { get; set; }
         public int? production_id { get; set; }
+        public string? production_approval_flow { get; set; }
         public List<int> production_ids { get; set; } = new();
         public List<OrderPagedProductionDto> productions { get; set; } = new();
     }
@@ -52,7 +53,7 @@ namespace AMMS.Shared.DTOs.Orders
         public string? import_recieve_path { get; set; }
         public int? sub_product_id { get; set; }
         public int nvl_qty { get; set; }
-
+        public string? production_approval_flow { get; set; }
         public string? prod_method { get; set; }
         public string? gm_note { get; set; }
         public string? mgr_note { get; set; }
