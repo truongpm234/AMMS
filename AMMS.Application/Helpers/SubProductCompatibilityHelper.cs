@@ -95,29 +95,6 @@ public static class SubProductCompatibilityHelper
         };
     }
 
-    public static bool IsMaterialMatchedForProductionSub(
-    sub_product sub,
-    SubProductStageSignature expected)
-    {
-        if (!Same(Norm(sub.paper_material_code), Norm(expected.paper_material_code)))
-            return false;
-
-        if (!Same(Norm(sub.wave_material_code), Norm(expected.wave_material_code)))
-            return false;
-
-        if (!Same(Norm(sub.coating_material_code), Norm(expected.coating_material_code)))
-            return false;
-
-        if (!Same(Norm(sub.lamination_material_code), Norm(expected.lamination_material_code)))
-            return false;
-
-        /*
-         * Không check unit_cost_to_stage.
-         * Logic này chỉ dùng để xét sub_product có hợp lệ cho order mới hay không.
-         */
-        return true;
-    }
-
     public static List<string> ParseRoute(string? csv)
     {
         if (string.IsNullOrWhiteSpace(csv))
@@ -131,6 +108,7 @@ public static class SubProductCompatibilityHelper
             .OrderBy(RouteIndex)
             .ToList();
     }
+
 
     public static bool IsSubPathUsableForOrderRoute(string? subProductProcess, string? orderRouteCsv)
     {
@@ -466,6 +444,108 @@ public static class SubProductCompatibilityHelper
             a ?? "",
             b ?? "",
             StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsMaterialMatchedForProductionSub(
+    sub_product sub,
+    SubProductStageSignature expected)
+    {
+        /*
+         * Dùng riêng cho xét sub_product có hợp lệ với order mới
+         * khi đề xuất/chọn method SUB hoặc BOTH.
+         *
+         * Không dùng hàm này cho ImportPendingSubProductsAsync.
+         */
+
+        var subStages = ParseRoute(sub.product_process);
+
+        if (subStages.Count == 0)
+            return false;
+
+        /*
+         * Giấy: luôn phải check.
+         * Vì BTP ở bất kỳ stage nào cũng đã được tạo từ giấy ban đầu.
+         */
+        if (!SameRequiredMaterial(
+                sub.paper_material_code,
+                expected.paper_material_code))
+        {
+            return false;
+        }
+
+        /*
+         * Nếu sub_product đã cover PHU thì mới check keo phủ.
+         * Nếu sub chỉ là RALO,CAT,IN thì bỏ qua coating.
+         */
+        if (HasStage(subStages, "PHU"))
+        {
+            if (!SameRequiredMaterial(
+                    sub.coating_material_code,
+                    expected.coating_material_code))
+            {
+                return false;
+            }
+        }
+
+        /*
+         * Nếu sub_product đã cover CAN/CAN_MANG thì mới check màng cán.
+         */
+        if (HasStage(subStages, "CAN", "CAN_MANG"))
+        {
+            if (!SameRequiredMaterial(
+                    sub.lamination_material_code,
+                    expected.lamination_material_code))
+            {
+                return false;
+            }
+        }
+
+        /*
+         * Nếu sub_product đã cover BOI thì mới check sóng.
+         */
+        if (HasStage(subStages, "BOI"))
+        {
+            if (!SameRequiredMaterial(
+                    sub.wave_material_code,
+                    expected.wave_material_code))
+            {
+                return false;
+            }
+        }
+
+        /*
+         * Không check unit_cost_to_stage ở đây.
+         * Không check full material_signature ở đây.
+         */
+        return true;
+    }
+
+    private static bool HasStage(
+        IReadOnlyList<string> stages,
+        params string[] codes)
+    {
+        if (stages == null || stages.Count == 0)
+            return false;
+
+        var codeSet = codes
+            .Select(Norm)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        return stages.Any(x => codeSet.Contains(Norm(x)));
+    }
+
+    private static bool SameRequiredMaterial(
+        string? actual,
+        string? expected)
+    {
+        var a = NormalizeMaterialCode(actual);
+        var b = NormalizeMaterialCode(expected);
+
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b))
+            return false;
+
+        return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
     }
 
 }

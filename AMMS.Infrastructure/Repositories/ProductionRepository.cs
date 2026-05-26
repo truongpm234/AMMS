@@ -3578,6 +3578,7 @@ namespace AMMS.Infrastructure.Repositories
                         throw new InvalidOperationException("Số lượng bán thành phẩm đã đủ. Vui lòng chọn SUB thay vì BOTH.");
 
                     selectedSubProduct.quantity -= subUseQty;
+                    selectedSubProduct.updated_at = AppTime.NowVnUnspecified();
 
                     prod.prod_method = "BOTH";
                     prod.is_full_process = null;
@@ -4195,6 +4196,7 @@ namespace AMMS.Infrastructure.Repositories
 
             return estimate;
         }
+
         private async Task<sub_product> ResolveValidSubProductAsync(
     int subId,
     production prod,
@@ -4212,6 +4214,11 @@ namespace AMMS.Infrastructure.Repositories
             if (!orderReq.print_length_mm.HasValue || orderReq.print_length_mm.Value <= 0)
                 throw new InvalidOperationException("Order request chưa có print_length_mm.");
 
+            var orderId = orderReq.order_id ?? prod.order_id;
+
+            if (!orderId.HasValue || orderId.Value <= 0)
+                throw new InvalidOperationException("Không xác định được order_id để kiểm tra bán thành phẩm.");
+
             var selectedSubProduct = await _db.sub_products
                 .Include(x => x.product_type)
                 .FirstOrDefaultAsync(x => x.id == subId, ct);
@@ -4219,26 +4226,92 @@ namespace AMMS.Infrastructure.Repositories
             if (selectedSubProduct == null)
                 throw new InvalidOperationException($"Không tìm thấy bán thành phẩm có id = {subId}.");
 
-            if (!selectedSubProduct.is_active)
+            if (selectedSubProduct.is_active != true)
                 throw new InvalidOperationException("Bán thành phẩm đã chọn đang không hoạt động.");
+
+            if (selectedSubProduct.is_imported != true)
+                throw new InvalidOperationException("Bán thành phẩm đã chọn chưa được nhập kho.");
+
+            if (selectedSubProduct.quantity <= 0)
+                throw new InvalidOperationException("Bán thành phẩm không còn số lượng tồn.");
 
             if (selectedSubProduct.product_type_id != prod.product_type_id.Value)
                 throw new InvalidOperationException("Bán thành phẩm đã chọn không cùng loại sản phẩm với production.");
 
             if (selectedSubProduct.width != orderReq.print_width_mm.Value)
+            {
                 throw new InvalidOperationException(
-                    $"Bán thành phẩm không đúng chiều rộng. Yêu cầu: {orderReq.print_width_mm.Value}, thực tế: {selectedSubProduct.width}.");
+                    $"Bán thành phẩm không đúng chiều rộng. " +
+                    $"Yêu cầu: {orderReq.print_width_mm.Value}, thực tế: {selectedSubProduct.width}.");
+            }
 
             if (selectedSubProduct.length != orderReq.print_length_mm.Value)
+            {
                 throw new InvalidOperationException(
-                    $"Bán thành phẩm không đúng chiều dài. Yêu cầu: {orderReq.print_length_mm.Value}, thực tế: {selectedSubProduct.length}.");
+                    $"Bán thành phẩm không đúng chiều dài. " +
+                    $"Yêu cầu: {orderReq.print_length_mm.Value}, thực tế: {selectedSubProduct.length}.");
+            }
 
             if (requireEnoughQty && selectedSubProduct.quantity < orderQty)
+            {
                 throw new InvalidOperationException(
-                    $"Số lượng bán thành phẩm không đủ. Cần: {orderQty}, hiện có: {selectedSubProduct.quantity}.");
+                    $"Số lượng bán thành phẩm không đủ. " +
+                    $"Cần: {orderQty}, hiện có: {selectedSubProduct.quantity}.");
+            }
 
             if (!requireEnoughQty && selectedSubProduct.quantity <= 0)
                 throw new InvalidOperationException("Bán thành phẩm không còn số lượng để kết hợp.");
+
+            var orderRouteCsv = await _db.order_items
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId.Value)
+                .OrderBy(x => x.item_id)
+                .Select(x => x.production_process)
+                .FirstOrDefaultAsync(ct);
+
+            if (!IsSubPathUsableForOrderRouteRepo(
+                    selectedSubProduct.product_process,
+                    orderRouteCsv))
+            {
+                throw new InvalidOperationException(
+                    $"Path bán thành phẩm không phù hợp với route đơn hàng. " +
+                    $"SubPath={selectedSubProduct.product_process}, OrderRoute={orderRouteCsv}.");
+            }
+
+            var expected = await BuildExpectedSubProductStageMaterialSignatureAsync(
+                orderId.Value,
+                selectedSubProduct.product_process,
+                ct);
+
+            if (expected == null)
+                throw new InvalidOperationException("Không build được NVL kỳ vọng cho đơn hàng.");
+
+            if (!IsMaterialMatchedForProductionSubRepo(
+                    selectedSubProduct,
+                    expected))
+            {
+                var subStages = ParseRouteForSubCheck(selectedSubProduct.product_process);
+
+                var requiredChecks = new List<string> { "giấy" };
+
+                if (HasStageForSubCheck(subStages, "PHU"))
+                    requiredChecks.Add("keo phủ");
+
+                if (HasStageForSubCheck(subStages, "CAN", "CAN_MANG"))
+                    requiredChecks.Add("màng cán");
+
+                if (HasStageForSubCheck(subStages, "BOI"))
+                    requiredChecks.Add("sóng");
+
+                throw new InvalidOperationException(
+                    "Bán thành phẩm không hợp lệ vì khác NVL theo stage đã cover. " +
+                    $"Các điều kiện cần check: {string.Join(", ", requiredChecks)}. " +
+                    $"SubPath={selectedSubProduct.product_process}, " +
+                    $"SubPaper={selectedSubProduct.paper_material_code}, ExpectedPaper={expected.paper_material_code}, " +
+                    $"SubCoating={selectedSubProduct.coating_material_code}, ExpectedCoating={expected.coating_material_code}, " +
+                    $"SubLamination={selectedSubProduct.lamination_material_code}, ExpectedLamination={expected.lamination_material_code}, " +
+                    $"SubWave={selectedSubProduct.wave_material_code}, ExpectedWave={expected.wave_material_code}.");
+            }
 
             return selectedSubProduct;
         }
@@ -4980,6 +5053,363 @@ namespace AMMS.Infrastructure.Repositories
             public int? height_mm { get; set; }
 
             public decimal? est_ink_weight_kg { get; set; }
+        }
+
+        private sealed class RepoSubProductStageMaterialSignature
+        {
+            public string? paper_material_code { get; set; }
+
+            public string? wave_material_code { get; set; }
+
+            public string? coating_material_code { get; set; }
+
+            public string? lamination_material_code { get; set; }
+        }
+
+        private static readonly string[] RepoFullRouteOrder =
+        {
+    "RALO", "CAT", "IN", "PHU", "CAN", "CAN_MANG", "BOI", "BE", "DUT", "DAN"
+};
+
+        private static string NormForSubCheck(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "";
+
+            var s = RemoveDiacriticsForSubCheck(value)
+                .Trim()
+                .ToUpperInvariant();
+
+            s = s.Replace("Đ", "D");
+            s = s.Replace("-", "_").Replace(" ", "_");
+
+            while (s.Contains("__"))
+                s = s.Replace("__", "_");
+
+            return s.Trim('_');
+        }
+
+        private static string NormalizeMaterialCodeForSubCheck(string? value)
+        {
+            var s = NormForSubCheck(value);
+
+            return s switch
+            {
+                "KEO_NUOC" => "KEO_PHU_NUOC",
+                "KEO_PHU_NUOC" => "KEO_PHU_NUOC",
+
+                "KEO_DAU" => "KEO_PHU_DAU",
+                "KEO_PHU_DAU" => "KEO_PHU_DAU",
+
+                "UV" => "KEO_PHU_UV",
+                "KEO_UV" => "KEO_PHU_UV",
+                "PHU_UV" => "KEO_PHU_UV",
+                "KEO_PHU_UV" => "KEO_PHU_UV",
+
+                "MANG_12_MIC" => "MANG_12MIC",
+                "MANG_12MIC" => "MANG_12MIC",
+
+                "MOUNTING_GLUE" => "KEO_BOI",
+                "KEO_BOI" => "KEO_BOI",
+
+                _ => s
+            };
+        }
+
+        private static string RemoveDiacriticsForSubCheck(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return "";
+
+            var normalized = text.Normalize(System.Text.NormalizationForm.FormD);
+            var sb = new System.Text.StringBuilder();
+
+            foreach (var ch in normalized)
+            {
+                var uc = System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch);
+                if (uc != System.Globalization.UnicodeCategory.NonSpacingMark)
+                    sb.Append(ch);
+            }
+
+            return sb.ToString().Normalize(System.Text.NormalizationForm.FormC);
+        }
+
+        private static List<string> ParseRouteForSubCheck(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormForSubCheck)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(RouteIndexForSubCheck)
+                .ToList();
+        }
+
+        private static int RouteIndexForSubCheck(string? processCode)
+        {
+            var code = NormForSubCheck(processCode);
+
+            var idx = Array.FindIndex(
+                RepoFullRouteOrder,
+                x => string.Equals(x, code, StringComparison.OrdinalIgnoreCase));
+
+            return idx < 0 ? 999 : idx;
+        }
+
+        private static bool IsSubPathUsableForOrderRouteRepo(
+            string? subProductProcess,
+            string? orderRouteCsv)
+        {
+            var subCodes = ParseRouteForSubCheck(subProductProcess);
+            var orderCodes = ParseRouteForSubCheck(orderRouteCsv);
+
+            if (subCodes.Count == 0 || orderCodes.Count == 0)
+                return false;
+
+            foreach (var code in subCodes)
+            {
+                if (!orderCodes.Contains(code, StringComparer.OrdinalIgnoreCase))
+                    return false;
+            }
+
+            var subLastIndex = subCodes
+                .Select(x => orderCodes.FindIndex(y =>
+                    string.Equals(y, x, StringComparison.OrdinalIgnoreCase)))
+                .Where(x => x >= 0)
+                .DefaultIfEmpty(-1)
+                .Max();
+
+            var expectedPrefix = orderCodes.Take(subLastIndex + 1).ToList();
+
+            return expectedPrefix.SequenceEqual(
+                subCodes,
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        private async Task<RepoSubProductStageMaterialSignature?> BuildExpectedSubProductStageMaterialSignatureAsync(
+            int orderId,
+            string? subProductProcess,
+            CancellationToken ct)
+        {
+            var est = await LoadAcceptedEstimateByOrderIdForSubCheckAsync(
+                orderId,
+                ct);
+
+            if (est == null)
+                return null;
+
+            var codes = ParseRouteForSubCheck(subProductProcess);
+
+            var paperCode = NormalizeMaterialCodeForSubCheck(
+                !string.IsNullOrWhiteSpace(est.paper_code)
+                    ? est.paper_code
+                    : est.paper_alternative);
+
+            string? waveCode = null;
+            if (HasStageForSubCheck(codes, "BOI"))
+            {
+                waveCode = NormalizeMaterialCodeForSubCheck(
+                    EstimateMaterialAlternativeHelper.ResolveWaveType(
+                        est.wave_alternative,
+                        est.wave_type));
+            }
+
+            string? coatingCode = null;
+            if (HasStageForSubCheck(codes, "PHU"))
+            {
+                coatingCode = ResolveCoatingMaterialCodeForSubCheck(est);
+            }
+
+            string? laminationCode = null;
+            if (HasStageForSubCheck(codes, "CAN", "CAN_MANG"))
+            {
+                laminationCode = await ResolveLaminationMaterialCodeForSubCheckAsync(
+                    est,
+                    ct);
+            }
+
+            return new RepoSubProductStageMaterialSignature
+            {
+                paper_material_code = NullIfEmptyForSubCheck(paperCode),
+                wave_material_code = NullIfEmptyForSubCheck(waveCode),
+                coating_material_code = NullIfEmptyForSubCheck(coatingCode),
+                lamination_material_code = NullIfEmptyForSubCheck(laminationCode)
+            };
+        }
+
+        private async Task<cost_estimate?> LoadAcceptedEstimateByOrderIdForSubCheckAsync(
+            int orderId,
+            CancellationToken ct)
+        {
+            var req = await _db.order_requests
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderByDescending(x => x.order_request_id)
+                .FirstOrDefaultAsync(ct);
+
+            if (req == null)
+                return null;
+
+            cost_estimate? est = null;
+
+            if (req.accepted_estimate_id.HasValue &&
+                req.accepted_estimate_id.Value > 0)
+            {
+                est = await _db.cost_estimates
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x =>
+                        x.estimate_id == req.accepted_estimate_id.Value &&
+                        x.order_request_id == req.order_request_id,
+                        ct);
+            }
+
+            est ??= await _db.cost_estimates
+                .AsNoTracking()
+                .Where(x => x.order_request_id == req.order_request_id)
+                .OrderByDescending(x => x.is_active)
+                .ThenByDescending(x => x.estimate_id)
+                .FirstOrDefaultAsync(ct);
+
+            return est;
+        }
+
+        private static string? ResolveCoatingMaterialCodeForSubCheck(cost_estimate est)
+        {
+            if (!string.IsNullOrWhiteSpace(est.coating_material_code))
+                return NormalizeMaterialCodeForSubCheck(est.coating_material_code);
+
+            return NormalizeMaterialCodeForSubCheck(est.coating_type);
+        }
+
+        private async Task<string?> ResolveLaminationMaterialCodeForSubCheckAsync(
+            cost_estimate est,
+            CancellationToken ct)
+        {
+            if (!string.IsNullOrWhiteSpace(est.lamination_material_code))
+                return NormalizeMaterialCodeForSubCheck(est.lamination_material_code);
+
+            if (!string.IsNullOrWhiteSpace(est.lamination_material_name))
+                return NormalizeMaterialCodeForSubCheck(est.lamination_material_name);
+
+            if (est.lamination_material_id.HasValue &&
+                est.lamination_material_id.Value > 0)
+            {
+                var code = await _db.materials
+                    .AsNoTracking()
+                    .Where(x => x.material_id == est.lamination_material_id.Value)
+                    .Select(x => x.code)
+                    .FirstOrDefaultAsync(ct);
+
+                return NormalizeMaterialCodeForSubCheck(code);
+            }
+
+            return null;
+        }
+
+        private static bool IsMaterialMatchedForProductionSubRepo(
+            sub_product sub,
+            RepoSubProductStageMaterialSignature expected)
+        {
+            var subStages = ParseRouteForSubCheck(sub.product_process);
+
+            if (subStages.Count == 0)
+                return false;
+
+            /*
+             * Giấy luôn phải check.
+             */
+            if (!SameRequiredMaterialForSubCheck(
+                    sub.paper_material_code,
+                    expected.paper_material_code))
+            {
+                return false;
+            }
+
+            /*
+             * Có PHU mới check keo phủ.
+             */
+            if (HasStageForSubCheck(subStages, "PHU"))
+            {
+                if (!SameRequiredMaterialForSubCheck(
+                        sub.coating_material_code,
+                        expected.coating_material_code))
+                {
+                    return false;
+                }
+            }
+
+            /*
+             * Có CAN/CAN_MANG mới check màng.
+             */
+            if (HasStageForSubCheck(subStages, "CAN", "CAN_MANG"))
+            {
+                if (!SameRequiredMaterialForSubCheck(
+                        sub.lamination_material_code,
+                        expected.lamination_material_code))
+                {
+                    return false;
+                }
+            }
+
+            /*
+             * Có BOI mới check sóng.
+             */
+            if (HasStageForSubCheck(subStages, "BOI"))
+            {
+                if (!SameRequiredMaterialForSubCheck(
+                        sub.wave_material_code,
+                        expected.wave_material_code))
+                {
+                    return false;
+                }
+            }
+
+            /*
+             * Không check unit_cost_to_stage.
+             * Không check material_signature.
+             */
+            return true;
+        }
+
+        private static bool HasStageForSubCheck(
+            IReadOnlyList<string> stages,
+            params string[] codes)
+        {
+            if (stages == null || stages.Count == 0)
+                return false;
+
+            var set = codes
+                .Select(NormForSubCheck)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return stages.Any(x => set.Contains(NormForSubCheck(x)));
+        }
+
+        private static bool SameRequiredMaterialForSubCheck(
+            string? actual,
+            string? expected)
+        {
+            var a = NormalizeMaterialCodeForSubCheck(actual);
+            var b = NormalizeMaterialCodeForSubCheck(expected);
+
+            if (string.IsNullOrWhiteSpace(a) ||
+                string.IsNullOrWhiteSpace(b))
+            {
+                return false;
+            }
+
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string? NullIfEmptyForSubCheck(string? value)
+        {
+            return string.IsNullOrWhiteSpace(value)
+                ? null
+                : value.Trim();
         }
     }
 }
