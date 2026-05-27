@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 
 namespace AMMS.Shared.DTOs.Productions
 {
@@ -26,5 +27,20 @@ namespace AMMS.Shared.DTOs.Productions
         public string? reference_inputs_json { get; set; }
 
         public string? outputs_json { get; set; }
+
+        public string? sub_product_leftovers_json { get; set; }
+    }
+
+    public class TaskSubProductLeftoverInputDto
+    {
+        public string? process_code { get; set; }
+
+        public string? process_name { get; set; }
+
+        public string? unit { get; set; } = "sp";
+
+        public decimal quantity_left { get; set; }
+
+        public string? note { get; set; }
     }
 }

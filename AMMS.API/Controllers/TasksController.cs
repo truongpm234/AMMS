@@ -191,6 +191,8 @@ public class TasksController : ControllerBase
     [FromForm] CreateTaskQrFormRequest form,
     CancellationToken ct)
     {
+        List<TaskSubProductLeftoverInputDto> formSubProductLeftovers;
+
         if (form == null)
         {
             return BadRequest(new
@@ -218,6 +220,8 @@ public class TasksController : ControllerBase
             formMaterials = ParseJsonList<TaskMaterialUsageInputDto>(form.materials_json);
             formRefs = ParseJsonList<TaskReferenceUsageInputDto>(form.reference_inputs_json);
             formOutputs = ParseJsonList<TaskOutputReportDto>(form.outputs_json);
+            formSubProductLeftovers = ParseJsonList<TaskSubProductLeftoverInputDto>(form.sub_product_leftovers_json);
+
             imageUrls = await UploadTaskReportImagesAsync(form.images, ct);
         }
         catch (InvalidOperationException ex)
@@ -286,6 +290,25 @@ public class TasksController : ControllerBase
             });
         }
 
+        List<TaskReferenceUsageInputDto> qrReferenceInputs;
+
+        try
+        {
+            qrReferenceInputs = BuildQrReferenceInputsWithSubProductLeftovers(
+                formRefs,
+                formSubProductLeftovers,
+                taskMeta?.process?.process_code,
+                taskMeta?.process?.process_name);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new
+            {
+                message = ex.Message,
+                task_id = req.task_id
+            });
+        }
+
         var isGroupTask =
             taskMeta.prod != null &&
             string.Equals(taskMeta.prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase);
@@ -350,7 +373,7 @@ public class TasksController : ControllerBase
                 useManualInput: true,
                 reason: reason,
                 reportImageUrl: reportImageUrl,
-                referenceInputs: formRefs,
+                referenceInputs: qrReferenceInputs, 
                 outputs: formOutputs);
 
             return Ok(new TaskQrResponse
@@ -435,7 +458,7 @@ public class TasksController : ControllerBase
                 useManualInput: true,
                 reason: reason,
                 reportImageUrl: reportImageUrl,
-                referenceInputs: formRefs,
+                referenceInputs: qrReferenceInputs,
                 outputs: formOutputs);
 
             return Ok(new TaskQrResponse
@@ -543,7 +566,7 @@ public class TasksController : ControllerBase
             useManualInput: false,
             reason: reason,
             reportImageUrl: reportImageUrl,
-            referenceInputs: formRefs,
+            referenceInputs: qrReferenceInputs,
             outputs: formOutputs);
 
         var qrMaterialBundle = await _scanSvc.GetTaskQrMaterialBundleAsync(req.task_id, ct);
@@ -864,5 +887,116 @@ public class TasksController : ControllerBase
         {
             throw new InvalidOperationException("JSON input không hợp lệ.");
         }
+    }
+
+    private static List<TaskReferenceUsageInputDto> BuildQrReferenceInputsWithSubProductLeftovers(
+    List<TaskReferenceUsageInputDto>? referenceInputs,
+    List<TaskSubProductLeftoverInputDto>? subProductLeftovers,
+    string? currentProcessCode,
+    string? currentProcessName)
+    {
+        var result = new List<TaskReferenceUsageInputDto>();
+
+        if (referenceInputs != null && referenceInputs.Count > 0)
+        {
+            result.AddRange(referenceInputs
+                .Where(x => !string.IsNullOrWhiteSpace(x.input_code))
+                .Select(x => new TaskReferenceUsageInputDto
+                {
+                    input_code = x.input_code.Trim(),
+                    input_name = string.IsNullOrWhiteSpace(x.input_name) ? null : x.input_name.Trim(),
+                    unit = string.IsNullOrWhiteSpace(x.unit) ? null : x.unit.Trim(),
+                    quantity_used = Math.Round(x.quantity_used, 4),
+                    quantity_left = Math.Round(x.quantity_left, 4)
+                }));
+        }
+
+        if (subProductLeftovers == null || subProductLeftovers.Count == 0)
+            return result;
+
+        var fallbackCode = NormQrProcessCode(currentProcessCode);
+
+        foreach (var item in subProductLeftovers)
+        {
+            if (item.quantity_left <= 0)
+                continue;
+
+            var code = NormQrProcessCode(item.process_code);
+
+            if (string.IsNullOrWhiteSpace(code))
+                code = fallbackCode;
+
+            if (string.IsNullOrWhiteSpace(code))
+                throw new InvalidOperationException("Không xác định được process_code để nhập BTP dư.");
+
+            if (!CanImportAsSubProductStage(code))
+            {
+                throw new InvalidOperationException(
+                    $"Không cho phép nhập kho bán thành phẩm ở công đoạn {code}. " +
+                    $"Chỉ cho phép RALO,CAT,IN,PHU,CAN,CAN_MANG,BOI,BE,DUT. DAN là thành phẩm, không nhập vào sub_product.");
+            }
+
+            result.Add(new TaskReferenceUsageInputDto
+            {
+                input_code = code,
+                input_name = string.IsNullOrWhiteSpace(item.process_name)
+                    ? $"BTP dư sau công đoạn {code}"
+                    : item.process_name.Trim(),
+
+                unit = string.IsNullOrWhiteSpace(item.unit)
+                    ? "sp"
+                    : item.unit.Trim(),
+
+                quantity_used = 0,
+                quantity_left = Math.Round(item.quantity_left, 4)
+            });
+        }
+
+        return result
+    .Where(x => !string.IsNullOrWhiteSpace(x.input_code))
+    .GroupBy(x => new
+    {
+        input_code = NormQrProcessCode(x.input_code),
+        unit = (x.unit ?? "sp").Trim().ToLowerInvariant()
+    })
+    .Select(g =>
+    {
+        var first = g.First();
+
+        return new TaskReferenceUsageInputDto
+        {
+            input_code = g.Key.input_code,
+            input_name = first.input_name,
+            unit = first.unit,
+            quantity_used = Math.Round(g.Sum(x => x.quantity_used), 4),
+            quantity_left = Math.Round(g.Sum(x => x.quantity_left), 4)
+        };
+    })
+    .ToList();
+    }
+
+    private static string NormQrProcessCode(string? value)
+    {
+        return (value ?? "")
+            .Trim()
+            .ToUpperInvariant()
+            .Replace(" ", "_")
+            .Replace("-", "_");
+    }
+
+    private static bool CanImportAsSubProductStage(string? processCode)
+    {
+        var code = NormQrProcessCode(processCode);
+
+        return code is
+            "RALO" or
+            "CAT" or
+            "IN" or
+            "PHU" or
+            "CAN" or
+            "CAN_MANG" or
+            "BOI" or
+            "BE" or
+            "DUT";
     }
 }

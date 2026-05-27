@@ -103,9 +103,9 @@ namespace AMMS.Application.Services
 
             var normalizedReferenceInputs = NormalizeReferenceInputs(payload.reference_inputs);
 
-            var referenceInputJson = manualMode && normalizedReferenceInputs.Count > 0
-                ? JsonSerializer.Serialize(normalizedReferenceInputs, _jsonOptions)
-                : null;
+            var referenceInputJson = normalizedReferenceInputs.Count > 0
+    ? JsonSerializer.Serialize(normalizedReferenceInputs, _jsonOptions)
+    : null;
 
             if (isGroupTask)
             {
@@ -479,131 +479,367 @@ namespace AMMS.Application.Services
             if (prod == null)
                 return;
 
-            var sourceOrderId = prod.order_id;
-
-            /*
-             * GROUP production không có order_id trực tiếp.
-             * Lấy order đầu tiên trong prod_orders để lấy product_type/size.
-             */
-            if (!sourceOrderId.HasValue)
-            {
-                sourceOrderId = await _db.prod_orders
-                    .AsNoTracking()
-                    .Where(x =>
-                        x.prod_id == prod.prod_id &&
-                        x.status == "Active")
-                    .OrderBy(x => x.order_id)
-                    .Select(x => (int?)x.order_id)
-                    .FirstOrDefaultAsync(ct);
-            }
-
-            var shape = sourceOrderId.HasValue
-    ? await (
-        from oi in _db.order_items.AsNoTracking()
-        join req0 in _db.order_requests.AsNoTracking()
-            on oi.order_id equals req0.order_id into reqj
-        from req0 in reqj.DefaultIfEmpty()
-        where oi.order_id == sourceOrderId.Value
-        orderby oi.item_id
-        select new
-        {
-            oi.product_type_id,
-
-            // Chuẩn chung của sub_product là kích thước bản in.
-            print_width = req0 != null ? req0.print_width_mm : null,
-            print_length = req0 != null ? req0.print_length_mm : null,
-
-            // Fallback nếu request chưa có print size.
-            item_width = EF.Property<int?>(oi, "width_mm"),
-            item_length = EF.Property<int?>(oi, "length_mm")
-        }
-    ).FirstOrDefaultAsync(ct)
-    : null;
-
-            var productTypeId = prod.product_type_id ?? shape?.product_type_id;
-
-            var subWidth = shape?.print_width;
-            var subLength = shape?.print_length;
-
-            if (!subWidth.HasValue || subWidth.Value <= 0)
-                subWidth = shape?.item_width;
-
-            if (!subLength.HasValue || subLength.Value <= 0)
-                subLength = shape?.item_length;
-
-            if (!productTypeId.HasValue || productTypeId.Value <= 0)
-                return;
+            var isGroup = string.Equals(
+                prod.prod_kind,
+                "GROUP",
+                StringComparison.OrdinalIgnoreCase);
 
             foreach (var input in leftovers)
             {
-                var qty = ToSubProductQty(input.quantity_left);
-                if (qty <= 0)
+                var totalQty = ToSubProductQty(input.quantity_left);
+                if (totalQty <= 0)
                     continue;
 
-                /*
-                 * input.input_code là stage BTP bị dư.
-                 * Ví dụ input_code=IN => product_process phải là RALO,CAT,IN.
-                 */
                 var targetProcessCode = NormSubProductProcess(input.input_code);
 
                 if (string.IsNullOrWhiteSpace(targetProcessCode))
                     continue;
 
-                var processPath = await ResolveSubProductProcessPathAsync(
-                    sourceOrderId,
-                    prod.prod_id,
-                    targetProcessCode,
+                /*
+                 * DAN là thành phẩm, không nên nhập vào sub_product.
+                 */
+                if (!CanCreateSubProductAtStage(targetProcessCode))
+                    continue;
+
+                if (isGroup)
+                {
+                    await CreatePendingGroupSubProductsFromLeftoverAsync(
+                        prod,
+                        currentTask,
+                        finishLog,
+                        input,
+                        targetProcessCode,
+                        totalQty,
+                        now,
+                        ct);
+                }
+                else
+                {
+                    if (!prod.order_id.HasValue || prod.order_id.Value <= 0)
+                        continue;
+
+                    await CreatePendingSubProductForOrderAsync(
+                        sourceOrderId: prod.order_id.Value,
+                        sourceProdId: prod.prod_id,
+                        currentTask: currentTask,
+                        finishLog: finishLog,
+                        targetProcessCode: targetProcessCode,
+                        qty: totalQty,
+                        originalQtyLeft: input.quantity_left,
+                        now: now,
+                        ct: ct);
+                }
+            }
+        }
+
+        private async Task CreatePendingGroupSubProductsFromLeftoverAsync(
+    production groupProd,
+    task currentTask,
+    task_log finishLog,
+    TaskReferenceUsageInputDto input,
+    string targetProcessCode,
+    int totalQty,
+    DateTime now,
+    CancellationToken ct)
+        {
+            var links = await _db.task_links
+                .AsNoTracking()
+                .Where(x =>
+                    x.group_task_id == currentTask.task_id &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
+                .OrderBy(x => x.id)
+                .ToListAsync(ct);
+
+            if (links.Count == 0)
+                return;
+
+            /*
+             * Phải dùng cùng logic phân bổ với MirrorGroupFinishToSingleTasksAsync
+             * để task_qtys và sub_product pending không lệch nhau.
+             */
+            var allocations = await AllocateGroupLeftoverQtyByExpectedOutputAsync(
+                currentTask,
+                totalQty,
+                links,
+                ct);
+
+            foreach (var kv in allocations)
+            {
+                var orderId = kv.Key;
+                var qtyForOrder = kv.Value;
+
+                if (qtyForOrder <= 0)
+                    continue;
+
+                await CreatePendingSubProductForOrderAsync(
+                    sourceOrderId: orderId,
+                    sourceProdId: groupProd.prod_id,
+                    currentTask: currentTask,
+                    finishLog: finishLog,
+                    targetProcessCode: targetProcessCode,
+                    qty: qtyForOrder,
+                    originalQtyLeft: input.quantity_left,
+                    now: now,
+                    ct: ct);
+            }
+        }
+
+        private async Task<Dictionary<int, int>> AllocateGroupLeftoverQtyByExpectedOutputAsync(
+    task groupTask,
+    int totalQty,
+    List<task_link> links,
+    CancellationToken ct)
+        {
+            var weights = new List<(int orderId, decimal weight)>();
+
+            foreach (var link in links)
+            {
+                var ctx = await GetGroupLinkEstimateContextAsync(
+                    groupTask,
+                    link,
                     ct);
 
-                if (string.IsNullOrWhiteSpace(processPath))
-                    processPath = targetProcessCode;
-
-                var signature = sourceOrderId.HasValue
-                    ? await SubProductCompatibilityHelper.BuildSignatureForOrderStageAsync(
-                        _db,
-                        sourceOrderId.Value,
-                        processPath,
-                        qty,
-                        ct)
-                    : null;
-
-                var pending = new sub_product
+                if (ctx == null)
                 {
-                    product_type_id = productTypeId.Value,
-                    width = subWidth,
-                    length = subLength,
-                    product_process = processPath,
-                    quantity = qty,
+                    weights.Add((link.order_id, Math.Max(link.qty_plan, 1)));
+                    continue;
+                }
 
-                    is_active = false,
-                    is_imported = false,
+                var route = await ResolveRouteProcessCodesForOrderAsync(
+                    link.order_id,
+                    ct);
 
-                    source_task_id = currentTask.task_id,
-                    source_task_log_id = finishLog.log_id > 0 ? finishLog.log_id : null,
-                    source_prod_id = prod.prod_id,
-                    source_order_id = sourceOrderId,
-                    source_process_code = targetProcessCode,
+                var currentCode = link.process_code ?? groupTask.process?.process_code;
 
-                    paper_material_code = signature?.paper_material_code,
-                    wave_material_code = signature?.wave_material_code,
-                    coating_material_code = signature?.coating_material_code,
-                    lamination_material_code = signature?.lamination_material_code,
-                    material_signature = signature?.material_signature,
+                var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
+                    ctx,
+                    currentCode,
+                    route,
+                    link.qty_plan,
+                    ct);
 
-                    cost_estimate_id = signature?.cost_estimate_id,
-                    unit_cost_to_stage = signature?.unit_cost_to_stage ?? 0m,
-                    total_cost_to_stage = signature?.total_cost_to_stage ?? 0m,
+                var weight = stageQty?.output_qty ?? Math.Max(link.qty_plan, 1);
 
-                    description =
-                        $"BTP dư từ task_id={currentTask.task_id}, prod_id={prod.prod_id}, " +
-                        $"target_process={targetProcessCode}, product_process={processPath}, " +
-                        $"qty_left={input.quantity_left}, unit_cost={signature?.unit_cost_to_stage ?? 0m}, " +
-                        $"total_cost={signature?.total_cost_to_stage ?? 0m}, tạo lúc {now:yyyy-MM-dd HH:mm:ss}.",
-
-                    updated_at = now
-                };
-                await _db.sub_products.AddAsync(pending, ct);
+                weights.Add((link.order_id, weight));
             }
+
+            return AllocateQtyByWeights(totalQty, weights);
+        }
+
+        private async Task CreatePendingSubProductForOrderAsync(
+            int sourceOrderId,
+            int sourceProdId,
+            task currentTask,
+            task_log finishLog,
+            string targetProcessCode,
+            int qty,
+            decimal originalQtyLeft,
+            DateTime now,
+            CancellationToken ct)
+        {
+            if (sourceOrderId <= 0 || qty <= 0)
+                return;
+
+            var shape = await LoadSubProductShapeForOrderAsync(sourceOrderId, ct);
+            if (shape == null)
+                return;
+
+            if (!shape.product_type_id.HasValue || shape.product_type_id.Value <= 0)
+                return;
+
+            var subWidth = shape.print_width;
+            var subLength = shape.print_length;
+
+            if (!subWidth.HasValue || subWidth.Value <= 0)
+                subWidth = shape.item_width;
+
+            if (!subLength.HasValue || subLength.Value <= 0)
+                subLength = shape.item_length;
+
+            var processPath = await ResolveSubProductProcessPathAsync(
+                sourceOrderId,
+                sourceProdId,
+                targetProcessCode,
+                ct);
+
+            if (string.IsNullOrWhiteSpace(processPath))
+                processPath = targetProcessCode;
+
+            var signature = await SubProductCompatibilityHelper.BuildSignatureForOrderStageAsync(
+                _db,
+                sourceOrderId,
+                processPath,
+                qty,
+                ct);
+
+            var pending = new sub_product
+            {
+                product_type_id = shape.product_type_id.Value,
+                width = subWidth,
+                length = subLength,
+                product_process = processPath,
+                quantity = qty,
+
+                /*
+                 * Chưa nhập kho thật.
+                 * Warehouse sẽ xác nhận bằng API import-pending.
+                 */
+                is_active = false,
+                is_imported = false,
+
+                source_task_id = currentTask.task_id,
+                source_task_log_id = finishLog.log_id > 0 ? finishLog.log_id : null,
+                source_prod_id = sourceProdId,
+                source_order_id = sourceOrderId,
+                source_process_code = targetProcessCode,
+
+                paper_material_code = signature?.paper_material_code,
+                wave_material_code = signature?.wave_material_code,
+                coating_material_code = signature?.coating_material_code,
+                lamination_material_code = signature?.lamination_material_code,
+                material_signature = signature?.material_signature,
+
+                cost_estimate_id = signature?.cost_estimate_id,
+                unit_cost_to_stage = signature?.unit_cost_to_stage ?? 0m,
+                total_cost_to_stage = signature?.total_cost_to_stage ?? 0m,
+
+                description =
+                    $"BTP dư từ task_id={currentTask.task_id}, prod_id={sourceProdId}, order_id={sourceOrderId}, " +
+                    $"target_process={targetProcessCode}, product_process={processPath}, " +
+                    $"qty_import={qty}, original_qty_left={originalQtyLeft}, " +
+                    $"unit_cost={signature?.unit_cost_to_stage ?? 0m}, " +
+                    $"total_cost={signature?.total_cost_to_stage ?? 0m}, tạo lúc {now:yyyy-MM-dd HH:mm:ss}.",
+
+                updated_at = now
+            };
+
+            await _db.sub_products.AddAsync(pending, ct);
+        }
+
+        private sealed class SubProductOrderShape
+        {
+            public int? product_type_id { get; set; }
+
+            public int? print_width { get; set; }
+
+            public int? print_length { get; set; }
+
+            public int? item_width { get; set; }
+
+            public int? item_length { get; set; }
+        }
+
+        private async Task<SubProductOrderShape?> LoadSubProductShapeForOrderAsync(
+            int orderId,
+            CancellationToken ct)
+        {
+            return await (
+                from oi in _db.order_items.AsNoTracking()
+                join req0 in _db.order_requests.AsNoTracking()
+                    on oi.order_id equals req0.order_id into reqj
+                from req0 in reqj.DefaultIfEmpty()
+                where oi.order_id == orderId
+                orderby oi.item_id
+                select new SubProductOrderShape
+                {
+                    product_type_id = oi.product_type_id,
+
+                    /*
+                     * Chuẩn sub_product dùng print size.
+                     */
+                    print_width = req0 != null ? req0.print_width_mm : null,
+                    print_length = req0 != null ? req0.print_length_mm : null,
+
+                    /*
+                     * Fallback nếu request chưa có print size.
+                     */
+                    item_width = EF.Property<int?>(oi, "width_mm"),
+                    item_length = EF.Property<int?>(oi, "length_mm")
+                }
+            ).FirstOrDefaultAsync(ct);
+        }
+
+        private static Dictionary<int, int> AllocateGroupLeftoverQtyByOrder(
+            int totalQty,
+            List<task_link> links)
+        {
+            var result = new Dictionary<int, int>();
+
+            if (totalQty <= 0 || links == null || links.Count == 0)
+                return result;
+
+            var orderPlans = links
+                .Where(x => x.order_id > 0)
+                .GroupBy(x => x.order_id)
+                .Select(g => new
+                {
+                    order_id = g.Key,
+                    qty_plan = g.Sum(x => Math.Max(x.qty_plan, 0))
+                })
+                .Where(x => x.qty_plan > 0)
+                .OrderBy(x => x.order_id)
+                .ToList();
+
+            if (orderPlans.Count == 0)
+                return result;
+
+            var totalPlan = orderPlans.Sum(x => x.qty_plan);
+
+            if (totalPlan <= 0)
+                return result;
+
+            var remaining = totalQty;
+
+            for (var i = 0; i < orderPlans.Count; i++)
+            {
+                var item = orderPlans[i];
+
+                int qty;
+
+                if (i == orderPlans.Count - 1)
+                {
+                    qty = remaining;
+                }
+                else
+                {
+                    qty = (int)Math.Round(
+                        totalQty * (item.qty_plan / (decimal)totalPlan),
+                        MidpointRounding.AwayFromZero);
+
+                    if (qty < 0)
+                        qty = 0;
+
+                    if (qty > remaining)
+                        qty = remaining;
+                }
+
+                result[item.order_id] = qty;
+                remaining -= qty;
+            }
+
+            return result;
+        }
+
+        private static bool CanCreateSubProductAtStage(string? processCode)
+        {
+            var code = NormSubProductProcess(processCode);
+
+            /*
+             * Không đưa DAN vào sub_product vì DAN là thành phẩm sau dán.
+             */
+            return code is
+                "RALO" or
+                "CAT" or
+                "IN" or
+                "PHU" or
+                "CAN" or
+                "CAN_MANG" or
+                "BOI" or
+                "BE" or
+                "DUT";
         }
 
         private async Task<string> ResolveSubProductProcessPathAsync(
@@ -1480,6 +1716,11 @@ namespace AMMS.Application.Services
                 routeProcessCodes: routeCodes,
                 ctx: ctx);
 
+            var actualQtyPrevStage = await ResolveActualOutputQtyForOrderProcessAsync(
+                link.order_id,
+                previousCode,
+                ct);
+
             return new List<TaskReferenceInputDto>
     {
         new TaskReferenceInputDto
@@ -1487,7 +1728,8 @@ namespace AMMS.Application.Services
             input_code = previousCode,
             input_name = $"Bán thành phẩm từ công đoạn {previousCode}",
             unit = shape.unit,
-            estimated_qty = Math.Round(shape.qty, 4)
+            estimated_qty = Math.Round(shape.qty, 4),
+            actual_qty_prev_stage = Math.Round(actualQtyPrevStage, 4)
         }
     };
         }
@@ -1798,11 +2040,190 @@ namespace AMMS.Application.Services
                         input_code = first.input_code,
                         input_name = first.input_name,
                         unit = first.unit,
-                        estimated_qty = Math.Round(g.Sum(x => x.estimated_qty), 4)
+                        estimated_qty = Math.Round(g.Sum(x => x.estimated_qty), 4),
+                        actual_qty_prev_stage = Math.Round(g.Sum(x => x.actual_qty_prev_stage), 4)
                     };
                 })
                 .OrderBy(x => x.input_code)
                 .ToList();
+        }
+
+        private async Task<decimal> ResolveActualQtyPrevStageForTaskAsync(
+    TaskEstimateContext ctx,
+    string? previousProcessCode,
+    CancellationToken ct)
+        {
+            var previousCode = ProductionFlowHelper.Norm(previousProcessCode);
+
+            if (string.IsNullOrWhiteSpace(previousCode))
+                return 0m;
+
+            /*
+             * SINGLE/SPLIT thường có order_id.
+             * Lấy actual theo order + process để bao phủ cả các case:
+             * - previous task nằm trong cùng production
+             * - previous stage là GROUP, lưu ở task_qtys
+             * - previous stage được auto Finished do SUB_PRODUCT
+             */
+            if (ctx.Production.order_id.HasValue && ctx.Production.order_id.Value > 0)
+            {
+                return await ResolveActualOutputQtyForOrderProcessAsync(
+                    ctx.Production.order_id.Value,
+                    previousCode,
+                    ct);
+            }
+
+            /*
+             * Fallback nếu production không có order_id.
+             */
+            if (ctx.Task.prod_id.HasValue)
+            {
+                return await ResolveActualOutputQtyInProductionAsync(
+                    ctx.Task.prod_id.Value,
+                    previousCode,
+                    ct);
+            }
+
+            return 0m;
+        }
+
+        private async Task<decimal> ResolveActualOutputQtyForOrderProcessAsync(
+            int orderId,
+            string? processCode,
+            CancellationToken ct)
+        {
+            var code = ProductionFlowHelper.Norm(processCode);
+
+            if (orderId <= 0 || string.IsNullOrWhiteSpace(code))
+                return 0m;
+
+            /*
+             * Ưu tiên 1:
+             * Nếu công đoạn trước là GROUP, sản lượng theo từng order nằm ở task_qtys.
+             */
+            var groupQty = await _db.task_qtys
+                .AsNoTracking()
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.process_code != null &&
+                    x.process_code.Trim().ToUpper() == code &&
+                    x.qty_good > 0)
+                .OrderByDescending(x => x.created_at)
+                .Select(x => (decimal?)x.qty_good)
+                .FirstOrDefaultAsync(ct);
+
+            if (groupQty.HasValue && groupQty.Value > 0)
+                return groupQty.Value;
+
+            /*
+             * Ưu tiên 2:
+             * Công đoạn trước là task trực tiếp của production có order_id.
+             * Bao gồm SINGLE/SPLIT và task tự Finished do SUB_PRODUCT.
+             */
+            var directTaskIds = await (
+                from t in _db.tasks.AsNoTracking()
+
+                join p in _db.productions.AsNoTracking()
+                    on t.prod_id equals p.prod_id
+
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                where p.order_id == orderId
+                      && p.status != "Cancelled"
+                      && pp != null
+                      && pp.process_code != null
+                      && pp.process_code.Trim().ToUpper() == code
+
+                select t.task_id
+            )
+            .Distinct()
+            .ToListAsync(ct);
+
+            if (directTaskIds.Count == 0)
+                return 0m;
+
+            return await ResolveActualOutputQtyFromTaskLogsAsync(
+                directTaskIds,
+                ct);
+        }
+
+        private async Task<decimal> ResolveActualOutputQtyInProductionAsync(
+            int prodId,
+            string? processCode,
+            CancellationToken ct)
+        {
+            var code = ProductionFlowHelper.Norm(processCode);
+
+            if (prodId <= 0 || string.IsNullOrWhiteSpace(code))
+                return 0m;
+
+            var taskIds = await (
+                from t in _db.tasks.AsNoTracking()
+
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                where t.prod_id == prodId
+                      && pp != null
+                      && pp.process_code != null
+                      && pp.process_code.Trim().ToUpper() == code
+
+                select t.task_id
+            )
+            .Distinct()
+            .ToListAsync(ct);
+
+            if (taskIds.Count == 0)
+                return 0m;
+
+            return await ResolveActualOutputQtyFromTaskLogsAsync(
+                taskIds,
+                ct);
+        }
+
+        private async Task<decimal> ResolveActualOutputQtyFromTaskLogsAsync(
+            List<int> taskIds,
+            CancellationToken ct)
+        {
+            if (taskIds == null || taskIds.Count == 0)
+                return 0m;
+
+            /*
+             * Mỗi task thường chỉ có 1 log Finished.
+             * Nếu có nhiều task cùng process/order, lấy log mới nhất theo từng task rồi cộng.
+             */
+            var logs = await _db.task_logs
+                .AsNoTracking()
+                .Where(x =>
+                    x.task_id.HasValue &&
+                    taskIds.Contains(x.task_id.Value) &&
+                    x.action_type == "Finished" &&
+                    x.qty_good.HasValue &&
+                    x.qty_good.Value > 0)
+                .Select(x => new
+                {
+                    task_id = x.task_id!.Value,
+                    qty_good = x.qty_good!.Value,
+                    log_time = x.log_time,
+                    log_id = x.log_id
+                })
+                .ToListAsync(ct);
+
+            if (logs.Count == 0)
+                return 0m;
+
+            var latestPerTask = logs
+                .GroupBy(x => x.task_id)
+                .Select(g => g
+                    .OrderByDescending(x => x.log_time ?? DateTime.MinValue)
+                    .ThenByDescending(x => x.log_id)
+                    .First())
+                .ToList();
+
+            return latestPerTask.Sum(x => (decimal)x.qty_good);
         }
 
         private static string RemoveDiacritics(string? text)
@@ -2141,13 +2562,13 @@ namespace AMMS.Application.Services
             var currentStageIndex = previousCtx.previous_stage_index + 1;
 
             var methodShape = await TryResolveReferenceInputShapeByProductionMethodAsync(
-    ctx: ctx,
-    currentProcessCode: currentCode,
-    previousProcessCode: previousCtx.previous_process_code,
-    currentStageIndex: currentStageIndex,
-    routeProcessCodes: previousCtx.route_process_codes,
-    linkQtyPlan: null,
-    ct: ct);
+                ctx: ctx,
+                currentProcessCode: currentCode,
+                previousProcessCode: previousCtx.previous_process_code,
+                currentStageIndex: currentStageIndex,
+                routeProcessCodes: previousCtx.route_process_codes,
+                linkQtyPlan: null,
+                ct: ct);
 
             var shape = methodShape ?? ResolveReferenceInputShape(
                 currentProcessCode: currentCode,
@@ -2157,6 +2578,11 @@ namespace AMMS.Application.Services
 
             var unit = shape.unit;
             var qty = shape.qty;
+
+            var actualQtyPrevStage = await ResolveActualQtyPrevStageForTaskAsync(
+                ctx,
+                previousCtx.previous_process_code,
+                ct);
 
             var result = new List<TaskReferenceInputDto>();
 
@@ -2175,7 +2601,8 @@ namespace AMMS.Application.Services
                         input_code = previousCtx.previous_process_code,
                         input_name = $"Bán thành phẩm từ công đoạn {previousCtx.previous_process_code}",
                         unit = unit,
-                        estimated_qty = Math.Round(qty, 4)
+                        estimated_qty = Math.Round(qty, 4),
+                        actual_qty_prev_stage = Math.Round(actualQtyPrevStage, 4)
                     });
                     break;
             }

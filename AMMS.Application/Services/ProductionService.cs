@@ -85,126 +85,6 @@ namespace AMMS.Application.Services
             return _repo.GetProducingOrdersAsync(page, pageSize, ct);
         }
 
-        private async Task FillCanStartForProductionsAsync(
-    List<ProducingOrderCardDto> items,
-    CancellationToken ct)
-        {
-            if (items == null || items.Count == 0)
-                return;
-
-            foreach (var item in items)
-            {
-                if (item.prod_id <= 0)
-                {
-                    item.can_start = false;
-                    item.can_start_message = "Production id không hợp lệ.";
-                    continue;
-                }
-
-                var status = item.production_status ?? item.status;
-
-                var isWaitingToStart =
-                    string.Equals(status, "Scheduled", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(status, "Unassigned", StringComparison.OrdinalIgnoreCase);
-
-                if (!isWaitingToStart)
-                {
-                    item.can_start = false;
-                    item.can_start_message = status switch
-                    {
-                        "InProcessing" => "Production đã bắt đầu.",
-                        "Importing" => "Production đã hoàn tất sản xuất, đang chờ nhập kho.",
-                        "Delivery" => "Production đã chuyển giao hàng.",
-                        "Completed" => "Production đã hoàn thành.",
-                        "Cancelled" => "Production đã bị hủy.",
-                        _ => $"Production không ở trạng thái có thể bắt đầu. Trạng thái hiện tại: {status ?? "null"}."
-                    };
-
-                    continue;
-                }
-
-                //Case SUB
-
-                var waitingImporting = await IsFinishedSubHeadProductionWaitingImportingAsync(
-                    item.prod_id,
-                    ct);
-
-                if (waitingImporting)
-                {
-                    item.can_start = false;
-                    item.can_start_message =
-                        $"Production {item.prod_id} là production đầu RALO,CAT,IN đã Finished toàn bộ task " +
-                        "nhưng production_status chưa Importing. " +
-                        $"Gọi PUT /api/Productions/mark-importing/{item.prod_id} trước.";
-                    continue;
-                }
-
-                var isGroup =
-                    string.Equals(item.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase);
-
-                if (isGroup)
-                {
-                    var memberOrders = await (
-                        from po in _db.prod_orders.AsNoTracking()
-                        join o in _db.orders.AsNoTracking()
-                            on po.order_id equals o.order_id
-                        where po.prod_id == item.prod_id
-                              && po.status == "Active"
-                        select new
-                        {
-                            o.order_id,
-                            o.code,
-                            o.is_production_ready
-                        }
-                    ).ToListAsync(ct);
-
-                    if (memberOrders.Count < 2)
-                    {
-                        item.can_start = false;
-                        item.can_start_message = "Production ghép cần ít nhất 2 order active.";
-                        continue;
-                    }
-
-                    var notReady = memberOrders
-                        .Where(x => !x.is_production_ready)
-                        .ToList();
-
-                    if (notReady.Count > 0)
-                    {
-                        item.can_start = false;
-                        item.can_start_message =
-                            "Không thể bắt đầu production ghép vì còn order chưa được xác nhận sẵn sàng sản xuất: " +
-                            string.Join(", ", notReady.Select(x => $"{x.order_id}-{x.code}"));
-                        continue;
-                    }
-                }
-                else if (item.is_production_ready == false)
-                {
-                    item.can_start = false;
-                    item.can_start_message = "Order chưa được xác nhận sẵn sàng sản xuất.";
-                    continue;
-                }
-
-                try
-                {
-                    var dep = await ProductionDependencyValidator.CheckProductionCanStartAsync(
-                        _db,
-                        item.prod_id,
-                        ct);
-
-                    item.can_start = dep.can_start;
-                    item.can_start_message = dep.can_start
-                        ? "Có thể bắt đầu production."
-                        : dep.message;
-                }
-                catch (Exception ex)
-                {
-                    item.can_start = false;
-                    item.can_start_message = ex.Message;
-                }
-            }
-        }
-
         public async Task<ProductionProgressResponse> GetProgressAsync(int prodId)
         {
             return await _repo.GetProgressAsync(prodId);
@@ -484,12 +364,12 @@ namespace AMMS.Application.Services
             }
 
             var methodCostOptions = await BuildMethodCostOptionsAsync(
-                orderId,
-                orderQty,
-                item?.production_process,
-                bestSubEnoughOption,
-                bestSubPartialOption,
-                ct);
+    orderId,
+    orderQty,
+    item?.production_process,
+    bestSubEnoughOption,
+    bestSubPartialOption,
+    ct);
 
             foreach (var option in methodCostOptions)
             {
@@ -502,6 +382,10 @@ namespace AMMS.Application.Services
                 if (string.Equals(option.method, "BOTH", StringComparison.OrdinalIgnoreCase))
                     option.is_available = canUseBoth;
             }
+
+            NormalizeStartReadyCostOptionsByRoundedTotal(
+                methodCostOptions,
+                orderQty);
 
             var nvlCost = methodCostOptions
                 .FirstOrDefault(x => string.Equals(x.method, "NVL", StringComparison.OrdinalIgnoreCase));
@@ -516,58 +400,51 @@ namespace AMMS.Application.Services
             {
                 order_id = orderId,
                 production_id = prod?.prod_id,
-
                 is_production_ready = ord.is_production_ready,
                 has_enough_material = hasEnoughMaterial,
                 has_free_machine = hasFreeMachine,
-
                 materials = fullMaterials,
                 remaining_materials_for_both = remainingMaterialsForBoth,
                 machines = machines,
-
                 product_type_id = prod?.product_type_id ?? item?.product_type_id,
                 request_print_width_mm = req?.print_width_mm,
                 request_print_length_mm = req?.print_length_mm,
                 order_quantity = orderQty,
-
                 production_approval_flow = prod?.production_approval_flow,
                 is_auto_production_approval = ProductionApprovalFlowHelper.IsAuto(prod?.production_approval_flow),
                 production_approval_label = ProductionApprovalFlowHelper.Label(prod?.production_approval_flow),
-
                 is_full_process = prod?.is_full_process,
                 production_method = prod?.prod_method,
-
                 gm_proposed_method = prod?.gm_proposed_method,
                 proposed_production_method = prod?.gm_proposed_method,
                 sub_product_issue_file = prod?.sub_product_issue_file,
-
                 gm_note = prod?.gm_note,
                 mgr_note = prod?.mgr_note,
-
                 can_use_nvl = canUseNvl,
                 can_use_sub = canUseSub,
                 can_use_both = canUseBoth,
-
                 need_manager_approval = needManagerApproval,
-
                 nvl_qty = prod?.nvl_qty ?? nvlQtyForBoth,
-
                 selected_sub_product_id = prod?.sub_product_id ?? displaySubOption?.Sub.id,
                 sub_product_used_qty = prod?.sub_product_used_qty ?? 0,
-
                 has_matched_sub_product = hasMatchedSubProduct,
                 sub_product_message = subMessage,
                 matched_sub_product = matchedSubProduct,
-
                 method_cost_options = methodCostOptions,
-
                 nvl_estimated_unit_cost = nvlCost?.unit_cost,
-                sub_estimated_unit_cost = subCost?.is_available == true ? subCost.unit_cost : null,
-                both_estimated_unit_cost = bothCost?.is_available == true ? bothCost.unit_cost : null,
-
+                sub_estimated_unit_cost = subCost?.is_available == true
+                ? subCost.unit_cost
+                : null,
+                both_estimated_unit_cost = bothCost?.is_available == true
+                ? bothCost.unit_cost
+                : null,
                 nvl_estimated_total_cost = nvlCost?.total_cost,
-                sub_estimated_total_cost = subCost?.is_available == true ? subCost.total_cost : null,
-                both_estimated_total_cost = bothCost?.is_available == true ? bothCost.total_cost : null
+                sub_estimated_total_cost = subCost?.is_available == true
+                ? subCost.total_cost
+                : null,
+                both_estimated_total_cost = bothCost?.is_available == true
+                ? bothCost.total_cost
+                : null
             };
         }
 
@@ -1439,60 +1316,6 @@ namespace AMMS.Application.Services
                 .OrderBy(x => x.seq_num ?? int.MaxValue)
                 .ThenBy(x => x.process_id ?? int.MaxValue)
                 .ToList();
-        }
-
-        private async Task<MatchedSubProductDto?> FindMatchedSubProductAsync(int orderId, CancellationToken ct = default)
-        {
-            var prod = await _db.productions
-                .AsNoTracking()
-                .Where(x => x.order_id == orderId)
-                .OrderByDescending(x => x.prod_id)
-                .FirstOrDefaultAsync(ct);
-
-            if (prod == null || !prod.product_type_id.HasValue)
-                return null;
-
-            var req = await _db.order_requests
-                .AsNoTracking()
-                .Where(x => x.order_id == orderId)
-                .OrderByDescending(x => x.order_request_id)
-                .FirstOrDefaultAsync(ct);
-
-            if (req == null)
-                return null;
-
-            var printWidth = req.print_width_mm;
-            var printLength = req.print_length_mm;
-
-            if (!printWidth.HasValue || !printLength.HasValue)
-                return null;
-
-            return await _db.sub_products
-                .AsNoTracking()
-                .Include(x => x.product_type)
-                .Where(x =>
-                    x.is_active == true &&
-                    x.product_type_id == prod.product_type_id.Value &&
-                    x.width == printWidth.Value &&
-                    x.length == printLength.Value &&
-                    x.quantity > 0)
-                .OrderByDescending(x => x.quantity)
-                .ThenByDescending(x => x.updated_at)
-                .ThenByDescending(x => x.id)
-                .Select(x => new MatchedSubProductDto
-                {
-                    id = x.id,
-                    product_type_id = x.product_type_id,
-                    product_type_name = x.product_type != null ? x.product_type.name : null,
-                    width = x.width,
-                    length = x.length,
-                    product_process = x.product_process,
-                    quantity = x.quantity,
-                    is_active = x.is_active,
-                    description = x.description,
-                    updated_at = x.updated_at
-                })
-                .FirstOrDefaultAsync(ct);
         }
 
         public async Task<GenerateImportReceiveBatchResponse?> GenerateImportReceiveAsync(
@@ -3911,6 +3734,108 @@ namespace AMMS.Application.Services
              */
             return subPath.Any(x =>
                 x is "CAT" or "IN" or "PHU" or "CAN" or "CAN_MANG" or "BOI" or "BE" or "DUT" or "DAN");
+        }
+
+        private static decimal RoundTotalMoneyDownToThousands(decimal value)
+        {
+            /*
+             * Làm tròn xuống hàng nghìn.
+             * Ví dụ:
+             * 7,654,321 => 7,654,000
+             * 7,654,999 => 7,654,000
+             */
+            if (value <= 0m)
+                return 0m;
+
+            return Math.Floor(value / 1000m) * 1000m;
+        }
+
+        private static decimal? RoundTotalMoneyDownToThousands(decimal? value)
+        {
+            if (!value.HasValue)
+                return null;
+
+            return RoundTotalMoneyDownToThousands(value.Value);
+        }
+
+        private static decimal CalculateUnitCostFromRoundedTotal(
+            decimal roundedTotalCost,
+            int quantity)
+        {
+            quantity = quantity > 0 ? quantity : 1;
+
+            /*
+             * Unit cũng là VND nên trả số nguyên.
+             * Nếu bạn muốn giữ số lẻ unit cost thì bỏ Math.Round ở đây.
+             */
+            return Math.Round(
+                roundedTotalCost / quantity,
+                0,
+                MidpointRounding.AwayFromZero);
+        }
+
+        private static void NormalizeStartReadyCostOptionsByRoundedTotal(
+            List<ProductionMethodCostOptionDto> options,
+            int orderQty)
+        {
+            if (options == null || options.Count == 0)
+                return;
+
+            orderQty = orderQty > 0 ? orderQty : 1;
+
+            /*
+             * 1. Làm tròn total_cost của từng method xuống hàng nghìn.
+             * 2. Tính lại unit_cost từ total_cost đã làm tròn.
+             */
+            foreach (var option in options)
+            {
+                if (option.total_cost > 0m)
+                {
+                    option.total_cost = RoundTotalMoneyDownToThousands(option.total_cost);
+                    option.unit_cost = CalculateUnitCostFromRoundedTotal(
+                        option.total_cost,
+                        orderQty);
+                }
+                else
+                {
+                    option.total_cost = 0m;
+                    option.unit_cost = 0m;
+                }
+            }
+
+            /*
+             * 3. Tính lại saving dựa trên total_cost đã làm tròn.
+             * Không dùng saving cũ vì saving cũ đang tính từ số chưa làm tròn.
+             */
+            var nvl = options.FirstOrDefault(x =>
+                string.Equals(x.method, "NVL", StringComparison.OrdinalIgnoreCase));
+
+            if (nvl == null || nvl.total_cost <= 0m)
+                return;
+
+            foreach (var option in options)
+            {
+                if (string.Equals(option.method, "NVL", StringComparison.OrdinalIgnoreCase))
+                {
+                    option.saving_vs_nvl_unit = null;
+                    option.saving_vs_nvl_total = null;
+                    continue;
+                }
+
+                if (!option.is_available || option.total_cost <= 0m)
+                {
+                    option.saving_vs_nvl_unit = null;
+                    option.saving_vs_nvl_total = null;
+                    continue;
+                }
+
+                var savingTotal = nvl.total_cost - option.total_cost;
+
+                option.saving_vs_nvl_total = savingTotal;
+                option.saving_vs_nvl_unit = CalculateUnitCostFromRoundedTotal(
+                    savingTotal,
+                    orderQty);
+            }
         }
 
         private readonly IWebHostEnvironment _env;

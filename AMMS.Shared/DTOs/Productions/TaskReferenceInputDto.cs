@@ -12,5 +12,6 @@ namespace AMMS.Shared.DTOs.Productions
         public string input_name { get; set; } = "";
         public string unit { get; set; } = "";
         public decimal estimated_qty { get; set; }
+        public decimal actual_qty_prev_stage { get; set; }
     }
 }
