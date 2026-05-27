@@ -77,23 +77,12 @@ namespace AMMS.Application.Services
             return await _repo.GetProductionDetailByProdIdAsync(prodId, ct);
         }
 
-        public async Task<PagedResultLite<ProducingOrderCardDto>> GetProducingOrdersAsync(
+        public Task<PagedResultLite<ProducingOrderCardDto>> GetProducingOrdersAsync(
     int page,
     int pageSize,
-    int? roleId,
     CancellationToken ct = default)
         {
-            var result = await _repo.GetProducingOrdersAsync(
-                page,
-                pageSize,
-                roleId,
-                ct);
-
-            await FillCanStartForProductionsAsync(
-                result.Data,
-                ct);
-
-            return result;
+            return _repo.GetProducingOrdersAsync(page, pageSize, ct);
         }
 
         private async Task FillCanStartForProductionsAsync(

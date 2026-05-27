@@ -54,7 +54,6 @@ namespace AMMS.Infrastructure.Repositories
         public async Task<PagedResultLite<ProducingOrderCardDto>> GetProducingOrdersAsync(
     int page,
     int pageSize,
-    int? roleId,
     CancellationToken ct = default)
         {
             NormalizePaging(ref page, ref pageSize);
@@ -464,9 +463,10 @@ namespace AMMS.Infrastructure.Repositories
                     tasksForCard,
                     isSingleRow);
 
-                var visibleSteps = ProductionSHelper.FilterStepsByRole(
-                    stepsForCard,
-                    roleId);
+                var visibleSteps = stepsForCard
+                    .OrderBy(x => x.SeqNum ?? int.MaxValue)
+                    .ThenBy(x => x.ProcessId)
+                    .ToList();
 
                 if (visibleSteps.Count == 0)
                     visibleSteps = stepsForCard;

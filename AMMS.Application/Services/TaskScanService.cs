@@ -857,7 +857,6 @@ namespace AMMS.Application.Services
                     throw new InvalidOperationException($"Material not found. material_id={item.material_id}");
 
                 mat.stock_qty = (mat.stock_qty ?? 0m) + item.quantity_left;
-
                 await _db.stock_moves.AddAsync(new stock_move
                 {
                     material_id = item.material_id,
