@@ -31,5 +31,6 @@ namespace AMMS.Shared.DTOs.Productions.Groups
         public bool can_group { get; set; }
 
         public string? reason { get; set; }
+        public string? production_method { get; set; }
     }
 }

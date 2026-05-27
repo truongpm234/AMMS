@@ -451,10 +451,6 @@ namespace AMMS.Infrastructure.Repositories
                         x => x.ProcessCode,
                         routeProcessCsv);
 
-                /*
-                 * Nếu group_process_codes bị null/sai nhưng production vẫn có task,
-                 * fallback về allSteps rồi filter theo task thật.
-                 */
                 if (routeSteps.Count == 0 && tasksForCard.Count > 0)
                     routeSteps = orderedAllSteps;
 

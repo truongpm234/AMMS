@@ -29,7 +29,7 @@ namespace AMMS.Shared.DTOs.Productions.Groups
 
         public int? product_type_id { get; set; }
         public string? product_type_name { get; set; }
-
+        public string? production_method { get; set; }
         public string? note { get; set; }
 
         public DateTime? suggested_planned_start_date { get; set; }
