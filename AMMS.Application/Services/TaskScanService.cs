@@ -773,16 +773,44 @@ namespace AMMS.Application.Services
                     "Importing",
                     new
                     {
-                        message = $"Đơn hàng {orderId} đã được sản xuất xong, chờ nhập kho"
+                        message = $"Đơn hàng {orderId} đã được sản xuất xong, chờ duyệt nhập kho"
+                    },
+                    ct);
+
+                await _hub.Clients.Group(RealtimeGroups.ByRole("manager")).SendAsync(
+                    "Importing",
+                    new
+                    {
+                        message = $"Đơn hàng {orderId} đã được sản xuất xong, chờ duyệt nhập kho"
                     },
                     ct);
 
                 if (latestRequest != null)
                 {
+                    await _hub.Clients.Group(RealtimeGroups.ByRole("consultant")).SendAsync("Importing",
+                    new
+                    {
+                        message = $"Đơn hàng {orderId} - Yêu cầu {latestRequest.order_request_id} đã được sản xuất xong, chờ nhập kho"
+                    },
+                    ct);
                     await _noti.CreateNotfi(
                         4,
-                        $"Đơn hàng {orderId} đã được sản xuất xong, chờ nhập kho",
+                        $"Đơn hàng {orderId} đã được sản xuất xong, chờ duyệt nhập kho",
                         null,
+                        latestRequest.order_request_id,
+                        "Importing");
+
+                    await _noti.CreateNotfi(
+                        3,
+                        $"Đơn hàng {orderId} đã được sản xuất xong, chờ duyệt nhập kho",
+                        null,
+                        latestRequest.order_request_id,
+                        "Importing");
+
+                    await _noti.CreateNotfi(
+                        2,
+                        $"Đơn hàng {orderId} đã được sản xuất xong, chờ nhập kho",
+                        latestRequest.actual_consultant_user_id,
                         latestRequest.order_request_id,
                         "Importing");
 
