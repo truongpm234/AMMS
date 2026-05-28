@@ -46,6 +46,7 @@ namespace AMMS.Infrastructure.Repositories
                 HasNext = hasNext,
                 Data = rows.Select(x => new MissingMaterialDto
                 {
+                    miss_id = x.miss_id,
                     material_id = x.material_id,
                     material_name = x.material_name,
                     unit = x.unit,
@@ -54,7 +55,9 @@ namespace AMMS.Infrastructure.Repositories
                     available = x.available,
                     quantity = x.quantity,
                     total_price = x.total_price,
-                    is_buy = x.is_buy
+                    is_buy = x.is_buy,
+                    file_purpose = x.file_purpose,
+                    is_active = x.is_active
                 }).ToList()
             };
         }
@@ -63,14 +66,36 @@ namespace AMMS.Infrastructure.Repositories
         {
             var strategy = _db.Database.CreateExecutionStrategy();
 
-            return await strategy.ExecuteAsync(async () =>
+            object? result = null;
+
+            await strategy.ExecuteAsync(async () =>
             {
                 await using var tx = await _db.Database.BeginTransactionAsync(ct);
 
-                _db.missing_materials.RemoveRange(_db.missing_materials);
-                await _db.SaveChangesAsync(ct);
+                async Task<int> MarkAllNoLongerMissingAsync()
+                {
+                    var oldRows = await _db.missing_materials
+                        .Where(x => x.quantity > 0m)
+                        .ToListAsync(ct);
 
-                // Chỉ tính missing cho order đang cần kiểm tra vật tư
+                    foreach (var row in oldRows)
+                    {
+                        row.needed = 0m;
+                        row.quantity = 0m;
+                        row.total_price = 0m;
+
+                        if (string.IsNullOrWhiteSpace(row.file_purpose))
+                            row.file_purpose = "MATERIAL_PURCHASE";
+                    }
+
+                    await _db.SaveChangesAsync(ct);
+                    return oldRows.Count;
+                }
+
+                // Không xóa bảng nữa
+                // _db.missing_materials.RemoveRange(_db.missing_materials);
+                // await _db.SaveChangesAsync(ct);
+
                 var orderIds = await _db.orders.AsNoTracking()
                     .Where(o =>
                         (o.status == "LayoutPending" || o.status == "Scheduled") &&
@@ -81,12 +106,19 @@ namespace AMMS.Infrastructure.Repositories
 
                 if (orderIds.Count == 0)
                 {
+                    var noLongerMissingCount = await MarkAllNoLongerMissingAsync();
+
                     await tx.CommitAsync(ct);
-                    return new
+
+                    result = new
                     {
                         insertedRows = 0,
-                        message = "No target orders to recalculate."
+                        updatedRows = 0,
+                        noLongerMissingRows = noLongerMissingCount,
+                        message = "No target orders to recalculate. Existing missing materials were marked as no longer missing."
                     };
+
+                    return;
                 }
 
                 var orderRequests = await _db.order_requests.AsNoTracking()
@@ -102,12 +134,19 @@ namespace AMMS.Infrastructure.Repositories
 
                 if (orderRequests.Count == 0)
                 {
+                    var noLongerMissingCount = await MarkAllNoLongerMissingAsync();
+
                     await tx.CommitAsync(ct);
-                    return new
+
+                    result = new
                     {
                         insertedRows = 0,
-                        message = "No order request found."
+                        updatedRows = 0,
+                        noLongerMissingRows = noLongerMissingCount,
+                        message = "No order request found. Existing missing materials were marked as no longer missing."
                     };
+
+                    return;
                 }
 
                 var orderRequestIds = orderRequests
@@ -160,12 +199,19 @@ namespace AMMS.Infrastructure.Repositories
 
                 if (estimates.Count == 0)
                 {
+                    var noLongerMissingCount = await MarkAllNoLongerMissingAsync();
+
                     await tx.CommitAsync(ct);
-                    return new
+
+                    result = new
                     {
                         insertedRows = 0,
-                        message = "No cost estimate found."
+                        updatedRows = 0,
+                        noLongerMissingRows = noLongerMissingCount,
+                        message = "No cost estimate found. Existing missing materials were marked as no longer missing."
                     };
+
+                    return;
                 }
 
                 var materials = await _db.materials.AsNoTracking()
@@ -286,7 +332,7 @@ namespace AMMS.Infrastructure.Repositories
 
                     DateTime? requestDate = request.delivery_date ?? estimate.desired_delivery_date;
 
-                    // 1. Giấy: sheets_total theo paper_alternative hoặc paper_code
+                    // 1. Giấy
                     var paperKey = !string.IsNullOrWhiteSpace(estimate.paper_alternative)
                         ? estimate.paper_alternative
                         : estimate.paper_code;
@@ -299,7 +345,7 @@ namespace AMMS.Infrastructure.Repositories
                         requestDate
                     );
 
-                    // 2. Mực: ink_weight_kg
+                    // 2. Mực
                     var inkMaterial =
                         FindByClassOrType("INK", "MUC", "MỰC") ??
                         FindByCodeOrName("MUC_IN");
@@ -310,7 +356,7 @@ namespace AMMS.Infrastructure.Repositories
                         requestDate
                     );
 
-                    // 3. Keo phủ: coating_glue_weight_kg, chỉ tính nếu coating_type có giá trị
+                    // 3. Keo phủ
                     var coatingType = Norm(estimate.coating_type);
 
                     var hasCoating =
@@ -341,7 +387,7 @@ namespace AMMS.Infrastructure.Repositories
                         );
                     }
 
-                    // 4. Keo bồi: mounting_glue_weight_kg
+                    // 4. Keo bồi
                     var mountingGlueMaterial =
                         FindByClassOrType(
                             "MOUNTING_GLUE",
@@ -359,7 +405,7 @@ namespace AMMS.Infrastructure.Repositories
                         requestDate
                     );
 
-                    // 5. Sóng: wave_sheets_required theo wave_alternative hoặc wave_type
+                    // 5. Sóng
                     var waveKey = !string.IsNullOrWhiteSpace(estimate.wave_alternative)
                         ? estimate.wave_alternative
                         : estimate.wave_type;
@@ -372,7 +418,7 @@ namespace AMMS.Infrastructure.Repositories
                         requestDate
                     );
 
-                    // 6. Màng cán: lamination_weight_kg, ưu tiên lamination_material_id
+                    // 6. Màng cán
                     var laminationMaterial =
                         FindById(estimate.lamination_material_id) ??
                         FindByCodeOrName(estimate.lamination_material_code) ??
@@ -388,73 +434,281 @@ namespace AMMS.Infrastructure.Repositories
 
                     AddDemand(
                         laminationMaterial,
-                        estimate.lamination_weight_kg   ,
+                        estimate.lamination_weight_kg,
                         requestDate
                     );
                 }
 
                 var now = AppTime.NowVnUnspecified();
 
-                var insertRows = demandLines
-    .GroupBy(x => new
-    {
-        x.MaterialId,
-        x.MaterialName,
-        x.Unit
-    })
-    .Select(g =>
-    {
-        var needed = RoundQty(g.Sum(x => x.NeededQty));
-        var available = RoundQty(g.Max(x => x.StockQty));
+                var calculatedRows = demandLines
+                    .GroupBy(x => new
+                    {
+                        x.MaterialId,
+                        x.MaterialName,
+                        x.Unit
+                    })
+                    .Select(g =>
+                    {
+                        var needed = RoundQty(g.Sum(x => x.NeededQty));
+                        var available = RoundQty(g.Max(x => x.StockQty));
 
-        var missingQty = needed - available;
-        if (missingQty < 0m)
-            missingQty = 0m;
+                        var missingQty = needed - available;
+                        if (missingQty < 0m)
+                            missingQty = 0m;
 
-        var roundedMissingQty = RoundUpToHundreds(missingQty);
+                        var roundedMissingQty = RoundUpToHundreds(missingQty);
 
-        var unitPrice = Math.Round(g.Max(x => x.CostPrice), 2);
-        var totalPrice = Math.Round(roundedMissingQty * unitPrice, 2);
+                        var unitPrice = Math.Round(g.Max(x => x.CostPrice), 2);
+                        var totalPrice = Math.Round(roundedMissingQty * unitPrice, 2);
 
-        var requestDateValue = g
-            .Select(x => x.RequestDate)
-            .Where(d => d != null)
-            .OrderBy(d => d)
-            .FirstOrDefault();
+                        var requestDateValue = g
+                            .Select(x => x.RequestDate)
+                            .Where(d => d != null)
+                            .OrderBy(d => d)
+                            .FirstOrDefault();
 
-        return new missing_material
-        {
-            material_id = g.Key.MaterialId,
-            material_name = g.Key.MaterialName ?? "",
-            unit = g.Key.Unit ?? "",
-            request_date = requestDateValue,
+                        return new missing_material
+                        {
+                            material_id = g.Key.MaterialId,
+                            material_name = g.Key.MaterialName ?? "",
+                            unit = g.Key.Unit ?? "",
+                            request_date = requestDateValue,
 
-            needed = needed,
-            available = available,
+                            needed = needed,
+                            available = available,
+                            quantity = roundedMissingQty,
+                            total_price = totalPrice,
 
-            // quantity luôn làm tròn lên hàng trăm
-            quantity = roundedMissingQty,
+                            is_buy = false,
+                            created_at = now,
+                            file_purpose = "MATERIAL_PURCHASE"
+                        };
+                    })
+                    .Where(x => x.quantity > 0m)
+                    .ToList();
 
-            total_price = totalPrice,
+                var calculatedMaterialIds = calculatedRows
+                    .Select(x => x.material_id)
+                    .Distinct()
+                    .ToList();
 
-            is_buy = false,
-            created_at = now
-        };
-    })
-    .Where(x => x.quantity > 0m)
-    .ToList();
+                var existingRows = await _db.missing_materials
+    .Where(x => calculatedMaterialIds.Contains(x.material_id))
+    .OrderBy(x => x.material_id)
+    .ThenBy(x => x.miss_id)
+    .ToListAsync(ct);
 
-                await _db.missing_materials.AddRangeAsync(insertRows, ct);
+                // Dòng đã mua xong + đã có PDF thì bị khóa, không update nữa.
+                // Nếu material_id đó phát sinh thiếu lại thì tạo miss_id mới.
+                var lockedPurchasedRows = existingRows
+                    .Where(IsClosedPurchasedMissing)
+                    .ToList();
+
+                // Chỉ được gộp vào những dòng chưa bị khóa.
+                var editableExistingRows = existingRows
+                    .Where(x => !IsClosedPurchasedMissing(x))
+                    .ToList();
+
+                // Với mỗi material_id, chọn dòng editable có miss_id nhỏ nhất để gộp.
+                var editableByMaterialId = editableExistingRows
+                    .GroupBy(x => x.material_id)
+                    .ToDictionary(
+                        g => g.Key,
+                        g => g.OrderBy(x => x.miss_id).First()
+                    );
+
+                int insertedCount = 0;
+                int updatedCount = 0;
+                int lockedCreateNewCount = 0;
+
+                foreach (var newRow in calculatedRows)
+                {
+                    if (editableByMaterialId.TryGetValue(newRow.material_id, out var existing))
+                    {
+                        // Gộp vào miss_id cũ nếu dòng đó chưa thỏa:
+                        // is_buy = true, is_active = false, có PDF.
+                        existing.material_name = newRow.material_name;
+                        existing.unit = newRow.unit;
+                        existing.request_date = newRow.request_date;
+
+                        existing.needed = newRow.needed;
+                        existing.available = newRow.available;
+                        existing.quantity = newRow.quantity;
+                        existing.total_price = newRow.total_price;
+
+                        // Giữ trạng thái đã mua nếu trước đó đã true.
+                        existing.is_buy = existing.is_buy == true ? true : newRow.is_buy;
+
+                        existing.created_at = now;
+
+                        if (string.IsNullOrWhiteSpace(existing.file_purpose))
+                        {
+                            existing.file_purpose = "MATERIAL_PURCHASE";
+                        }
+
+                        updatedCount++;
+                    }
+                    else
+                    {
+                        // Không có dòng editable để gộp.
+                        // Có thể là material mới hoàn toàn,
+                        // hoặc material_id chỉ đang có miss_id cũ đã mua xong + có PDF.
+                        var hasLockedSameMaterial = lockedPurchasedRows
+                            .Any(x => x.material_id == newRow.material_id);
+
+                        if (hasLockedSameMaterial)
+                            lockedCreateNewCount++;
+
+                        newRow.file_purpose = "MATERIAL_PURCHASE";
+
+                        // Nếu entity của bạn có is_active default true thì dòng này có thể bỏ.
+                        // Nếu muốn chắc chắn miss_id mới đang active thì giữ.
+                        newRow.is_active = true;
+
+                        await _db.missing_materials.AddAsync(newRow, ct);
+                        insertedCount++;
+                    }
+                }
+
+                // Không set quantity = 0 nữa.
+                // Chỉ đếm những dòng không còn nằm trong kết quả tính toán mới.
+                var noLongerMissingRows = await _db.missing_materials
+                    .Where(x =>
+                        !calculatedMaterialIds.Contains(x.material_id) &&
+                        x.quantity > 0m)
+                    .ToListAsync(ct);
+
                 await _db.SaveChangesAsync(ct);
 
                 await tx.CommitAsync(ct);
 
-                return new
+                result = new
                 {
-                    insertedRows = insertRows.Count,
-                    message = "Recalculated & saved missing materials successfully. Purchase was not created."
+                    insertedRows = insertedCount,
+                    updatedRows = updatedCount,
+                    noLongerMissingRows = noLongerMissingRows.Count,
+                    message = "Recalculated missing materials successfully"
                 };
+
+                return;
             });
+
+            return result ?? new
+            {
+                insertedRows = 0,
+                updatedRows = 0,
+                noLongerMissingRows = 0,
+                message = "Recalculate finished but no result was returned."
+            };
+        }
+
+        public async Task<List<MissingMaterialPurchasePdfRowDto>> GetPurchasePdfRowsAsync(int page, int pageSize, CancellationToken ct = default)
+        {
+            NormalizePaging(ref page, ref pageSize);
+            var skip = (page - 1) * pageSize;
+
+            var rows = await _db.missing_materials
+                .AsNoTracking()
+                .Where(x => x.quantity > 0m)
+                .OrderByDescending(x => x.quantity)
+                .ThenByDescending(x => x.created_at)
+                .Skip(skip)
+                .Take(pageSize)
+                .Select(x => new MissingMaterialPurchasePdfRowDto
+                {
+                    miss_id = x.miss_id,
+                    material_id = x.material_id,
+                    material_name = x.material_name,
+                    quantity = x.quantity,
+                    total_price = x.total_price
+                })
+                .ToListAsync(ct);
+
+            return rows;
+        }
+
+        public async Task<int> UpdateFilePurposeAsync( string filePurpose, CancellationToken ct = default)
+        {
+            if (string.IsNullOrWhiteSpace(filePurpose))
+                return 0;
+
+            var rows = await _db.missing_materials
+                .Where(x => x.quantity > 0m)
+                .ToListAsync(ct);
+
+            if (rows.Count == 0)
+                return 0;
+
+            foreach (var row in rows)
+            {
+                row.file_purpose = filePurpose;
+            }
+
+            await _db.SaveChangesAsync(ct);
+
+            return rows.Count;
+        }
+
+        public async Task<List<MissingMaterialPurchasePdfRowDto>> GetPurchasePdfRowsByMissIdsAsync(
+    List<long> missIds,
+    CancellationToken ct = default)
+        {
+            missIds = missIds?
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList() ?? new List<long>();
+
+            if (missIds.Count == 0)
+                return new List<MissingMaterialPurchasePdfRowDto>();
+
+            var rows = await _db.missing_materials
+                .AsNoTracking()
+                .Where(x =>
+                    missIds.Contains(x.miss_id) &&
+                    x.quantity > 0m)
+                .OrderBy(x => x.miss_id)
+                .Select(x => new MissingMaterialPurchasePdfRowDto
+                {
+                    miss_id = x.miss_id,
+                    material_id = x.material_id,
+                    material_name = x.material_name,
+                    quantity = x.quantity,
+                    total_price = x.total_price
+                })
+                .ToListAsync(ct);
+
+            return rows;
+        }
+
+        public async Task<int> UpdateFilePurposeByMissIdsAsync(
+            List<long> missIds,
+            string filePurpose,
+            CancellationToken ct = default)
+        {
+            missIds = missIds?
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList() ?? new List<long>();
+
+            if (missIds.Count == 0 || string.IsNullOrWhiteSpace(filePurpose))
+                return 0;
+
+            var rows = await _db.missing_materials
+                .Where(x => missIds.Contains(x.miss_id))
+                .ToListAsync(ct);
+
+            if (rows.Count == 0)
+                return 0;
+
+            foreach (var row in rows)
+            {
+                row.file_purpose = filePurpose;
+            }
+
+            await _db.SaveChangesAsync(ct);
+
+            return rows.Count;
         }
 
         private sealed class MaterialDemandLine
@@ -466,6 +720,27 @@ namespace AMMS.Infrastructure.Repositories
             public decimal CostPrice { get; set; }
             public decimal NeededQty { get; set; }
             public DateTime? RequestDate { get; set; }
+        }
+
+        static bool HasPurchasePdf(string? filePurpose)
+        {
+            if (string.IsNullOrWhiteSpace(filePurpose))
+                return false;
+
+            var value = filePurpose.Trim();
+
+            if (value.Equals("MATERIAL_PURCHASE", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return value.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                || value.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static bool IsClosedPurchasedMissing(missing_material row)
+        {
+            return row.is_buy == true
+                && row.is_active == false
+                && HasPurchasePdf(row.file_purpose);
         }
     }
 }

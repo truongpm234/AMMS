@@ -50,6 +50,11 @@ namespace AMMS.Infrastructure.Entities
 
             [Column("created_at")]
             public DateTime created_at { get; set; }
+
+            [Column("is_active")]
+            public bool is_active { get; set; } = true;
+
+            public string file_purpose { get; set; } 
         }
     }
 
