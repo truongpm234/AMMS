@@ -26,7 +26,7 @@ namespace AMMS.Application.Services
             int pageSize,
             CancellationToken ct = default)
         {
-            //await _repo.RecalculateAndSaveAsync(ct);
+            await _repo.RecalculateAndSaveAsync(ct);
 
             var result = await _repo.GetPagedFromDbAsync(page, pageSize, ct);
             if (result.Data == null || result.Data.Count == 0)
