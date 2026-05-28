@@ -3,7 +3,6 @@ using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.User;
 using Microsoft.EntityFrameworkCore;
-using System.Text.Json;
 
 namespace AMMS.Infrastructure.Repositories
 {
@@ -74,7 +73,7 @@ namespace AMMS.Infrastructure.Repositories
                 newUser.full_name = name;
                 newUser.created_at = DateTime.Now;
                 newUser.is_active = true;
-                newUser.role_id = 6;
+                newUser.role_id = 5;
                 _db.users.Add(newUser);
                 await _db.SaveChangesAsync();
                 return newUser;
