@@ -1,12 +1,13 @@
 ﻿using AMMS.Application.Interfaces;
 using AMMS.Application.Services;
+using AMMS.Infrastructure.DBContext;
+using AMMS.Shared.DTOs.Orders;
 using ExcelDataReader;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using System.Data;
 using System.Globalization;
 using System.Text;
-using Microsoft.EntityFrameworkCore;
-using AMMS.Infrastructure.DBContext;
 
 namespace AMMS.API.Controllers
 {
@@ -24,7 +25,6 @@ namespace AMMS.API.Controllers
             _service = service;
             _context = context;
         }
-        // GET api/missingmaterials/paged?page=1&pageSize=10
         [HttpGet("paged")]
         public async Task<IActionResult> GetPaged(
             [FromQuery] int page = 1,
@@ -37,19 +37,29 @@ namespace AMMS.API.Controllers
 
         [HttpGet("export-excel")]
         public async Task<IActionResult> ExportExcel(
-            [FromQuery] int page = 1,
-            [FromQuery] int pageSize = 200,
-            CancellationToken ct = default)
+    [FromQuery] int page = 1,
+    [FromQuery] int pageSize = 200,
+    CancellationToken ct = default)
         {
-            var fileBytes = await _service.ExportExcelAsync(page, pageSize, ct);
+            try
+            {
+                var fileBytes = await _service.ExportExcelAsync(page, pageSize, ct);
 
-            var fileName = $"missing-materials-{DateTime.Now:yyyyMMddHHmmss}.xlsx";
+                var fileName = $"missing-materials-{DateTime.Now:yyyyMMddHHmmss}.xlsx";
 
-            return File(
-                fileBytes,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                fileName
-            );
+                return File(
+                    fileBytes,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    fileName
+                );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message
+                });
+            }
         }
 
         [HttpPost("import-stock-from-excel")]
@@ -185,6 +195,8 @@ namespace AMMS.API.Controllers
                 var updatedRows = new List<object>();
                 var notFoundRows = new List<object>();
 
+                var successfulMaterialIds = new List<int>();
+
                 foreach (var item in groupedRows)
                 {
                     var material = materials.FirstOrDefault(x => x.material_id == item.MaterialId);
@@ -207,6 +219,7 @@ namespace AMMS.API.Controllers
                     material.stock_qty = newStock;
 
                     updatedCount++;
+                    successfulMaterialIds.Add(material.material_id);
 
                     updatedRows.Add(new
                     {
@@ -217,18 +230,54 @@ namespace AMMS.API.Controllers
                         new_stock = newStock
                     });
                 }
+                int updatedMissingStatusCount = 0;
+                var updatedMissingRows = new List<object>();
+
+                if (successfulMaterialIds.Count > 0)
+                {
+                    var missingRows = await _context.missing_materials
+                        .Where(x =>
+                            successfulMaterialIds.Contains(x.material_id) &&
+                            x.quantity > 0m)
+                        .ToListAsync(ct);
+
+                    foreach (var missing in missingRows)
+                    {
+                        // Đã nhập kho thành công thì đánh dấu đã mua
+                        missing.is_buy = true;
+
+                        // Không xóa, không trừ quantity
+                        // Chỉ chuyển trạng thái active sang false
+                        missing.is_active = false;
+
+                        updatedMissingStatusCount++;
+
+                        updatedMissingRows.Add(new
+                        {
+                            miss_id = missing.miss_id,
+                            material_id = missing.material_id,
+                            material_name = missing.material_name,
+                            quantity = missing.quantity,
+                            total_price = missing.total_price,
+                            is_buy = missing.is_buy,
+                            is_active = missing.is_active
+                        });
+                    }
+                }
 
                 await _context.SaveChangesAsync(ct);
 
                 return Ok(new
                 {
-                    message = "Import tăng tồn kho thành công",
+                    message = "Import thành công",
                     updated = updatedCount,
+                    updatedMissingStatus = updatedMissingStatusCount,
                     invalid = invalidRows.Count,
                     notFound = notFoundRows.Count,
                     invalidRows,
                     notFoundRows,
-                    updatedRows
+                    updatedRows,
+                    updatedMissingRows
                 });
             }
             catch (Exception ex)
@@ -278,6 +327,53 @@ namespace AMMS.API.Controllers
                 return result;
 
             return null;
+        }
+
+        [HttpPost("generate-purchase-pdf")]
+        public async Task<IActionResult> GeneratePurchasePdf(
+    [FromBody] GenerateMissingMaterialPurchasePdfRequest request,
+    CancellationToken ct = default)
+        {
+            try
+            {
+                if (request == null || request.miss_ids == null || request.miss_ids.Count == 0)
+                {
+                    return BadRequest(new
+                    {
+                        message = "Vui lòng chọn ít nhất một miss_id."
+                    });
+                }
+
+                var result = await _service.GeneratePurchasePdfAsync(
+                    request.miss_ids,
+                    ct);
+
+                return Ok(result);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message
+                });
+            }
+        }
+
+        [HttpPost("recalculate")]
+        public async Task<IActionResult> Recalculate(CancellationToken ct = default)
+        {
+            try
+            {
+                var result = await _service.RecalculateAsync(ct);
+                return Ok(result);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = ex.Message
+                });
+            }
         }
 
         private sealed class ImportStockRow

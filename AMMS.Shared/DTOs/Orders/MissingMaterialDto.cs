@@ -8,6 +8,7 @@ namespace AMMS.Shared.DTOs.Orders
 {
     public class MissingMaterialDto
     {
+        public long miss_id { get; set; }
         public int material_id { get; set; } 
         public string? material_name { get; set; }
         public decimal needed { get; set; }
@@ -17,5 +18,7 @@ namespace AMMS.Shared.DTOs.Orders
         public DateTime? request_date { get; set; }
         public decimal total_price { get; set; }
         public bool? is_buy { get; set; }
+        public string? file_purpose { get; set; }
+        public bool is_active { get; set; }
     }
 }

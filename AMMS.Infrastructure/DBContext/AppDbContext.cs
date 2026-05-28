@@ -671,6 +671,9 @@ public partial class AppDbContext : DbContext
                   .HasColumnName("created_at")
                   .HasColumnType("timestamp without time zone")
                   .HasDefaultValueSql("now()");
+            entity.Property(e => e.file_purpose)
+                  .HasMaxLength(50)
+                  .HasDefaultValue("MATERIAL_PURCHASE");
             entity.HasIndex(e => e.material_id).HasDatabaseName("ix_missing_materials_material_id");
             entity.HasIndex(e => e.request_date).HasDatabaseName("ix_missing_materials_request_date");
             entity.HasIndex(e => e.created_at).HasDatabaseName("ix_missing_materials_created_at");
