@@ -2756,7 +2756,7 @@ namespace AMMS.Infrastructure.Repositories
                     unit: "tờ"));
 
                 var output = ProductionSHelper.BuildStageMaterial(
-                    name: "Bán thành phẩm sau cắt",
+                    name: "Giấy đã cắt",
                     code: "CAT",
                     estimatedQty: productionOutputQty,
                     actualQty: ActualFromQtyGood(qtyGood, productionOutputQty),
@@ -2775,7 +2775,7 @@ namespace AMMS.Infrastructure.Repositories
             if (code == "IN")
             {
                 AddMainInputFromPrevious(
-                    fallbackName: "Bán thành phẩm sau cắt",
+                    fallbackName: "Giấy đã cắt",
                     fallbackCode: "CAT",
                     estimatedQty: productionOutputQty,
                     unit: "tờ");
