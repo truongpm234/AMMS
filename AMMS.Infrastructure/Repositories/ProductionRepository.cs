@@ -160,6 +160,8 @@ namespace AMMS.Infrastructure.Repositories
                 };
             }
 
+            var canGroupProdIds = await ResolveCanGroupProductionIdsForGetAllProductionAsync(ct);
+
             var prodIds = baseRows
                 .Select(x => x.prod_id)
                 .Distinct()
@@ -765,7 +767,7 @@ namespace AMMS.Infrastructure.Repositories
                     group_total_qty = isGroupRow || isSplitRow
                         ? quantity
                         : activeGroup?.group_total_qty,
-
+                    can_group = !isGroupRow && !isSplitRow && canGroupProdIds.Contains(r.prod_id),
                     can_start = canStart,
                     can_start_message = canStartMessage,
 
@@ -5900,6 +5902,625 @@ namespace AMMS.Infrastructure.Repositories
             return string.IsNullOrWhiteSpace(status)
                 ? "(null)"
                 : status.Trim();
+        }
+
+        private sealed class CanGroupCandidateRow
+        {
+            public int prod_id { get; set; }
+
+            public int order_id { get; set; }
+
+            public int product_type_id { get; set; }
+
+            public string prod_method { get; set; } = "";
+
+            public DateTime? delivery_date { get; set; }
+
+            public string? production_process { get; set; }
+
+            public List<string> route_codes { get; set; } = new();
+
+            /*
+             * Chỉ lấy các công đoạn Dept2 còn task thật, chưa Ready/Finished,
+             * để tránh báo can_group=true cho production đã được bắt đầu hoặc đã bị ghép.
+             */
+            public List<string> available_group_process_codes { get; set; } = new();
+
+            public cost_estimate? estimate { get; set; }
+        }
+
+        private async Task<HashSet<int>> ResolveCanGroupProductionIdsForGetAllProductionAsync(
+            CancellationToken ct)
+        {
+            var result = new HashSet<int>();
+
+            var today = AppTime.NowVnUnspecified().Date;
+            var minDeliveryDate = today.AddDays(7);
+
+            /*
+             * Đồng bộ với GroupProductionService.GetCandidatesAsync:
+             * - production riêng SINGLE
+             * - order Scheduled
+             * - layout_confirmed
+             * - is_production_ready
+             * - delivery_date >= hôm nay + 7 ngày
+             * - không nằm trong production GROUP active
+             *
+             * Bổ sung cho get-all-production:
+             * - production.status phải Scheduled
+             * - đã có task
+             * - task Dept2 còn Unassigned/null thì mới báo có thể ghép
+             */
+            var seedRows = await (
+                from o in _db.orders.AsNoTracking()
+
+                join pr in _db.productions.AsNoTracking()
+                    on o.order_id equals pr.order_id
+
+                where pr.prod_kind == "SINGLE"
+                      && pr.status == "Scheduled"
+                      && o.status == "Scheduled"
+                      && o.layout_confirmed
+                      && o.is_production_ready
+                      && o.delivery_date != null
+                      && o.delivery_date >= minDeliveryDate
+                      && _db.tasks.Any(t => t.prod_id == pr.prod_id)
+                      && !_db.prod_orders.Any(po =>
+                            po.order_id == o.order_id &&
+                            po.status == "Active" &&
+                            _db.productions.Any(g =>
+                                g.prod_id == po.prod_id &&
+                                g.prod_kind == "GROUP" &&
+                                g.status != "Cancelled" &&
+                                g.status != "Completed"))
+
+                select new
+                {
+                    pr.prod_id,
+                    o.order_id,
+                    product_type_id = pr.product_type_id,
+                    prod_method = pr.prod_method,
+                    o.delivery_date,
+
+                    item = _db.order_items.AsNoTracking()
+                        .Where(i => i.order_id == o.order_id)
+                        .OrderBy(i => i.item_id)
+                        .Select(i => new
+                        {
+                            i.product_type_id,
+                            i.production_process
+                        })
+                        .FirstOrDefault()
+                }
+            ).ToListAsync(ct);
+
+            if (seedRows.Count < 2)
+                return result;
+
+            var seedProdIds = seedRows
+                .Select(x => x.prod_id)
+                .Distinct()
+                .ToList();
+
+            var taskCodes = await (
+                    from t in _db.tasks.AsNoTracking()
+
+                    join pp0 in _db.product_type_processes.AsNoTracking()
+                        on t.process_id equals pp0.process_id into ppj
+                    from pp in ppj.DefaultIfEmpty()
+
+                    where t.prod_id.HasValue &&
+                          seedProdIds.Contains(t.prod_id.Value)
+
+                    select new
+                    {
+                        task_id = t.task_id,
+                        prod_id = t.prod_id!.Value,
+                        process_code = pp != null ? pp.process_code : null,
+                        t.status,
+                        t.start_time,
+                        t.end_time
+                    }
+                ).ToListAsync(ct);
+
+            var allTaskIds = taskCodes
+    .Select(x => x.task_id)
+    .Distinct()
+    .ToList();
+
+            var taskIdsWithLogs = await _db.task_logs
+                .AsNoTracking()
+                .Where(x =>
+                    x.task_id.HasValue &&
+                    allTaskIds.Contains(x.task_id.Value))
+                .Select(x => x.task_id!.Value)
+                .Distinct()
+                .ToListAsync(ct);
+
+            var logTaskSet = taskIdsWithLogs.ToHashSet();
+
+            var startedProdIds = taskCodes
+                .Where(x => IsTaskStartedForCanGroupSuggestion(
+                    x.status,
+                    x.start_time,
+                    x.end_time,
+                    logTaskSet.Contains(x.task_id)))
+                .Select(x => x.prod_id)
+                .Distinct()
+                .ToHashSet();
+
+            var availableDept2ByProdId = taskCodes
+                .Where(x => IsDept2ForCanGroup(x.process_code))
+                .Where(x =>
+                    x.end_time == null &&
+                    x.start_time == null &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() == "UNASSIGNED"
+                    ))
+                .GroupBy(x => x.prod_id)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g
+                        .Select(x => NormCanGroupCode(x.process_code))
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList());
+
+            var candidates = new List<CanGroupCandidateRow>();
+
+            foreach (var row in seedRows)
+            {
+                if (startedProdIds.Contains(row.prod_id))
+                    continue;
+
+                if (row.item == null)
+                    continue;
+
+                var productTypeId =
+                    row.product_type_id ??
+                    row.item.product_type_id;
+
+                if (!productTypeId.HasValue || productTypeId.Value <= 0)
+                    continue;
+
+                var method = NormalizeProductionMethodForCanGroup(row.prod_method);
+
+                if (string.IsNullOrWhiteSpace(method))
+                    continue;
+
+                var routeCodes = ParseProcessCodesForCanGroup(row.item.production_process);
+
+                if (routeCodes.Count == 0)
+                    continue;
+
+                if (!availableDept2ByProdId.TryGetValue(row.prod_id, out var availableDept2Codes) ||
+                    availableDept2Codes.Count == 0)
+                {
+                    continue;
+                }
+
+                /*
+                 * Chỉ xét công đoạn vừa nằm trong route của order,
+                 * vừa còn task Dept2 thật trong production.
+                 */
+                var groupableCodes = availableDept2Codes
+                    .Where(code => routeCodes.Contains(code, StringComparer.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (groupableCodes.Count == 0)
+                    continue;
+
+                var estimate = await LoadAcceptedEstimateByOrderIdForCanGroupAsync(
+                    row.order_id,
+                    ct);
+
+                candidates.Add(new CanGroupCandidateRow
+                {
+                    prod_id = row.prod_id,
+                    order_id = row.order_id,
+                    product_type_id = productTypeId.Value,
+                    prod_method = method,
+                    delivery_date = row.delivery_date,
+                    production_process = row.item.production_process,
+                    route_codes = routeCodes,
+                    available_group_process_codes = groupableCodes,
+                    estimate = estimate
+                });
+            }
+
+            if (candidates.Count < 2)
+                return result;
+
+            /*
+             * Đồng bộ với SuggestAsync:
+             * group theo product_type_id + prod_method.
+             */
+            foreach (var productMethodGroup in candidates
+                .GroupBy(x => new
+                {
+                    x.product_type_id,
+                    x.prod_method
+                })
+                .Where(g => g.Count() >= 2))
+            {
+                var rowsOfOneTypeAndMethod = productMethodGroup
+                    .OrderBy(x => x.delivery_date)
+                    .ThenBy(x => x.order_id)
+                    .ToList();
+
+                /*
+                 * Đồng bộ với BuildAutoDept2Suggestions:
+                 * chỉ auto suggest Dept2: PHU/CAN/CAN_MANG/BOI.
+                 */
+                var possibleDept2Codes = rowsOfOneTypeAndMethod
+                    .SelectMany(x => x.available_group_process_codes)
+                    .Where(IsDept2ForCanGroup)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(FullRouteIndexForCanGroup)
+                    .ToList();
+
+                foreach (var processCode in possibleDept2Codes)
+                {
+                    var membersWithProcess = rowsOfOneTypeAndMethod
+                        .Where(x => x.available_group_process_codes.Contains(
+                            processCode,
+                            StringComparer.OrdinalIgnoreCase))
+                        .ToList();
+
+                    if (membersWithProcess.Count < 2)
+                        continue;
+
+                    if (RequiresSameMaterialKeyForCanGroup(processCode))
+                    {
+                        var keyedMembers = new List<(string key, CanGroupCandidateRow row)>();
+
+                        foreach (var member in membersWithProcess)
+                        {
+                            var key = ResolveCanGroupPlanKey(
+                                processCode,
+                                member);
+
+                            keyedMembers.Add((key, member));
+                        }
+
+                        var validMaterialGroups = keyedMembers
+                            .GroupBy(x => x.key, StringComparer.OrdinalIgnoreCase)
+                            .Where(g => g.Count() >= 2)
+                            .ToList();
+
+                        foreach (var materialGroup in validMaterialGroups)
+                        {
+                            foreach (var member in materialGroup)
+                            {
+                                result.Add(member.row.prod_id);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        foreach (var member in membersWithProcess)
+                        {
+                            result.Add(member.prod_id);
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        private static bool IsTaskStartedForCanGroup(
+    string? status,
+    DateTime? startTime,
+    DateTime? endTime,
+    bool hasLog)
+        {
+            if (startTime != null || endTime != null || hasLog)
+                return true;
+
+            var s = (status ?? "").Trim().ToUpperInvariant();
+
+            if (string.IsNullOrWhiteSpace(s))
+                return false;
+
+            /*
+             * Đồng bộ với GroupProductionService:
+             * Chỉ Unassigned/null là chưa bắt đầu.
+             * Ready cũng xem là đã bắt đầu vì task đã được mở/giữ máy/cho phép báo cáo.
+             */
+            return s != "UNASSIGNED";
+        }
+
+        private async Task<HashSet<int>> LoadSingleProdIdsHavingStartedTaskForCanGroupAsync(
+            List<int> singleProdIds,
+            CancellationToken ct)
+        {
+            singleProdIds = singleProdIds
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            if (singleProdIds.Count == 0)
+                return new HashSet<int>();
+
+            var taskRows = await _db.tasks
+                .AsNoTracking()
+                .Where(x =>
+                    x.prod_id.HasValue &&
+                    singleProdIds.Contains(x.prod_id.Value))
+                .Select(x => new
+                {
+                    x.task_id,
+                    prod_id = x.prod_id!.Value,
+                    x.status,
+                    x.start_time,
+                    x.end_time
+                })
+                .ToListAsync(ct);
+
+            if (taskRows.Count == 0)
+                return new HashSet<int>();
+
+            var taskIds = taskRows
+                .Select(x => x.task_id)
+                .Distinct()
+                .ToList();
+
+            var taskIdsWithLogs = await _db.task_logs
+                .AsNoTracking()
+                .Where(x =>
+                    x.task_id.HasValue &&
+                    taskIds.Contains(x.task_id.Value))
+                .Select(x => x.task_id!.Value)
+                .Distinct()
+                .ToListAsync(ct);
+
+            var logSet = taskIdsWithLogs.ToHashSet();
+
+            return taskRows
+                .Where(x => IsTaskStartedForCanGroup(
+                    x.status,
+                    x.start_time,
+                    x.end_time,
+                    logSet.Contains(x.task_id)))
+                .Select(x => x.prod_id)
+                .Distinct()
+                .ToHashSet();
+        }
+
+        private static bool IsTaskStartedForCanGroupSuggestion(
+    string? status,
+    DateTime? startTime,
+    DateTime? endTime,
+    bool hasLog)
+        {
+            if (startTime != null || endTime != null || hasLog)
+                return true;
+
+            var s = (status ?? "").Trim().ToUpperInvariant();
+
+            if (string.IsNullOrWhiteSpace(s))
+                return false;
+
+            /*
+             * Đồng bộ với GroupProductionService:
+             * chỉ Unassigned/null được xem là chưa bắt đầu.
+             */
+            return s != "UNASSIGNED";
+        }
+
+        private static readonly string[] CanGroupDept2Codes =
+{
+    "PHU", "CAN", "CAN_MANG", "BOI"
+};
+
+        private static readonly string[] CanGroupFullRouteOrder =
+        {
+    "RALO", "CAT", "IN", "PHU", "CAN", "CAN_MANG", "BOI", "BE", "DUT", "DAN"
+};
+
+        private static string? NormalizeProductionMethodForCanGroup(string? method)
+        {
+            var value = (method ?? "")
+                .Trim()
+                .ToUpperInvariant();
+
+            return value switch
+            {
+                "SUB" => "SUB",
+                "NVL" => "NVL",
+                "BOTH" => "BOTH",
+                _ => null
+            };
+        }
+
+        private static List<string> ParseProcessCodesForCanGroup(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormCanGroupCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndexForCanGroup)
+                .ToList();
+        }
+
+        private static string NormCanGroupCode(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "";
+
+            return RemoveDiacriticsForCanGroup(value)
+                .Trim()
+                .ToUpperInvariant()
+                .Replace("Đ", "D")
+                .Replace("-", "_")
+                .Replace(" ", "_")
+                .Trim('_');
+        }
+
+        private static string RemoveDiacriticsForCanGroup(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return "";
+
+            var normalized = text.Normalize(System.Text.NormalizationForm.FormD);
+            var sb = new System.Text.StringBuilder();
+
+            foreach (var ch in normalized)
+            {
+                var uc = System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch);
+                if (uc != System.Globalization.UnicodeCategory.NonSpacingMark)
+                    sb.Append(ch);
+            }
+
+            return sb.ToString().Normalize(System.Text.NormalizationForm.FormC);
+        }
+
+        private static bool IsDept2ForCanGroup(string? processCode)
+        {
+            var code = NormCanGroupCode(processCode);
+
+            return CanGroupDept2Codes.Contains(
+                code,
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static int FullRouteIndexForCanGroup(string? processCode)
+        {
+            var code = NormCanGroupCode(processCode);
+
+            var idx = Array.FindIndex(
+                CanGroupFullRouteOrder,
+                x => string.Equals(x, code, StringComparison.OrdinalIgnoreCase));
+
+            return idx < 0 ? 999 : idx;
+        }
+
+        private static bool RequiresSameMaterialKeyForCanGroup(string? processCode)
+        {
+            var code = NormCanGroupCode(processCode);
+
+            /*
+             * Đồng bộ với GroupProductionService.RequiresSameMaterialKey:
+             * PHU check keo phủ
+             * CAN/CAN_MANG check màng
+             * BOI check sóng
+             */
+            return code is "PHU" or "CAN" or "CAN_MANG" or "BOI";
+        }
+
+        private static string SafeKeyForCanGroup(string? value)
+        {
+            return string.IsNullOrWhiteSpace(value)
+                ? "NULL"
+                : NormCanGroupCode(value);
+        }
+
+        private string ResolveCanGroupPlanKey(
+            string processCode,
+            CanGroupCandidateRow row)
+        {
+            var method = NormalizeProductionMethodForCanGroup(row.prod_method) ?? "INVALID";
+            var materialKey = ResolveMaterialGroupKeyForCanGroup(processCode, row);
+
+            return $"METHOD={method}|{materialKey}";
+        }
+
+        private string ResolveMaterialGroupKeyForCanGroup(
+            string processCode,
+            CanGroupCandidateRow row)
+        {
+            var code = NormCanGroupCode(processCode);
+
+            if (code == "PHU")
+            {
+                var coating = ResolveCoatingMaterialCodeForCanGroup(row.estimate);
+                return $"PHU:COATING={SafeKeyForCanGroup(coating)}";
+            }
+
+            if (code is "CAN" or "CAN_MANG")
+            {
+                var lamination =
+                    !string.IsNullOrWhiteSpace(row.estimate?.lamination_material_code)
+                        ? row.estimate!.lamination_material_code
+                        : !string.IsNullOrWhiteSpace(row.estimate?.lamination_material_name)
+                            ? row.estimate!.lamination_material_name
+                            : row.estimate?.lamination_material_id?.ToString();
+
+                return $"{code}:LAMINATION={SafeKeyForCanGroup(lamination)}";
+            }
+
+            if (code == "BOI")
+            {
+                var wave = EstimateMaterialAlternativeHelper.ResolveWaveType(
+                    row.estimate?.wave_alternative,
+                    row.estimate?.wave_type);
+
+                return $"BOI:WAVE={SafeKeyForCanGroup(wave)}";
+            }
+
+            return $"{code}:NO_MATERIAL_CHECK";
+        }
+
+        private static string? ResolveCoatingMaterialCodeForCanGroup(cost_estimate? est)
+        {
+            if (est == null)
+                return null;
+
+            if (!string.IsNullOrWhiteSpace(est.coating_material_code))
+                return NormCanGroupCode(est.coating_material_code);
+
+            var raw = NormCanGroupCode(est.coating_type);
+
+            return raw switch
+            {
+                "KEO_NUOC" or "KEO_PHU_NUOC" => "KEO_PHU_NUOC",
+                "KEO_DAU" or "KEO_PHU_DAU" => "KEO_PHU_DAU",
+                "UV" or "KEO_UV" or "PHU_UV" or "KEO_PHU_UV" => "KEO_PHU_UV",
+                _ => string.IsNullOrWhiteSpace(raw) ? null : raw
+            };
+        }
+
+        private async Task<cost_estimate?> LoadAcceptedEstimateByOrderIdForCanGroupAsync(
+            int orderId,
+            CancellationToken ct)
+        {
+            var req = await _db.order_requests
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderByDescending(x => x.order_request_id)
+                .FirstOrDefaultAsync(ct);
+
+            if (req == null)
+                return null;
+
+            cost_estimate? est = null;
+
+            if (req.accepted_estimate_id.HasValue &&
+                req.accepted_estimate_id.Value > 0)
+            {
+                est = await _db.cost_estimates
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x =>
+                        x.estimate_id == req.accepted_estimate_id.Value &&
+                        x.order_request_id == req.order_request_id,
+                        ct);
+            }
+
+            est ??= await _db.cost_estimates
+                .AsNoTracking()
+                .Where(x => x.order_request_id == req.order_request_id)
+                .OrderByDescending(x => x.is_active)
+                .ThenByDescending(x => x.estimate_id)
+                .FirstOrDefaultAsync(ct);
+
+            return est;
         }
     }
 }

@@ -51,49 +51,53 @@ namespace AMMS.Application.Services
             var minDeliveryDate = today.AddDays(7);
 
             var rows = await (
-                from o in _db.orders.AsNoTracking()
-                join pr in _db.productions.AsNoTracking()
-                    on o.order_id equals pr.order_id
-                where pr.prod_kind == "SINGLE"
-                      && o.layout_confirmed
-                      && o.is_production_ready
+    from o in _db.orders.AsNoTracking()
+    join pr in _db.productions.AsNoTracking()
+        on o.order_id equals pr.order_id
+    where pr.prod_kind == "SINGLE"
+          && pr.status == "Scheduled"
+          && o.layout_confirmed
+          && o.is_production_ready
+          && o.status == "Scheduled"
+          && o.delivery_date != null
+          && o.delivery_date >= minDeliveryDate
+          && !_db.prod_orders.Any(po =>
+                po.order_id == o.order_id &&
+                po.status == "Active" &&
+                _db.productions.Any(g =>
+                    g.prod_id == po.prod_id &&
+                    g.prod_kind == "GROUP" &&
+                    g.status != "Cancelled" &&
+                    g.status != "Completed"))
+    select new
+    {
+        o.order_id,
+        order_code = o.code,
+        single_prod_id = pr.prod_id,
+        prod_method = pr.prod_method,
+        o.delivery_date,
+        item = _db.order_items.AsNoTracking()
+            .Where(i => i.order_id == o.order_id)
+            .OrderBy(i => i.item_id)
+            .Select(i => new
+            {
+                i.product_type_id,
+                i.product_name,
+                i.quantity,
+                i.production_process
+            })
+            .FirstOrDefault()
+    }
+).ToListAsync(ct);
 
-                      // Rule mới: chỉ order Scheduled mới được ghép.
-                      && o.status == "Scheduled"
+            var singleProdIds = rows
+    .Select(x => x.single_prod_id)
+    .Distinct()
+    .ToList();
 
-                      // Giữ rule 7 ngày nếu bạn vẫn cần.
-                      && o.delivery_date != null
-                      && o.delivery_date >= minDeliveryDate
-
-                      // Không hiện order đã nằm trong production GROUP active.
-                      && !_db.prod_orders.Any(po =>
-                            po.order_id == o.order_id &&
-                            po.status == "Active" &&
-                            _db.productions.Any(g =>
-                                g.prod_id == po.prod_id &&
-                                g.prod_kind == "GROUP" &&
-                                g.status != "Cancelled" &&
-                                g.status != "Completed"))
-                select new
-                {
-                    o.order_id,
-                    order_code = o.code,
-                    single_prod_id = pr.prod_id,
-                    prod_method = pr.prod_method,
-                    o.delivery_date,
-                    item = _db.order_items.AsNoTracking()
-                .Where(i => i.order_id == o.order_id)
-                .OrderBy(i => i.item_id)
-                .Select(i => new
-                {
-                    i.product_type_id,
-                    i.product_name,
-                    i.quantity,
-                    i.production_process
-                })
-                .FirstOrDefault()
-                }
-            ).ToListAsync(ct);
+            var startedSingleProdIds = await LoadSingleProdIdsHavingStartedTaskAsync(
+                singleProdIds,
+                ct);
 
             var result = new List<GroupProductionCandidateDto>();
 
@@ -120,13 +124,36 @@ namespace AMMS.Application.Services
                     : null;
 
                 var method = NormalizeProductionMethod(row.prod_method);
+                var hasStartedTask = startedSingleProdIds.Contains(row.single_prod_id);
+
+                var canGroup =
+                    method != null &&
+                    !hasStartedTask &&
+                    hasAllSelectedCodes;
+
+                string? reason = null;
+
+                if (method == null)
+                {
+                    reason = "Order chưa có prod_method hợp lệ SUB/NVL/BOTH nên chưa được ghép.";
+                }
+                else if (hasStartedTask)
+                {
+                    reason = "Order đã có ít nhất một task bắt đầu/Ready/Finished/có log nên không được ghép nhóm.";
+                }
+                else if (!hasAllSelectedCodes)
+                {
+                    reason = "Order không có đủ các công đoạn được chọn để ghép.";
+                }
 
                 result.Add(new GroupProductionCandidateDto
                 {
                     order_id = row.order_id,
                     order_code = row.order_code,
                     single_prod_id = row.single_prod_id,
+
                     production_method = method,
+                    has_started_task = hasStartedTask,
 
                     product_type_id = row.item.product_type_id,
                     product_type_name = productTypeName,
@@ -136,13 +163,8 @@ namespace AMMS.Application.Services
                     process_key = processKey,
                     delivery_date = row.delivery_date,
 
-                    can_group = method != null && hasAllSelectedCodes,
-
-                    reason = method == null
-                        ? $"Order chưa có phương thức sản xuất hợp lệ nên chưa được ghép."
-                        : hasAllSelectedCodes
-                            ? null
-                            : "Order không có đủ các công đoạn được chọn để ghép."
+                    can_group = canGroup,
+                    reason = reason
                 });
             }
 
@@ -236,7 +258,12 @@ namespace AMMS.Application.Services
                 var productTypeId = productTypeIds[0]!.Value;
                 ValidateRowsHaveSameProductionMethodOrThrow(
     rows,
-    "tạo production ghép");
+    "tạo lệnh ghép");
+
+                ValidateRowsHaveNoStartedTaskOrThrow(
+                    rows,
+                    "tạo lệnh ghép");
+
                 var alreadyGroupedOrderIds = await _db.prod_orders
                     .Where(x => orderIds.Contains(x.order_id) && x.status == "Active")
                     .Where(x => _db.productions.Any(p =>
@@ -954,12 +981,15 @@ namespace AMMS.Application.Services
             }
 
             allRows = allRows
-                .Where(x => x.Item != null)
-                .Where(x => x.Item.product_type_id.HasValue)
-                .Where(x => x.Order.layout_confirmed)
-                .Where(x => x.Order.is_production_ready)
-                .Where(x => string.Equals(x.Order.status, "Scheduled", StringComparison.OrdinalIgnoreCase))
-                .ToList();
+                    .Where(x => x.Item != null)
+                    .Where(x => x.Item.product_type_id.HasValue)
+                    .Where(x => x.Order.layout_confirmed)
+                    .Where(x => x.Order.is_production_ready)
+                    .Where(x => string.Equals(x.Order.status, "Scheduled", StringComparison.OrdinalIgnoreCase))
+                    .Where(x => string.Equals(x.SingleProd.status, "Scheduled", StringComparison.OrdinalIgnoreCase))
+                    .Where(x => ResolveRowProductionMethodOrNull(x) != null)
+                    .Where(x => !x.HasAnyStartedTask)
+                    .ToList();
 
             if (allRows.Count < 2)
                 return new List<SuggestedGroupProductionDto>();
@@ -1911,8 +1941,13 @@ namespace AMMS.Application.Services
                 throw new InvalidOperationException("Các order phải cùng loại sản phẩm.");
 
             ValidateRowsHaveSameProductionMethodOrThrow(
+    rows,
+    "preview ghép/tách production");
+
+            ValidateRowsHaveNoStartedTaskOrThrow(
                 rows,
                 "preview ghép/tách production");
+
             var plan = BuildDepartmentProductionPlan(
                 rows,
                 selectedCodes,
@@ -2628,6 +2663,7 @@ namespace AMMS.Application.Services
             public order_request? Request { get; init; }
             public cost_estimate? Estimate { get; init; }
             public List<string> RouteCodes { get; init; } = new();
+            public bool HasAnyStartedTask { get; init; }
         }
 
         private sealed class ProductionPlanSegment
@@ -2722,6 +2758,14 @@ namespace AMMS.Application.Services
     List<int> orderIds,
     CancellationToken ct)
         {
+            orderIds = orderIds
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            if (orderIds.Count == 0)
+                return new List<GroupOrderRow>();
+
             var rows = await (
                 from o in _db.orders
                 join pr in _db.productions on o.order_id equals pr.order_id
@@ -2737,6 +2781,15 @@ namespace AMMS.Application.Services
                         .FirstOrDefault()
                 }
             ).ToListAsync(ct);
+
+            var singleProdIds = rows
+                .Select(x => x.singleProd.prod_id)
+                .Distinct()
+                .ToList();
+
+            var startedSingleProdIds = await LoadSingleProdIdsHavingStartedTaskAsync(
+                singleProdIds,
+                ct);
 
             var result = new List<GroupOrderRow>();
 
@@ -2780,7 +2833,8 @@ namespace AMMS.Application.Services
                     Item = row.item,
                     Request = req,
                     Estimate = est,
-                    RouteCodes = ParseProcessCodes(row.item.production_process)
+                    RouteCodes = ParseProcessCodes(row.item.production_process),
+                    HasAnyStartedTask = startedSingleProdIds.Contains(row.singleProd.prod_id)
                 });
             }
 
@@ -3381,6 +3435,102 @@ namespace AMMS.Application.Services
             var materialKey = ResolveMaterialGroupKey(processCode, row);
 
             return $"METHOD={method}|{materialKey}";
+        }
+
+        private static bool IsTaskStartedForGroupSuggestion(
+    string? status,
+    DateTime? startTime,
+    DateTime? endTime,
+    bool hasLog)
+        {
+            if (startTime != null || endTime != null || hasLog)
+                return true;
+
+            var s = (status ?? "").Trim().ToUpperInvariant();
+
+            if (string.IsNullOrWhiteSpace(s))
+                return false;
+
+            /*
+             * Chỉ Unassigned/null được xem là chưa bắt đầu.
+             * Ready cũng loại, vì Ready thường đã giữ máy / đã cho phép báo cáo.
+             */
+            return s != "UNASSIGNED";
+        }
+
+        private async Task<HashSet<int>> LoadSingleProdIdsHavingStartedTaskAsync(
+            List<int> singleProdIds,
+            CancellationToken ct)
+        {
+            singleProdIds = singleProdIds
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            if (singleProdIds.Count == 0)
+                return new HashSet<int>();
+
+            var taskRows = await _db.tasks
+                .AsNoTracking()
+                .Where(x =>
+                    x.prod_id.HasValue &&
+                    singleProdIds.Contains(x.prod_id.Value))
+                .Select(x => new
+                {
+                    x.task_id,
+                    prod_id = x.prod_id!.Value,
+                    x.status,
+                    x.start_time,
+                    x.end_time
+                })
+                .ToListAsync(ct);
+
+            if (taskRows.Count == 0)
+                return new HashSet<int>();
+
+            var taskIds = taskRows
+                .Select(x => x.task_id)
+                .Distinct()
+                .ToList();
+
+            var taskIdsWithLogs = await _db.task_logs
+                .AsNoTracking()
+                .Where(x =>
+                    x.task_id.HasValue &&
+                    taskIds.Contains(x.task_id.Value))
+                .Select(x => x.task_id!.Value)
+                .Distinct()
+                .ToListAsync(ct);
+
+            var logSet = taskIdsWithLogs.ToHashSet();
+
+            return taskRows
+                .Where(x => IsTaskStartedForGroupSuggestion(
+                    x.status,
+                    x.start_time,
+                    x.end_time,
+                    logSet.Contains(x.task_id)))
+                .Select(x => x.prod_id)
+                .Distinct()
+                .ToHashSet();
+        }
+
+        private static void ValidateRowsHaveNoStartedTaskOrThrow(
+            List<GroupOrderRow> rows,
+            string actionName)
+        {
+            var invalidRows = rows
+                .Where(x => x.HasAnyStartedTask)
+                .Select(x =>
+                    $"order_id={x.Order.order_id}, single_prod_id={x.SingleProd.prod_id}")
+                .ToList();
+
+            if (invalidRows.Count == 0)
+                return;
+
+            throw new InvalidOperationException(
+                $"Không thể {actionName} vì có order đã bắt đầu ít nhất một công đoạn sản xuất. " +
+                $"Các order đã bắt đầu không được ghép/tách production. Chi tiết: {string.Join(" | ", invalidRows)}");
         }
     }
 }

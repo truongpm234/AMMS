@@ -32,5 +32,6 @@ namespace AMMS.Shared.DTOs.Productions.Groups
 
         public string? reason { get; set; }
         public string? production_method { get; set; }
+        public bool has_started_task { get; set; }
     }
 }
