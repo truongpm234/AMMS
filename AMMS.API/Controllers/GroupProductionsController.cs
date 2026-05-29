@@ -2,13 +2,14 @@
 using AMMS.Application.Interfaces;
 using AMMS.Shared.DTOs.Productions.Groups;
 using System.Security.Claims;
+using AMMS.Infrastructure.DBContext;
+using Microsoft.EntityFrameworkCore;
 
 [ApiController]
 [Route("api/[controller]")]
 public class GroupProductionsController : ControllerBase
 {
     private readonly IGroupProductionService _service;
-
     public GroupProductionsController(IGroupProductionService service)
     {
         _service = service;
@@ -159,101 +160,5 @@ public class GroupProductionsController : ControllerBase
         {
             return BadRequest(new { message = ex.Message });
         }
-    }
-
-    private static bool IsTaskStartedForGroupSuggestion(
-    string? status,
-    DateTime? startTime,
-    DateTime? endTime,
-    bool hasLog)
-    {
-        if (startTime != null || endTime != null || hasLog)
-            return true;
-
-        var s = (status ?? "").Trim().ToUpperInvariant();
-
-        if (string.IsNullOrWhiteSpace(s))
-            return false;
-
-        /*
-         * Chỉ Unassigned/null được xem là chưa bắt đầu.
-         * Ready cũng loại, vì Ready thường đã giữ máy / đã cho phép báo cáo.
-         */
-        return s != "UNASSIGNED";
-    }
-
-    private async Task<HashSet<int>> LoadSingleProdIdsHavingStartedTaskAsync(
-        List<int> singleProdIds,
-        CancellationToken ct)
-    {
-        singleProdIds = singleProdIds
-            .Where(x => x > 0)
-            .Distinct()
-            .ToList();
-
-        if (singleProdIds.Count == 0)
-            return new HashSet<int>();
-
-        var taskRows = await _db.tasks
-            .AsNoTracking()
-            .Where(x =>
-                x.prod_id.HasValue &&
-                singleProdIds.Contains(x.prod_id.Value))
-            .Select(x => new
-            {
-                x.task_id,
-                prod_id = x.prod_id!.Value,
-                x.status,
-                x.start_time,
-                x.end_time
-            })
-            .ToListAsync(ct);
-
-        if (taskRows.Count == 0)
-            return new HashSet<int>();
-
-        var taskIds = taskRows
-            .Select(x => x.task_id)
-            .Distinct()
-            .ToList();
-
-        var taskIdsWithLogs = await _db.task_logs
-            .AsNoTracking()
-            .Where(x =>
-                x.task_id.HasValue &&
-                taskIds.Contains(x.task_id.Value))
-            .Select(x => x.task_id!.Value)
-            .Distinct()
-            .ToListAsync(ct);
-
-        var logSet = taskIdsWithLogs.ToHashSet();
-
-        return taskRows
-            .Where(x => IsTaskStartedForGroupSuggestion(
-                x.status,
-                x.start_time,
-                x.end_time,
-                logSet.Contains(x.task_id)))
-            .Select(x => x.prod_id)
-            .Distinct()
-            .ToHashSet();
-    }
-
-    private static void ValidateRowsHaveNoStartedTaskOrThrow(
-        List<GroupOrderRow> rows,
-        string actionName)
-    {
-        var invalidRows = rows
-            .Where(x => x.HasAnyStartedTask)
-            .Select(x =>
-                $"order_id={x.Order.order_id}, single_prod_id={x.SingleProd.prod_id}")
-            .ToList();
-
-        if (invalidRows.Count == 0)
-            return;
-
-        throw new InvalidOperationException(
-            $"Không thể {actionName} vì có order đã bắt đầu ít nhất một công đoạn sản xuất. " +
-            $"Các order đã bắt đầu không được ghép/tách production. Chi tiết: {string.Join(" | ", invalidRows)}");
     }
 }
