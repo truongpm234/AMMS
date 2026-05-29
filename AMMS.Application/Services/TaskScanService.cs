@@ -210,6 +210,13 @@ namespace AMMS.Application.Services
                 t.start_time ??= now;
                 t.end_time = now;
 
+                var nextTask = await _db.tasks.SingleOrDefaultAsync(nt => nt.task_id == t.task_id + 1 && nt.prod_id == t.prod_id);
+                if (nextTask != null)
+                {
+                    await _hub.Clients.Group(RealtimeGroups.ByRole($"{t.machine}")).SendAsync("next task", new { message = $"Lệnh sản xuất {nextTask.prod_id} - {nextTask.task_id} có thể bắt đầu sản xuất" });
+                    await _noti.CreateNotfi(0, $"Lệnh sản xuất {nextTask.prod_id} - {nextTask.task_id} có thể bắt đầu sản xuất", null, 0, nextTask.machine);
+                }
+
                 var processCodeForOutput = currentFlow.process?.process_code;
                 var processNameForOutput = currentFlow.process?.process_name;
 

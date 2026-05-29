@@ -18,6 +18,12 @@ namespace AMMS.Infrastructure.Repositories
             return res;
         }
 
+        public async Task<List<notification>> StaffGetNoti(string role)
+        {
+            var res = await _db.notifications.Where(n => n.Status == role).ToListAsync();
+            return res;
+        }
+
         public async Task<List<notification>> GetConsultantNotificationUserId(int role_id, int? user_id)
         {
             var res = await _db.notifications.Where(n => n.RoleId == role_id && n.UserId == user_id).ToListAsync();
