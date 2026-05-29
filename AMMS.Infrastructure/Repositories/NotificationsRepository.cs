@@ -20,7 +20,12 @@ namespace AMMS.Infrastructure.Repositories
 
         public async Task<List<notification>> StaffGetNoti(string role)
         {
-            var res = await _db.notifications.Where(n => n.Status == role).ToListAsync();
+            var res = await _db.notifications
+                         .Where(n =>
+                             EF.Functions.Unaccent(n.Status).ToLower() ==
+                             EF.Functions.Unaccent(role).ToLower()
+                         )
+                         .ToListAsync();
             return res;
         }
 
