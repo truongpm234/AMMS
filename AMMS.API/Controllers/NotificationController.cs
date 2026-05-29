@@ -24,6 +24,12 @@ namespace AMMS.API.Controllers
             return Ok(await _notiService.GetNotiByRoleId(id));
         }
 
+        [HttpGet("staff-get-noti")]
+        public async Task<IActionResult> StaffGetNoti(string role)
+        {
+            return Ok(await _notiService.StaffGetNoti(role));
+        }
+
         [HttpPut("mark-as-read/{id}")]
         public async Task<IActionResult> MarkAsRead(int id)
         {
