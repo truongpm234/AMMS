@@ -5761,57 +5761,51 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         private async Task<(bool? can_start, string? message)> ResolveCanStartForProductionCardAsync(
-            BaseRow row,
-            TaskRow? currentTask,
-            bool? isProductionReady,
-            CancellationToken ct)
+    BaseRow row,
+    TaskRow? currentTask,
+    bool? isProductionReady,
+    CancellationToken ct)
         {
             if (currentTask == null)
-            {
                 return (null, null);
-            }
 
             if (IsFinishedStatus(currentTask.Status, currentTask.EndTime))
-            {
                 return (false, "Công đoạn hiện tại đã Finished.");
-            }
 
             if (StatusEquals(currentTask.Status, "GroupedWaiting"))
-            {
                 return (false, "Task này đã được ghép vào production chung, không thể chạy riêng.");
-            }
 
             if (isProductionReady != true)
-            {
                 return (false, "Order/production chưa được xác nhận sẵn sàng sản xuất.");
-            }
 
-            /*
-             * Nếu task đã Ready thì FE có thể cho quét QR/báo cáo.
-             */
-            if (StatusEquals(currentTask.Status, "Ready"))
-            {
-                return (true, "Task đã Ready, có thể báo cáo sản xuất.");
-            }
-
-            /*
-             * Chỉ task Unassigned/null mới được xét start.
-             * Các trạng thái khác không nên start lại.
-             */
             if (!string.IsNullOrWhiteSpace(currentTask.Status) &&
-                !StatusEquals(currentTask.Status, "Unassigned"))
+                !StatusEquals(currentTask.Status, "Unassigned") &&
+                !StatusEquals(currentTask.Status, "Ready"))
             {
                 return (false, $"Task đang ở trạng thái {currentTask.Status}, không thể bắt đầu.");
             }
 
-            return await CheckTaskCanStartForCardAsync(
+            /*
+             * FIX QUAN TRỌNG:
+             * Không được return true ngay khi task Ready.
+             * Dù Ready vẫn phải check dependency vì có thể data cũ/bug cũ đã set Ready sai.
+             */
+            var dep = await CheckTaskCanStartForCardAsync(
                 currentTask.TaskId,
                 ct);
+
+            if (!dep.can_start)
+                return (false, dep.message);
+
+            if (StatusEquals(currentTask.Status, "Ready"))
+                return (true, "Task đã Ready, có thể báo cáo sản xuất.");
+
+            return (true, "OK");
         }
 
         private async Task<(bool can_start, string message)> CheckTaskCanStartForCardAsync(
-            int taskId,
-            CancellationToken ct)
+    int taskId,
+    CancellationToken ct)
         {
             var currentTask = await _db.tasks
                 .AsNoTracking()
@@ -5838,29 +5832,43 @@ namespace AMMS.Infrastructure.Repositories
             if (string.IsNullOrWhiteSpace(currentCode))
                 return (false, $"Task {taskId} chưa có process_code.");
 
-            var isGroupProduction = StatusEquals(prod.prod_kind, "GROUP");
-
-            if (isGroupProduction)
-            {
-                return await CheckGroupTaskCanStartForCardAsync(
-                    currentTask,
-                    prod,
-                    currentCode,
-                    ct);
-            }
-
-            return await CheckSingleOrSplitTaskCanStartForCardAsync(
+            /*
+             * 1. Check pipeline nội bộ trong cùng production.
+             * Ví dụ:
+             * - GROUP: CAN phải đợi PHU Finished.
+             * - SPLIT: DUT phải đợi BE Finished.
+             * - SINGLE: công đoạn sau phải đợi công đoạn trước trong cùng production.
+             */
+            var internalCheck = await CheckInternalPipelineForCanStartAsync(
                 currentTask,
-                prod,
                 currentCode,
                 ct);
+
+            if (!internalCheck.can_start)
+                return internalCheck;
+
+            /*
+             * 2. Check dependency theo route thật của order.
+             * Đây là phần fix case order 124/127:
+             * nếu production sau đang ở PHU/CAN/BE... thì phải nhìn lại order route
+             * và tìm đúng công đoạn trước của order, dù công đoạn đó nằm ở SINGLE/GROUP/SPLIT khác.
+             */
+            var routeCheck = await CheckOrderRouteDependencyForCanStartAsync(
+                prod,
+                currentTask,
+                currentCode,
+                ct);
+
+            if (!routeCheck.can_start)
+                return routeCheck;
+
+            return (true, "OK");
         }
 
-        private async Task<(bool can_start, string message)> CheckSingleOrSplitTaskCanStartForCardAsync(
-            task currentTask,
-            production prod,
-            string currentCode,
-            CancellationToken ct)
+        private async Task<(bool can_start, string message)> CheckInternalPipelineForCanStartAsync(
+    task currentTask,
+    string currentCode,
+    CancellationToken ct)
         {
             if (!currentTask.prod_id.HasValue || !currentTask.seq_num.HasValue)
                 return (false, $"Task {currentTask.task_id} thiếu prod_id hoặc seq_num.");
@@ -5868,180 +5876,22 @@ namespace AMMS.Infrastructure.Repositories
             var currentSeq = currentTask.seq_num.Value;
 
             /*
-             * 1. Check pipeline nội bộ trong cùng production.
-             * RALO/CAT/IN có thể là initial parallel tùy helper hiện tại.
+             * Giữ logic cũ: RALO/CAT/IN có thể là initial parallel nếu helper của bạn đang quy định vậy.
+             * Các công đoạn sau thì bắt buộc check previous trong cùng production.
              */
             var isInitialParallel = ProductionFlowHelper.IsInitialParallel(currentCode);
 
-            if (!isInitialParallel)
-            {
-                var previousUnfinished = await _db.tasks
-                    .AsNoTracking()
-                    .Include(x => x.process)
-                    .Where(x =>
-                        x.prod_id == currentTask.prod_id.Value &&
-                        x.task_id != currentTask.task_id &&
-                        x.seq_num.HasValue &&
-                        x.seq_num.Value < currentSeq &&
-                        (
-                            x.status == null ||
-                            x.status.ToUpper() != "FINISHED"
-                        ))
-                    .OrderBy(x => x.seq_num)
-                    .ThenBy(x => x.task_id)
-                    .FirstOrDefaultAsync(ct);
-
-                if (previousUnfinished != null)
-                {
-                    var prevCode = previousUnfinished.process?.process_code ?? previousUnfinished.name ?? "";
-                    var prevStatus = ShowCanStartStatus(previousUnfinished.status);
-
-                    return (
-                        false,
-                        $"Công đoạn {currentCode} chưa được start vì công đoạn trước đó {prevCode} chưa Finished. " +
-                        $"previous_task_id={previousUnfinished.task_id}, status={prevStatus}.");
-                }
-            }
-
-            /*
-             * 2. Check các GROUP trước đó của cùng order.
-             * Case quan trọng:
-             * - SINGLE/SPLIT BE,DUT,DAN chỉ được start khi GROUP PHU/CAN trước đó đã Finished
-             *   và có task_qty phân bổ cho order.
-             */
-            if (prod.order_id.HasValue && prod.order_id.Value > 0)
-            {
-                var groupCheck = await CheckPreviousGroupStagesForOrderAsync(
-                    orderId: prod.order_id.Value,
-                    currentSeq: currentSeq,
-                    currentProcessCode: currentCode,
-                    ct: ct);
-
-                if (!groupCheck.can_start)
-                    return groupCheck;
-            }
-
-            return (true, "OK");
-        }
-
-        private async Task<(bool can_start, string message)> CheckGroupTaskCanStartForCardAsync(
-            task groupTask,
-            production groupProd,
-            string currentCode,
-            CancellationToken ct)
-        {
-            if (!groupTask.seq_num.HasValue)
-                return (false, $"Group task {groupTask.task_id} chưa có seq_num.");
-
-            var groupSeq = groupTask.seq_num.Value;
-
-            var links = await _db.task_links
-                .AsNoTracking()
-                .Where(x =>
-                    x.group_task_id == groupTask.task_id &&
-                    (
-                        x.status == null ||
-                        x.status.ToUpper() != "CANCELLED"
-                    ))
-                .OrderBy(x => x.id)
-                .ToListAsync(ct);
-
-            if (links.Count == 0)
-            {
-                /*
-                 * Fallback nếu dữ liệu group cũ chưa có task_links.
-                 */
-                var activeOrders = await _db.prod_orders
-                    .AsNoTracking()
-                    .Where(x =>
-                        x.prod_id == groupProd.prod_id &&
-                        x.status == "Active")
-                    .OrderBy(x => x.order_id)
-                    .ToListAsync(ct);
-
-                if (activeOrders.Count == 0)
-                    return (false, $"Group production {groupProd.prod_id} chưa có order active.");
-
-                foreach (var po in activeOrders)
-                {
-                    if (!po.single_prod_id.HasValue)
-                    {
-                        return (
-                            false,
-                            $"Order {po.order_id} trong group chưa có single_prod_id nên không kiểm tra được dependency.");
-                    }
-
-                    var singleCheck = await CheckSingleProductionBeforeGroupStageAsync(
-                        orderId: po.order_id,
-                        singleProdId: po.single_prod_id.Value,
-                        groupSeq: groupSeq,
-                        currentCode: currentCode,
-                        ct: ct);
-
-                    if (!singleCheck.can_start)
-                        return singleCheck;
-
-                    var prevGroupCheck = await CheckPreviousGroupStagesForSingleProdAsync(
-                        orderId: po.order_id,
-                        singleProdId: po.single_prod_id.Value,
-                        currentGroupTaskId: groupTask.task_id,
-                        currentSeq: groupSeq,
-                        currentProcessCode: currentCode,
-                        ct: ct);
-
-                    if (!prevGroupCheck.can_start)
-                        return prevGroupCheck;
-                }
-
+            if (isInitialParallel)
                 return (true, "OK");
-            }
 
-            foreach (var link in links)
-            {
-                var singleCheck = await CheckSingleProductionBeforeGroupStageAsync(
-                    orderId: link.order_id,
-                    singleProdId: link.single_prod_id,
-                    groupSeq: groupSeq,
-                    currentCode: currentCode,
-                    ct: ct);
-
-                if (!singleCheck.can_start)
-                    return singleCheck;
-
-                var prevGroupCheck = await CheckPreviousGroupStagesForSingleProdAsync(
-                    orderId: link.order_id,
-                    singleProdId: link.single_prod_id,
-                    currentGroupTaskId: groupTask.task_id,
-                    currentSeq: groupSeq,
-                    currentProcessCode: currentCode,
-                    ct: ct);
-
-                if (!prevGroupCheck.can_start)
-                    return prevGroupCheck;
-            }
-
-            return (true, "OK");
-        }
-
-        private async Task<(bool can_start, string message)> CheckSingleProductionBeforeGroupStageAsync(
-            int orderId,
-            int singleProdId,
-            int groupSeq,
-            string currentCode,
-            CancellationToken ct)
-        {
-            /*
-             * Với GROUP PHU/CAN:
-             * Các task riêng trước seq PHU/CAN của từng single production phải Finished.
-             * Ví dụ PHU seq=4 thì RALO/CAT/IN phải Finished.
-             */
             var previousUnfinished = await _db.tasks
                 .AsNoTracking()
                 .Include(x => x.process)
                 .Where(x =>
-                    x.prod_id == singleProdId &&
+                    x.prod_id == currentTask.prod_id.Value &&
+                    x.task_id != currentTask.task_id &&
                     x.seq_num.HasValue &&
-                    x.seq_num.Value < groupSeq &&
+                    x.seq_num.Value < currentSeq &&
                     (
                         x.status == null ||
                         x.status.ToUpper() != "FINISHED"
@@ -6058,147 +5908,264 @@ namespace AMMS.Infrastructure.Repositories
 
             return (
                 false,
-                $"Order {orderId}: công đoạn {currentCode} chưa được start vì công đoạn trước đó {prevCode} chưa Finished. " +
+                $"Công đoạn {currentCode} chưa được start vì công đoạn trước đó {prevCode} trong cùng production chưa Finished. " +
                 $"previous_task_id={previousUnfinished.task_id}, status={prevStatus}.");
         }
 
-        private async Task<(bool can_start, string message)> CheckPreviousGroupStagesForSingleProdAsync(
-            int orderId,
-            int singleProdId,
-            int currentGroupTaskId,
-            int currentSeq,
-            string currentProcessCode,
-            CancellationToken ct)
+        private async Task<(bool can_start, string message)> CheckOrderRouteDependencyForCanStartAsync(
+    production currentProd,
+    task currentTask,
+    string currentCode,
+    CancellationToken ct)
         {
-            /*
-             * Với GROUP sau:
-             * Ví dụ CAN chỉ được start khi GROUP PHU trước đó Finished
-             * và đã có task_qty phân bổ cho từng order.
-             */
-            var previousGroupLinks = await (
-                from tl in _db.task_links.AsNoTracking()
-                join gt in _db.tasks.AsNoTracking()
-                    on tl.group_task_id equals gt.task_id
-                where tl.single_prod_id == singleProdId
-                      && tl.order_id == orderId
-                      && tl.group_task_id != currentGroupTaskId
-                      && gt.seq_num.HasValue
-                      && gt.seq_num.Value < currentSeq
-                      && (
-                            tl.status == null ||
-                            tl.status.ToUpper() != "CANCELLED"
-                         )
-                orderby gt.seq_num, gt.task_id
-                select new
-                {
-                    tl.group_task_id,
-                    tl.order_id,
-                    tl.process_code,
-                    group_seq = gt.seq_num,
-                    group_status = gt.status,
-                    group_end_time = gt.end_time
-                }
-            ).ToListAsync(ct);
+            var orderIds = await ResolveOrderIdsOfProductionForCanStartAsync(
+                currentProd,
+                ct);
 
-            foreach (var prev in previousGroupLinks)
+            if (orderIds.Count == 0)
+                return (true, "OK");
+
+            var issues = new List<string>();
+
+            foreach (var orderId in orderIds)
             {
-                var prevCode = NormCanStartCode(prev.process_code);
+                var route = await GetOrderRouteForCanStartAsync(orderId, ct);
 
-                if (!IsFinishedStatus(prev.group_status, prev.group_end_time))
+                if (route.Count == 0)
+                    continue;
+
+                var previousCode = ResolvePreviousProcessCodeForCanStart(
+                    route,
+                    currentCode);
+
+                /*
+                 * currentCode là công đoạn đầu tiên của route order.
+                 * Ví dụ RALO thì không cần check previous.
+                 */
+                if (string.IsNullOrWhiteSpace(previousCode))
+                    continue;
+
+                var previous = await FindPreviousStageForOrderForCanStartAsync(
+                    orderId,
+                    previousCode,
+                    currentTask.task_id,
+                    ct);
+
+                if (previous == null)
                 {
-                    return (
-                        false,
-                        $"Order {orderId}: công đoạn {currentProcessCode} chưa được start vì công đoạn ghép trước đó {prevCode} chưa Finished. " +
-                        $"previous_group_task_id={prev.group_task_id}, status={ShowCanStartStatus(prev.group_status)}.");
+                    issues.Add(
+                        $"Order {orderId}: công đoạn {currentCode} chưa được start vì không tìm thấy công đoạn trước đó {previousCode}.");
+                    continue;
                 }
 
-                var hasQty = await _db.task_qtys
-                    .AsNoTracking()
-                    .AnyAsync(x =>
-                        x.group_task_id == prev.group_task_id &&
-                        x.order_id == orderId &&
-                        x.process_code != null &&
-                        x.process_code.Trim().ToUpper() == prevCode &&
-                        x.qty_good > 0,
-                        ct);
-
-                if (!hasQty)
+                if (!IsFinishedStatus(previous.status, previous.end_time))
                 {
-                    return (
-                        false,
-                        $"Order {orderId}: group task {prevCode} đã Finished nhưng chưa có sản lượng phân bổ task_qtys.");
+                    issues.Add(
+                        $"Order {orderId}: công đoạn {currentCode} chưa được start vì công đoạn trước đó {previousCode} chưa Finished. " +
+                        $"previous_task_id={previous.task_id}, status={ShowCanStartStatus(previous.status)}.");
+                    continue;
+                }
+
+                /*
+                 * Nếu previous là GROUP thì ngoài Finished còn phải có task_qtys phân bổ cho order.
+                 * Nếu không có qty phân bổ, SPLIT/production sau chưa được start.
+                 */
+                if (previous.is_group_task)
+                {
+                    var hasAllocatedQty = await _db.task_qtys
+                        .AsNoTracking()
+                        .AnyAsync(x =>
+                            x.group_task_id == previous.task_id &&
+                            x.order_id == orderId &&
+                            x.process_code != null &&
+                            x.process_code.Trim().ToUpper() == previousCode &&
+                            x.qty_good > 0,
+                            ct);
+
+                    if (!hasAllocatedQty)
+                    {
+                        issues.Add(
+                            $"Order {orderId}: công đoạn ghép trước đó {previousCode} đã Finished nhưng chưa có sản lượng phân bổ task_qtys.");
+                    }
                 }
             }
+
+            if (issues.Count > 0)
+                return (false, string.Join(" | ", issues));
 
             return (true, "OK");
         }
 
-        private async Task<(bool can_start, string message)> CheckPreviousGroupStagesForOrderAsync(
-            int orderId,
-            int currentSeq,
-            string currentProcessCode,
+        private sealed class PreviousStageForCanStart
+        {
+            public int task_id { get; set; }
+            public int? prod_id { get; set; }
+            public string? prod_kind { get; set; }
+            public string? status { get; set; }
+            public DateTime? end_time { get; set; }
+            public bool is_group_task { get; set; }
+        }
+
+        private async Task<List<int>> ResolveOrderIdsOfProductionForCanStartAsync(
+            production prod,
             CancellationToken ct)
         {
+            if (prod.order_id.HasValue && prod.order_id.Value > 0)
+                return new List<int> { prod.order_id.Value };
+
             /*
-             * Dùng cho SINGLE/SPLIT.
-             * Ví dụ SPLIT BE,DUT,DAN phải đợi GROUP PHU/CAN trước đó hoàn thành.
+             * GROUP production không có order_id nên lấy từ prod_orders.
              */
-            var previousGroupLinks = await (
+            var orderIds = await _db.prod_orders
+                .AsNoTracking()
+                .Where(x =>
+                    x.prod_id == prod.prod_id &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
+                .Select(x => x.order_id)
+                .Distinct()
+                .ToListAsync(ct);
+
+            return orderIds;
+        }
+
+        private async Task<List<string>> GetOrderRouteForCanStartAsync(
+            int orderId,
+            CancellationToken ct)
+        {
+            var csv = await _db.order_items
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderBy(x => x.item_id)
+                .Select(x => x.production_process)
+                .FirstOrDefaultAsync(ct);
+
+            return ParseCanStartRoute(csv);
+        }
+
+        private static List<string> ParseCanStartRoute(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormCanStartCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static string? ResolvePreviousProcessCodeForCanStart(
+            List<string> route,
+            string currentCode)
+        {
+            currentCode = NormCanStartCode(currentCode);
+
+            var idx = route.FindIndex(x =>
+                string.Equals(
+                    NormCanStartCode(x),
+                    currentCode,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (idx <= 0)
+                return null;
+
+            return route[idx - 1];
+        }
+
+        private async Task<PreviousStageForCanStart?> FindPreviousStageForOrderForCanStartAsync(
+            int orderId,
+            string previousCode,
+            int currentTaskId,
+            CancellationToken ct)
+        {
+            previousCode = NormCanStartCode(previousCode);
+
+            /*
+             * Ưu tiên tìm GROUP task trước vì các công đoạn PHU/CAN/BOI có thể đã được ghép.
+             */
+            var groupPrevious = await (
                 from tl in _db.task_links.AsNoTracking()
+
                 join gt in _db.tasks.AsNoTracking()
                     on tl.group_task_id equals gt.task_id
+
+                join gp in _db.productions.AsNoTracking()
+                    on gt.prod_id equals gp.prod_id
+
                 where tl.order_id == orderId
-                      && gt.seq_num.HasValue
-                      && gt.seq_num.Value < currentSeq
+                      && tl.group_task_id != currentTaskId
+                      && tl.process_code != null
+                      && tl.process_code.Trim().ToUpper() == previousCode
                       && (
                             tl.status == null ||
                             tl.status.ToUpper() != "CANCELLED"
                          )
-                orderby gt.seq_num, gt.task_id
-                select new
+                      && (
+                            gp.status == null ||
+                            gp.status.ToUpper() != "CANCELLED"
+                         )
+
+                orderby gt.seq_num descending, gt.task_id descending
+
+                select new PreviousStageForCanStart
                 {
-                    tl.group_task_id,
-                    tl.order_id,
-                    tl.process_code,
-                    group_seq = gt.seq_num,
-                    group_status = gt.status,
-                    group_end_time = gt.end_time
+                    task_id = gt.task_id,
+                    prod_id = gt.prod_id,
+                    prod_kind = gp.prod_kind,
+                    status = gt.status,
+                    end_time = gt.end_time,
+                    is_group_task = true
                 }
-            ).ToListAsync(ct);
+            ).FirstOrDefaultAsync(ct);
 
-            foreach (var prev in previousGroupLinks)
-            {
-                var prevCode = NormCanStartCode(prev.process_code);
+            if (groupPrevious != null)
+                return groupPrevious;
 
-                if (!IsFinishedStatus(prev.group_status, prev.group_end_time))
+            /*
+             * Nếu không nằm trong GROUP, tìm task trực tiếp theo order_id.
+             * Bao gồm SINGLE hoặc SPLIT production.
+             */
+            var directPrevious = await (
+                from t in _db.tasks.AsNoTracking()
+
+                join p in _db.productions.AsNoTracking()
+                    on t.prod_id equals p.prod_id
+
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                where p.order_id == orderId
+                      && t.task_id != currentTaskId
+                      && pp != null
+                      && pp.process_code != null
+                      && pp.process_code.Trim().ToUpper() == previousCode
+                      && (
+                            p.status == null ||
+                            p.status.ToUpper() != "CANCELLED"
+                         )
+
+                orderby t.seq_num descending, t.task_id descending
+
+                select new PreviousStageForCanStart
                 {
-                    return (
-                        false,
-                        $"Order {orderId}: công đoạn {currentProcessCode} chưa được start vì công đoạn ghép trước đó {prevCode} chưa Finished. " +
-                        $"previous_group_task_id={prev.group_task_id}, status={ShowCanStartStatus(prev.group_status)}.");
+                    task_id = t.task_id,
+                    prod_id = t.prod_id,
+                    prod_kind = p.prod_kind,
+                    status = t.status,
+                    end_time = t.end_time,
+                    is_group_task = false
                 }
+            ).FirstOrDefaultAsync(ct);
 
-                var hasQty = await _db.task_qtys
-                    .AsNoTracking()
-                    .AnyAsync(x =>
-                        x.group_task_id == prev.group_task_id &&
-                        x.order_id == orderId &&
-                        x.process_code != null &&
-                        x.process_code.Trim().ToUpper() == prevCode &&
-                        x.qty_good > 0,
-                        ct);
-
-                if (!hasQty)
-                {
-                    return (
-                        false,
-                        $"Order {orderId}: group task {prevCode} đã Finished nhưng chưa có sản lượng phân bổ task_qtys.");
-                }
-            }
-
-            return (true, "OK");
+            return directPrevious;
         }
 
+        
         private static bool StatusEquals(string? status, string expected)
         {
             return string.Equals(
