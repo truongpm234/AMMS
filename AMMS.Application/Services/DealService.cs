@@ -83,12 +83,6 @@ namespace AMMS.Application.Services
             var req = await _requestRepo.GetByIdAsync(orderRequestId)
                 ?? throw new Exception("Order request not found");
 
-            if (!req.quote_expires_at.HasValue)
-            {
-                req.quote_expires_at = AppTime.NowVnUnspecified().AddDays(7);
-                await _requestRepo.SaveChangesAsync();
-            }
-
             if (string.IsNullOrWhiteSpace(req.customer_email))
             {
                 req.process_status = "Verified";
