@@ -13,7 +13,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-
+using System.Threading;
 namespace AMMS.Application.Services
 {
     public class DealService : IDealService
@@ -35,7 +35,7 @@ namespace AMMS.Application.Services
         private readonly IHubContext<RealtimeHub> _hub;
         private readonly NotificationService _notificationService;
         private readonly IBaseConfigRepository _baseConfigRepo;
-
+        private static long _payosOrderCodeSeq = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() % 1000;
         public DealService(
     NotificationService notificationService,
     IHubContext<RealtimeHub> hub,
@@ -153,7 +153,30 @@ namespace AMMS.Application.Services
                 }
 
                 await _quoteRepo.SaveChangesAsync();
+                /*
+ * Sau khi gửi quote, request phải ở Waiting và có quote_expire_at.
+ * Không set accepted_estimate_id ở đây nếu có 2 quote,
+ * vì khách chưa chọn option nào.
+ */
+                req.process_status = "Waiting";
 
+                if (!req.verified_at.HasValue)
+                    req.verified_at = AppTime.NowVnUnspecified();
+
+                if (!req.quote_expires_at.HasValue)
+                    req.quote_expires_at = req.verified_at.Value.AddDays(7);
+
+                /*
+                 * Nếu chỉ có 1 quote thì có thể sync quote_id để FE dễ lấy.
+                 * Nếu có 2 quote thì để null, khi FE chọn estimate nào,
+                 * payos-deposit sẽ sync đúng quote theo estimate đó.
+                 */
+                if (quotePairs.Count == 1)
+                {
+                    req.quote_id = quotePairs[0].q.quote_id;
+                }
+
+                await _requestRepo.SaveChangesAsync();
                 var htmlCustomer = DealEmailTemplates.QuoteEmailCompare(req, quotePairs);
                 var sentSuffix = DateTime.Now.ToString("ddMMyyyy-HHmmss");
 
@@ -215,18 +238,27 @@ namespace AMMS.Application.Services
 
             var est = await ResolveAcceptedEstimateAsync(req);
 
-            await SendConsultantStatusEmailAsync(req, est, statusText: "KHÁCH ĐỒNG Ý BÁO GIÁ");
+            await SendConsultantStatusEmailAsync(
+                req,
+                est,
+                statusText: "KHÁCH ĐỒNG Ý BÁO GIÁ");
 
-            var resolvedQuoteId = await ResolveQuoteIdForEstimateAsync(
-                orderRequestId,
-                est.estimate_id,
+            var resolvedQuote = await ResolveOrCreateQuoteForDepositInServiceAsync(
+                req,
+                est,
                 req.quote_id,
+                CancellationToken.None);
+
+            await EnsureRequestPaymentColumnsReadyAsync(
+                req,
+                est,
+                resolvedQuote,
                 CancellationToken.None);
 
             var dto = await CreateOrReuseDepositLinkAsync(
                 requestId: orderRequestId,
                 estimateId: est.estimate_id,
-                quoteId: resolvedQuoteId,
+                quoteId: resolvedQuote.quote_id,
                 ct: CancellationToken.None);
 
             return dto.check_out_url ?? "";
@@ -239,11 +271,25 @@ namespace AMMS.Application.Services
     CancellationToken ct = default)
         {
             if (currentQuoteId.HasValue && currentQuoteId.Value > 0)
-                return currentQuoteId.Value;
+            {
+                var matched = await _db.quotes
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.quote_id == currentQuoteId.Value &&
+                        x.order_request_id == orderRequestId &&
+                        x.estimate_id == estimateId)
+                    .Select(x => (int?)x.quote_id)
+                    .FirstOrDefaultAsync(ct);
+
+                if (matched.HasValue)
+                    return matched.Value;
+            }
 
             return await _db.quotes
                 .AsNoTracking()
-                .Where(x => x.order_request_id == orderRequestId && x.estimate_id == estimateId)
+                .Where(x =>
+                    x.order_request_id == orderRequestId &&
+                    x.estimate_id == estimateId)
                 .OrderByDescending(x => x.quote_id)
                 .Select(x => (int?)x.quote_id)
                 .FirstOrDefaultAsync(ct);
@@ -543,7 +589,11 @@ namespace AMMS.Application.Services
             );
         }
 
-        public async Task<PayOsResultDto> CreateOrReuseDepositLinkAsync(int requestId, int estimateId, int? quoteId, CancellationToken ct = default)
+        public async Task<PayOsResultDto> CreateOrReuseDepositLinkAsync(
+    int requestId,
+    int estimateId,
+    int? quoteId,
+    CancellationToken ct = default)
         {
             var req = await _requestRepo.GetByIdAsync(requestId)
                       ?? throw new InvalidOperationException("Request not found");
@@ -551,16 +601,39 @@ namespace AMMS.Application.Services
             if (string.Equals(req.process_status, "Rejected", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Request has been Rejected. Cannot create payment link.");
 
-            if (string.Equals(req.process_status, "Accepted", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Request has been Accepted. Cannot create payment link.");
+            if (string.Equals(req.process_status, "Cancel", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(req.process_status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Request has been Cancelled. Cannot create payment link.");
 
             var est = await _estimateRepo.GetByIdAsync(estimateId)
-              ?? throw new InvalidOperationException("Cost estimate not found");
+                      ?? throw new InvalidOperationException("Cost estimate not found");
 
             if (est.order_request_id != requestId)
                 throw new InvalidOperationException("Estimate does not belong to this request");
 
-            var pending = await _paymentRepo.GetLatestPendingByRequestIdAndEstimateIdAsync(requestId, estimateId, ct);
+            /*
+             * FIX:
+             * Resolve quote + sync request trước khi reuse/create PayOS.
+             */
+            var resolvedQuote = await ResolveOrCreateQuoteForDepositInServiceAsync(
+                req,
+                est,
+                quoteId,
+                ct);
+
+            await EnsureRequestPaymentColumnsReadyAsync(
+                req,
+                est,
+                resolvedQuote,
+                ct);
+
+            var resolvedQuoteId = resolvedQuote.quote_id;
+
+            var pending = await _paymentRepo.GetLatestPendingByRequestIdAndEstimateIdAsync(
+                requestId,
+                estimateId,
+                ct);
+
             if (pending != null)
             {
                 PayOsResultDto? liveInfo = null;
@@ -594,26 +667,62 @@ namespace AMMS.Application.Services
                 var merged = MergePayOsResult(liveInfo, savedInfo, pending);
 
                 if (IsReusablePayOsStatus(merged.status))
+                {
+                    /*
+                     * Nếu payment cũ thiếu quote_id thì cập nhật lại.
+                     */
+                    if (!pending.quote_id.HasValue || pending.quote_id.Value <= 0)
+                    {
+                        pending.quote_id = resolvedQuoteId;
+                        pending.updated_at = AppTime.NowVnUnspecified();
+                        await _paymentRepo.SaveChangesAsync(ct);
+                    }
+
                     return merged;
+                }
             }
 
             var backendUrl = _config["Deal:BaseUrl"]!;
-            var feBase = _config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app";
+            var feBase = (_config["Deal:BaseUrlFe"] ?? "https://sep490-fe.vercel.app").TrimEnd('/');
 
             var actualAmount = PaymentAmountHelper.GetDepositAmount(est);
             var gatewayAmount = PaymentAmountHelper.ToGatewayAmount(actualAmount, _config);
 
-            const int maxAttempt = 9;
+            if (actualAmount <= 0)
+                throw new InvalidOperationException("Deposit amount must be greater than 0.");
+
+            const int maxAttempt = 20;
             Exception? last = null;
 
             for (int attempt = 1; attempt <= maxAttempt; attempt++)
             {
-                int orderCode = checked(requestId * 10 + attempt);
+                /*
+                 * FIX:
+                 * Không dùng requestId * 10 + attempt nữa.
+                 * Vì DB reset identity sẽ trùng orderCode cũ trên PayOS.
+                 */
+                long orderCode = BuildUniquePayOsOrderCode();
+
+                /*
+                 * Check local DB trước.
+                 * Trường hợp DB mới reset thì thường không có, nhưng vẫn nên check.
+                 */
+                var existsLocal = await _db.payments
+                    .AsNoTracking()
+                    .AnyAsync(x => x.order_code == orderCode, ct);
+
+                if (existsLocal)
+                    continue;
+
                 var description = $"MES{orderCode}";
+
                 var returnUrl =
-                            $"{backendUrl}/api/requests/payos/return" +
-                            $"?request_id={requestId}&order_code={orderCode}&estimate_id={estimateId}" +
-                            (quoteId.HasValue && quoteId.Value > 0 ? $"&quote_id={quoteId.Value}" : "");
+                    $"{backendUrl}/api/requests/payos/return" +
+                    $"?request_id={requestId}" +
+                    $"&order_code={orderCode}" +
+                    $"&estimate_id={estimateId}" +
+                    (quoteId.HasValue && quoteId.Value > 0 ? $"&quote_id={quoteId.Value}" : "");
+
                 var cancelUrl = $"{feBase}/reject-deal/{requestId}?status=cancel";
 
                 try
@@ -630,6 +739,7 @@ namespace AMMS.Application.Services
                         ct: ct);
 
                     var now = AppTime.NowVnUnspecified();
+
                     await _paymentRepo.UpsertPendingAsync(new payment
                     {
                         order_request_id = requestId,
@@ -645,20 +755,152 @@ namespace AMMS.Application.Services
                         created_at = now,
                         updated_at = now,
                         estimate_id = estimateId,
-                        quote_id = (quoteId.HasValue && quoteId.Value > 0) ? quoteId.Value : null
+                        quote_id = quoteId.HasValue && quoteId.Value > 0 ? quoteId.Value : null
                     }, ct);
 
                     await _paymentRepo.SaveChangesAsync(ct);
+
+                    if (payos.order_code <= 0)
+                        payos.order_code = orderCode;
+
                     return payos;
                 }
                 catch (PayOsException ex) when (IsDuplicateOrderCode(ex.Message))
                 {
+                    /*
+                     * Nếu cực hiếm vẫn trùng trên PayOS thì sinh orderCode mới và thử lại.
+                     */
                     last = ex;
+
+                    _logger.LogWarning(
+                        ex,
+                        "PayOS orderCode duplicated. RequestId={RequestId}, EstimateId={EstimateId}, OrderCode={OrderCode}, Attempt={Attempt}",
+                        requestId,
+                        estimateId,
+                        orderCode,
+                        attempt);
+
                     continue;
                 }
             }
 
-            throw new InvalidOperationException($"Cannot create PayOS link after retries. Last error: {last?.Message}");
+            throw new InvalidOperationException(
+                $"Cannot create PayOS link after retries. Last error: {last?.Message}");
+        }
+
+        private async Task<quote> ResolveOrCreateQuoteForDepositInServiceAsync(
+    order_request req,
+    cost_estimate est,
+    int? inputQuoteId,
+    CancellationToken ct)
+        {
+            quote? q = null;
+
+            if (inputQuoteId.HasValue && inputQuoteId.Value > 0)
+            {
+                q = await _db.quotes
+                    .FirstOrDefaultAsync(x =>
+                        x.quote_id == inputQuoteId.Value &&
+                        x.order_request_id == req.order_request_id &&
+                        x.estimate_id == est.estimate_id,
+                        ct);
+            }
+
+            if (q == null &&
+                req.quote_id.HasValue &&
+                req.quote_id.Value > 0)
+            {
+                q = await _db.quotes
+                    .FirstOrDefaultAsync(x =>
+                        x.quote_id == req.quote_id.Value &&
+                        x.order_request_id == req.order_request_id &&
+                        x.estimate_id == est.estimate_id,
+                        ct);
+            }
+
+            q ??= await _db.quotes
+                .Where(x =>
+                    x.order_request_id == req.order_request_id &&
+                    x.estimate_id == est.estimate_id)
+                .OrderByDescending(x => x.quote_id)
+                .FirstOrDefaultAsync(ct);
+
+            if (q != null)
+                return q;
+
+            q = new quote
+            {
+                order_request_id = req.order_request_id,
+                estimate_id = est.estimate_id,
+                total_amount = est.final_total_cost,
+                status = "Sent",
+                created_at = AppTime.NowVnUnspecified()
+            };
+
+            await _db.quotes.AddAsync(q, ct);
+            await _db.SaveChangesAsync(ct);
+
+            return q;
+        }
+
+        private async Task EnsureRequestPaymentColumnsReadyAsync(
+            order_request req,
+            cost_estimate est,
+            quote q,
+            CancellationToken ct)
+        {
+            var now = AppTime.NowVnUnspecified();
+
+            if (string.Equals(req.process_status, "Rejected", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Request has been Rejected. Cannot create payment link.");
+
+            if (string.Equals(req.process_status, "Cancel", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(req.process_status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Request has been Cancelled. Cannot create payment link.");
+
+            /*
+             * Nếu request vẫn Verified thì chuyển sang Waiting khi bắt đầu tạo payment link.
+             */
+            if (string.Equals(req.process_status, "Verified", StringComparison.OrdinalIgnoreCase))
+                req.process_status = "Waiting";
+
+            /*
+             * Nếu data cũ/flow consultant-created bị thiếu mốc verified/expire,
+             * tự khởi tạo để không bị lỗi Quote expiry time has not been initialized.
+             */
+            if (!req.verified_at.HasValue)
+                req.verified_at = now;
+
+            if (!req.quote_expires_at.HasValue)
+                req.quote_expires_at = req.verified_at.Value.AddDays(7);
+
+            if (now > req.quote_expires_at.Value)
+            {
+                throw new InvalidOperationException(
+                    $"Quote expired at {req.quote_expires_at:yyyy-MM-dd HH:mm:ss}");
+            }
+
+            req.quote_id = q.quote_id;
+            req.accepted_estimate_id = est.estimate_id;
+
+            await _db.SaveChangesAsync(ct);
+
+            EnsureRequestHasPaymentColumnsOrThrow(req);
+        }
+
+        private static void EnsureRequestHasPaymentColumnsOrThrow(order_request req)
+        {
+            if (!req.quote_id.HasValue || req.quote_id.Value <= 0)
+                throw new InvalidOperationException("order_request.quote_id is required before creating PayOS link.");
+
+            if (!req.accepted_estimate_id.HasValue || req.accepted_estimate_id.Value <= 0)
+                throw new InvalidOperationException("order_request.accepted_estimate_id is required before creating PayOS link.");
+
+            if (!req.verified_at.HasValue)
+                throw new InvalidOperationException("order_request.verified_at is required before creating PayOS link.");
+
+            if (!req.quote_expires_at.HasValue)
+                throw new InvalidOperationException("order_request.quote_expires_at is required before creating PayOS link.");
         }
 
         public async Task SendRemainingPaymentEmailAsync(int id, CancellationToken ct = default)
@@ -1061,12 +1303,6 @@ namespace AMMS.Application.Services
             return payos;
         }
 
-        private static bool IsDuplicateOrderCode(string msg)
-        {
-            msg = (msg ?? "").ToLowerInvariant();
-            return msg.Contains("ordercode") && (msg.Contains("exists") || msg.Contains("tồn tại") || msg.Contains("231"));
-        }
-
         private static bool IsReusablePayOsStatus(string? status)
         {
             var st = (status ?? "").Trim().ToUpperInvariant();
@@ -1201,23 +1437,109 @@ namespace AMMS.Application.Services
             return st is "PAID" or "SUCCESS";
         }
 
-        private async Task<long> GetOrCreateRemainingPayOsOrderCodeAsync(int orderId, CancellationToken ct = default, int maxAttempt = 9)
+        private async Task<long> GetOrCreateRemainingPayOsOrderCodeAsync(
+    int orderId,
+    CancellationToken ct = default,
+    int maxAttempt = 20)
         {
             for (int attempt = 1; attempt <= maxAttempt; attempt++)
             {
-                long orderCode = 9_000_000_000L + ((long)orderId * 100L) + attempt;
+                /*
+                 * FIX:
+                 * Không dùng orderId để sinh PayOS orderCode nữa.
+                 * Tránh trùng sau khi reset DB local.
+                 */
+                var orderCode = BuildUniquePayOsOrderCode();
 
-                var info = await _payOs.GetPaymentLinkInformationAsync(orderCode, ct);
+                var existsLocal = await _db.payments
+                    .AsNoTracking()
+                    .AnyAsync(x => x.order_code == orderCode, ct);
 
-                if (info == null)
+                if (existsLocal)
+                    continue;
+
+                try
+                {
+                    var info = await _payOs.GetPaymentLinkInformationAsync(orderCode, ct);
+
+                    /*
+                     * Nếu PayOS trả được info nghĩa là orderCode này đã tồn tại trên PayOS.
+                     * Không dùng lại, sinh code khác.
+                     */
+                    if (info != null)
+                        continue;
+                }
+                catch
+                {
+                    /*
+                     * Với nhiều implementation, GetPaymentLinkInformationAsync sẽ throw
+                     * nếu orderCode không tồn tại. Khi đó code này có thể dùng.
+                     */
                     return orderCode;
+                }
 
-                var st = (info.status ?? "").Trim().ToUpperInvariant();
-                if (st is "PENDING" or "PROCESSING" or "PAID" or "SUCCESS")
-                    return orderCode;
+                return orderCode;
             }
 
-            throw new InvalidOperationException("Cannot allocate remaining-payment orderCode.");
+            throw new InvalidOperationException("Cannot allocate unique PayOS orderCode.");
+        }
+
+        private static long BuildUniquePayOsOrderCode()
+        {
+            /*
+             * PayOS orderCode phải unique theo merchant.
+             * Không dùng request_id/order_id vì DB reset sẽ bị trùng với PayOS cũ.
+             *
+             * Format:
+             * UTC milliseconds + 3-digit sequence
+             *
+             * Ví dụ:
+             * 1770000000123 * 1000 + 456
+             * = 1770000000123456
+             *
+             * Số này vẫn nhỏ hơn JS safe integer 9,007,199,254,740,991.
+             */
+            var utcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            var seq = Interlocked.Increment(ref _payosOrderCodeSeq) % 1000;
+            if (seq < 0) seq += 1000;
+
+            return checked(utcMs * 1000L + seq);
+        }
+
+        private static bool IsDuplicateOrderCode(string? msg)
+        {
+            msg = (msg ?? "").Trim();
+
+            if (string.IsNullOrWhiteSpace(msg))
+                return false;
+
+            var lower = msg.ToLowerInvariant();
+
+            /*
+             * PayOS duplicate thường trả:
+             * {"code":"231","desc":"Đơn thanh toán đã tồn tại"}
+             *
+             * Code cũ của bạn không bắt được vì bắt buộc message có chữ "ordercode".
+             */
+            if (lower.Contains("\"code\":\"231\"") ||
+                lower.Contains("\"code\": \"231\"") ||
+                lower.Contains("code=231") ||
+                lower.Contains("code:231"))
+            {
+                return true;
+            }
+
+            return lower.Contains("231") &&
+                   (
+                       lower.Contains("tồn tại") ||
+                       lower.Contains("ton tai") ||
+                       lower.Contains("đã tồn tại") ||
+                       lower.Contains("da t?n t?i") ||
+                       lower.Contains("already exists") ||
+                       lower.Contains("exists") ||
+                       lower.Contains("duplicate")
+                   );
         }
     }
 }

@@ -756,6 +756,7 @@ namespace AMMS.API.Controllers
             return Ok(result);
         }
 
+        [AllowAnonymous]
         [HttpGet("payos-deposit/{request_id:int}")]
         public async Task<IActionResult> GetPayOsDeposit(
     [FromRoute] int request_id,
@@ -765,12 +766,17 @@ namespace AMMS.API.Controllers
         {
             try
             {
-                var req = await _service.GetByIdAsync(request_id);
-                if (req == null)
-                    return NotFound(new { message = "Request not found" });
+                if (request_id <= 0)
+                    return BadRequest(new { message = "request_id is required" });
 
                 if (estimate_id <= 0)
                     return BadRequest(new { message = "estimate_id is required" });
+
+                var req = await _db.order_requests
+                    .FirstOrDefaultAsync(x => x.order_request_id == request_id, ct);
+
+                if (req == null)
+                    return NotFound(new { message = "Request not found" });
 
                 if (string.Equals(req.process_status, "Rejected", StringComparison.OrdinalIgnoreCase))
                 {
@@ -781,42 +787,99 @@ namespace AMMS.API.Controllers
                     });
                 }
 
-                var now = AppTime.NowVnUnspecified();
-                var validation = ValidateQuotePaymentWindow(req, now);
-                if (!validation.ok)
+                if (string.Equals(req.process_status, "Cancel", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(req.process_status, "Cancelled", StringComparison.OrdinalIgnoreCase))
                 {
-                    return BadRequest(new
+                    return StatusCode(StatusCodes.Status403Forbidden, new
                     {
-                        message = validation.message,
-                        request_id,
-                        verified_at = req.verified_at,
-                        quote_expires_at = req.quote_expires_at
+                        message = "Request has been cancelled. Payment link is not available.",
+                        request_id
                     });
                 }
 
                 var est = await _db.cost_estimates
                     .AsNoTracking()
-                    .FirstOrDefaultAsync(x => x.estimate_id == estimate_id && x.order_request_id == request_id, ct);
+                    .FirstOrDefaultAsync(x =>
+                        x.estimate_id == estimate_id &&
+                        x.order_request_id == request_id &&
+                        x.is_active,
+                        ct);
 
                 if (est == null)
-                    return BadRequest(new { message = "Estimate not found for this request" });
+                    return BadRequest(new { message = "Active estimate not found for this request" });
 
-                var quote = await _db.quotes
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(x => x.quote_id == quote_id && x.order_request_id == request_id, ct);
+                /*
+                 * FIX CHÍNH:
+                 * Không bắt buộc FE phải truyền quote_id đúng.
+                 * Backend tự tìm quote theo request_id + estimate_id.
+                 * Nếu order_request.quote_id / accepted_estimate_id đang NULL thì sync lại trước khi gọi PayOS.
+                 */
+                var prepared = await PrepareDepositPaymentDataAsync(
+                    req,
+                    est,
+                    quote_id,
+                    ct);
 
-                if (quote == null)
-                    return BadRequest(new { message = "Quote not found" });
+                if (!prepared.ok)
+                {
+                    return BadRequest(new
+                    {
+                        message = prepared.message,
+                        request_id,
+                        estimate_id,
+                        quote_id,
+                        request_quote_id = req.quote_id,
+                        request_accepted_estimate_id = req.accepted_estimate_id,
+                        verified_at = req.verified_at,
+                        quote_expires_at = req.quote_expires_at
+                    });
+                }
 
-                var dto = await _dealService.CreateOrReuseDepositLinkAsync(request_id, estimate_id, quote_id, ct);
+                /*
+                 * Sau bước PrepareDepositPaymentDataAsync:
+                 * - req.quote_id chắc chắn có data
+                 * - req.accepted_estimate_id chắc chắn có data
+                 * - req.verified_at chắc chắn có data
+                 * - req.quote_expires_at chắc chắn có data
+                 * - quote chắc chắn tồn tại và match estimate
+                 */
+                var dto = await _dealService.CreateOrReuseDepositLinkAsync(
+                    requestId: request_id,
+                    estimateId: estimate_id,
+                    quoteId: prepared.quote_id,
+                    ct: ct);
+
                 dto.expired_at = req.quote_expires_at;
                 dto.status ??= "PENDING";
 
                 return Ok(dto);
             }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message,
+                    request_id,
+                    estimate_id,
+                    quote_id
+                });
+            }
             catch (Exception ex)
             {
-                return BadRequest(new { message = ex.Message });
+                _logger.LogError(ex,
+                    "GetPayOsDeposit failed. RequestId={RequestId}, EstimateId={EstimateId}, QuoteId={QuoteId}",
+                    request_id,
+                    estimate_id,
+                    quote_id);
+
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    message = "Create PayOS deposit link failed",
+                    detail = ex.Message,
+                    request_id,
+                    estimate_id,
+                    quote_id
+                });
             }
         }
 
@@ -1244,6 +1307,162 @@ namespace AMMS.API.Controllers
                     message = ex.Message
                 });
             }
+        }
+
+        private async Task<(bool ok, string message, int? quote_id)> PrepareDepositPaymentDataAsync(
+    order_request req,
+    cost_estimate est,
+    int? inputQuoteId,
+    CancellationToken ct)
+        {
+            var now = AppTime.NowVnUnspecified();
+
+            /*
+             * Chỉ cho phép tạo link thanh toán khi request đang ở trạng thái hợp lệ.
+             * Waiting: đã gửi báo giá, đang chờ khách thanh toán.
+             * Verified: đã được manager duyệt, có thể chuẩn bị thanh toán.
+             * Accepted: đã accepted rồi thì chỉ reuse link nếu còn pending, nhưng không nên tạo mới nhiều lần.
+             */
+            if (!IsPayableStatus(req.process_status))
+            {
+                return (false,
+                    $"Only request with process_status Verified, Waiting or Accepted can create payment link. Current={req.process_status}",
+                    null);
+            }
+
+            /*
+             * Nếu request chưa có verified_at / quote_expires_at thì khởi tạo.
+             * Case này thường gặp ở flow consultant-created request hoặc data cũ.
+             */
+            if (!req.verified_at.HasValue)
+                req.verified_at = now;
+
+            if (!req.quote_expires_at.HasValue)
+                req.quote_expires_at = req.verified_at.Value.AddDays(7);
+
+            if (now > req.quote_expires_at.Value)
+            {
+                return (false,
+                    $"Quote expired at {req.quote_expires_at:yyyy-MM-dd HH:mm:ss}",
+                    null);
+            }
+
+            /*
+             * Resolve quote theo thứ tự:
+             * 1. quote_id FE truyền lên nếu đúng request + estimate.
+             * 2. order_request.quote_id nếu đúng request + estimate.
+             * 3. quotes theo request_id + estimate_id.
+             * 4. Nếu chưa có thì tạo quote mới từ estimate.
+             */
+            var quote = await ResolveOrCreateQuoteForDepositAsync(
+                req,
+                est,
+                inputQuoteId,
+                ct);
+
+            if (quote == null)
+            {
+                return (false,
+                    "Cannot resolve or create quote for this payment",
+                    null);
+            }
+
+            /*
+             * Sync các cột quan trọng trước khi gọi PayOS.
+             */
+            req.quote_id = quote.quote_id;
+            req.accepted_estimate_id = est.estimate_id;
+
+            if (string.Equals(req.process_status, "Verified", StringComparison.OrdinalIgnoreCase))
+                req.process_status = "Waiting";
+
+            await _db.SaveChangesAsync(ct);
+
+            /*
+             * Check lại lần cuối để đảm bảo đủ data mới được gọi PayOS.
+             */
+            if (!req.quote_id.HasValue || req.quote_id.Value <= 0)
+                return (false, "order_request.quote_id is missing after sync", null);
+
+            if (!req.accepted_estimate_id.HasValue || req.accepted_estimate_id.Value <= 0)
+                return (false, "order_request.accepted_estimate_id is missing after sync", null);
+
+            if (!req.verified_at.HasValue)
+                return (false, "order_request.verified_at is missing after sync", null);
+
+            if (!req.quote_expires_at.HasValue)
+                return (false, "order_request.quote_expires_at is missing after sync", null);
+
+            return (true, "", quote.quote_id);
+        }
+
+        private async Task<quote?> ResolveOrCreateQuoteForDepositAsync(
+            order_request req,
+            cost_estimate est,
+            int? inputQuoteId,
+            CancellationToken ct)
+        {
+            quote? q = null;
+
+            /*
+             * 1. Ưu tiên quote_id FE truyền lên.
+             */
+            if (inputQuoteId.HasValue && inputQuoteId.Value > 0)
+            {
+                q = await _db.quotes
+                    .FirstOrDefaultAsync(x =>
+                        x.quote_id == inputQuoteId.Value &&
+                        x.order_request_id == req.order_request_id &&
+                        x.estimate_id == est.estimate_id,
+                        ct);
+            }
+
+            /*
+             * 2. Nếu order_request.quote_id có data thì dùng, nhưng phải match estimate.
+             */
+            if (q == null &&
+                req.quote_id.HasValue &&
+                req.quote_id.Value > 0)
+            {
+                q = await _db.quotes
+                    .FirstOrDefaultAsync(x =>
+                        x.quote_id == req.quote_id.Value &&
+                        x.order_request_id == req.order_request_id &&
+                        x.estimate_id == est.estimate_id,
+                        ct);
+            }
+
+            /*
+             * 3. Tìm quote theo request_id + estimate_id.
+             * Đây là case của bạn: bảng quotes có quote nhưng order_request.quote_id đang NULL.
+             */
+            q ??= await _db.quotes
+                .Where(x =>
+                    x.order_request_id == req.order_request_id &&
+                    x.estimate_id == est.estimate_id)
+                .OrderByDescending(x => x.quote_id)
+                .FirstOrDefaultAsync(ct);
+
+            if (q != null)
+                return q;
+
+            /*
+             * 4. Nếu chưa có quote, tạo quote mới.
+             * Việc này giúp flow consultant-created request không bị chết nếu estimate đã có nhưng quote chưa được tạo.
+             */
+            q = new quote
+            {
+                order_request_id = req.order_request_id,
+                estimate_id = est.estimate_id,
+                total_amount = est.final_total_cost,
+                status = "Sent",
+                created_at = AppTime.NowVnUnspecified()
+            };
+
+            await _db.quotes.AddAsync(q, ct);
+            await _db.SaveChangesAsync(ct);
+
+            return q;
         }
     }
 }
