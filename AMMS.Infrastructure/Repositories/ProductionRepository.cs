@@ -1376,48 +1376,50 @@ namespace AMMS.Infrastructure.Repositories
                     ? new List<TaskLogDto>()
                     : LogsByTaskId(logs, task.task_id);
 
-                var qtyGood = stageLogs.Sum(x => x.qty_good);
-                var qtyBad = 0;
-                var denom = qtyGood + qtyBad;
+                var qtyGoodFromLog = ResolveActualOutputQtyFromTaskLogs(stageLogs);
+                var qtyBadFromLog = ResolveActualBadQtyFromOutputJson(stageLogs);
+
+                var denom = qtyGoodFromLog + qtyBadFromLog;
+
                 var wastePct = denom <= 0
                     ? 0m
-                    : Math.Round((qtyBad * 100m) / denom, 2);
+                    : Math.Round((qtyBadFromLog * 100m) / denom, 2);
 
-                var stageCoatingGlueWeightKg = isGroupProduction
-                    ? 0m
-                    : estCoatingGlueWeightKg;
-
-                var stageLaminationWeightKg = isGroupProduction
-                    ? 0m
-                    : estimate?.lamination_weight_kg ?? 0m;
+                /*
+                 * Không ép GROUP = 0 ở đây nữa.
+                 * Nếu là GROUP mà estimate của representative không đủ đúng,
+                 * phía dưới ApplyTaskLogJsonToProductionStage sẽ lấy lại số đúng từ log JSON.
+                 */
+                var stageCoatingGlueWeightKg = estCoatingGlueWeightKg;
+                var stageLaminationWeightKg = estimate?.lamination_weight_kg ?? 0m;
 
                 var io = BuildStageIO(
-                        processCode: pcode,
-                        processName: s.process_name ?? "",
-                        detail: dto,
-                        prevOutput: prevOutput,
-                        sheetsRequired: sheetsRequired,
-                        sheetsWaste: sheetsWaste,
-                        sheetsTotal: sheetsTotal,
-                        nUp: nUp,
-                        qtyGood: qtyGood,
-                        numberOfPlates: numberOfPlates,
-                        estInkWeightKg: estInkWeightKg,
-                        currentStageIndex: stageIndex,
-                        routeProcessCodes: routeCodes,
-                        paperCode: estimate?.paper_code,
-                        paperName: estimate?.paper_name,
-                        waveType: estimate?.wave_type,
-                        coatingType: estimate?.coating_type,
-                        coatingMaterialCode: coatingMaterialCode,
-                        coatingMaterialName: coatingMaterialName,
-                        coatingMaterialUnit: coatingMaterialUnit,
-                        estCoatingGlueWeightKg: stageCoatingGlueWeightKg,
-                        inkTypeNames: estimate?.ink_type_names,
-                        laminationMaterialCode: estimate?.lamination_material_code,
-                        laminationMaterialName: estimate?.lamination_material_name,
-                        estLaminationWeightKg: stageLaminationWeightKg
-                    );
+                    processCode: pcode,
+                    processName: s.process_name ?? "",
+                    detail: dto,
+                    prevOutput: prevOutput,
+                    sheetsRequired: sheetsRequired,
+                    sheetsWaste: sheetsWaste,
+                    sheetsTotal: sheetsTotal,
+                    nUp: nUp,
+                    qtyGood: qtyGoodFromLog,
+                    numberOfPlates: numberOfPlates,
+                    estInkWeightKg: estInkWeightKg,
+                    currentStageIndex: stageIndex,
+                    routeProcessCodes: routeCodes,
+                    paperCode: estimate?.paper_code,
+                    paperName: estimate?.paper_name,
+                    waveType: estimate?.wave_type,
+                    coatingType: estimate?.coating_type,
+                    coatingMaterialCode: coatingMaterialCode,
+                    coatingMaterialName: coatingMaterialName,
+                    coatingMaterialUnit: coatingMaterialUnit,
+                    estCoatingGlueWeightKg: stageCoatingGlueWeightKg,
+                    inkTypeNames: estimate?.ink_type_names,
+                    laminationMaterialCode: estimate?.lamination_material_code,
+                    laminationMaterialName: estimate?.lamination_material_name,
+                    estLaminationWeightKg: stageLaminationWeightKg
+                );
 
                 var stage = new ProductionStageDto
                 {
@@ -1434,8 +1436,9 @@ namespace AMMS.Infrastructure.Repositories
                     start_time = task?.start_time,
                     end_time = task?.end_time,
 
-                    qty_good = qtyGood,
+                    qty_good = qtyGoodFromLog,
                     waste_percent = wastePct,
+
                     last_scan_time = stageLogs.Count == 0
                         ? null
                         : stageLogs.Max(x => x.log_time),
@@ -1455,14 +1458,335 @@ namespace AMMS.Infrastructure.Repositories
                     is_taken_sub_product = task?.is_taken_sub_product ?? false
                 };
 
+                /*
+                 * FIX CHÍNH:
+                 * Lấy lại actual/estimated từ material_usage_json,
+                 * reference_input_json, output_json nếu log đã có data.
+                 */
+                ApplyTaskLogJsonToProductionStage(stage, stageLogs);
+
                 stages.Add(stage);
-                prevOutput = io.nextOutput;
+
+                prevOutput = new StageOutputRef
+                {
+                    Name = stage.output_product?.name ?? io.nextOutput.Name,
+                    Code = stage.output_product?.code ?? io.nextOutput.Code,
+                    Unit = stage.output_product?.unit ?? io.nextOutput.Unit,
+                    EstimatedQuantity = stage.output_product?.estimated_quantity ?? io.nextOutput.EstimatedQuantity,
+                    ActualQuantity = stage.output_product?.actual_quantity ?? io.nextOutput.ActualQuantity
+                };
             }
 
             dto.stages = stages;
             return dto;
         }
 
+        private static readonly JsonSerializerOptions DetailJsonOptions = new()
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
+        private static List<T> ParseJsonArraySafe<T>(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+                return new List<T>();
+
+            try
+            {
+                return JsonSerializer.Deserialize<List<T>>(json, DetailJsonOptions)
+                       ?? new List<T>();
+            }
+            catch
+            {
+                return new List<T>();
+            }
+        }
+
+        private static string NormDetailCode(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+        }
+
+        private static bool SameDetailCode(string? a, string? b)
+        {
+            var aa = NormDetailCode(a);
+            var bb = NormDetailCode(b);
+
+            if (string.IsNullOrWhiteSpace(aa) || string.IsNullOrWhiteSpace(bb))
+                return false;
+
+            return aa == bb;
+        }
+
+        private static bool IsPrevBtpInputCode(string? code)
+        {
+            var c = NormDetailCode(code);
+
+            return c is "PREV" or "INPUT" or "BTP" or "REFERENCE";
+        }
+
+        private static bool IsLaminationCode(string? code)
+        {
+            var c = NormDetailCode(code);
+
+            return c.Contains("LAMINATION")
+                || c.Contains("MANG")
+                || c.Contains("CAN");
+        }
+
+        private static bool IsCoatingCode(string? code)
+        {
+            var c = NormDetailCode(code);
+
+            return c.Contains("COATING")
+                || c.Contains("KEO_PHU")
+                || c.Contains("PHU");
+        }
+
+        private static bool IsMountingGlueCode(string? code)
+        {
+            var c = NormDetailCode(code);
+
+            return c.Contains("KEO_BOI")
+                || c.Contains("MOUNTING_GLUE");
+        }
+
+        private static bool IsInkCode(string? code)
+        {
+            var c = NormDetailCode(code);
+
+            return c.Contains("INK")
+                || c.Contains("MUC");
+        }
+
+        private static bool IsPlateCode(string? code)
+        {
+            var c = NormDetailCode(code);
+
+            return c.Contains("PLATE")
+                || c.Contains("BAN_KEM");
+        }
+
+        private static List<TaskMaterialUsageLogItemDto> ResolveMaterialUsagesFromLogs(
+            List<TaskLogDto> logs)
+        {
+            return logs
+                .SelectMany(log =>
+                    log.material_usages != null && log.material_usages.Count > 0
+                        ? log.material_usages
+                        : ParseJsonArraySafe<TaskMaterialUsageLogItemDto>(log.material_usage_json))
+                .ToList();
+        }
+
+        private static List<TaskReferenceUsageInputDto> ResolveReferenceInputsFromLogs(
+            List<TaskLogDto> logs)
+        {
+            return logs
+                .SelectMany(log =>
+                    log.reference_inputs != null && log.reference_inputs.Count > 0
+                        ? log.reference_inputs
+                        : ParseJsonArraySafe<TaskReferenceUsageInputDto>(log.reference_input_json))
+                .ToList();
+        }
+
+        private static List<TaskOutputReportDto> ResolveOutputsFromLogs(
+            List<TaskLogDto> logs)
+        {
+            return logs
+                .SelectMany(log =>
+                    log.outputs != null && log.outputs.Count > 0
+                        ? log.outputs
+                        : ParseJsonArraySafe<TaskOutputReportDto>(log.output_json))
+                .ToList();
+        }
+
+        private static int ResolveActualOutputQtyFromTaskLogs(List<TaskLogDto> logs)
+        {
+            var fromOutputJson = ResolveOutputsFromLogs(logs)
+                .Sum(x => x.quantity_good);
+
+            if (fromOutputJson > 0)
+                return (int)Math.Ceiling(fromOutputJson);
+
+            return logs.Sum(x => x.qty_good);
+        }
+
+        private static int ResolveActualBadQtyFromOutputJson(List<TaskLogDto> logs)
+        {
+            var bad = ResolveOutputsFromLogs(logs)
+                .Sum(x => x.quantity_bad);
+
+            return bad <= 0 ? 0 : (int)Math.Ceiling(bad);
+        }
+
+        private static void ApplyTaskLogJsonToProductionStage(
+            ProductionStageDto stage,
+            List<TaskLogDto> logs)
+        {
+            if (stage == null || logs == null || logs.Count == 0)
+                return;
+
+            var materialUsages = ResolveMaterialUsagesFromLogs(logs);
+            var referenceInputs = ResolveReferenceInputsFromLogs(logs);
+            var outputs = ResolveOutputsFromLogs(logs);
+
+            /*
+             * 1. Map input_materials từ material_usage_json / reference_input_json.
+             */
+            if (stage.input_materials != null && stage.input_materials.Count > 0)
+            {
+                foreach (var input in stage.input_materials)
+                {
+                    var inputCode = NormDetailCode(input.code);
+
+                    /*
+                     * BTP đầu vào từ công đoạn trước:
+                     * ưu tiên reference_input_json.quantity_used.
+                     */
+                    var refMatches = referenceInputs
+                        .Where(x =>
+                            SameDetailCode(x.input_code, input.code)
+                            || IsPrevBtpInputCode(input.code))
+                        .ToList();
+
+                    if (refMatches.Count > 0)
+                    {
+                        var used = refMatches.Sum(x => x.quantity_used);
+                        var totalEstimate = refMatches.Sum(x => x.quantity_used + x.quantity_left);
+
+                        if (used > 0)
+                            input.actual_quantity = Math.Round(used, 4);
+
+                        if ((input.estimated_quantity <= 0 || input.estimated_quantity == null) &&
+                            totalEstimate > 0)
+                        {
+                            input.estimated_quantity = Math.Round(totalEstimate, 4);
+                        }
+
+                        var firstRef = refMatches.FirstOrDefault();
+                        if (firstRef != null)
+                        {
+                            if (string.IsNullOrWhiteSpace(input.name))
+                                input.name = firstRef.input_name;
+
+                            if (string.IsNullOrWhiteSpace(input.unit))
+                                input.unit = firstRef.unit;
+                        }
+
+                        continue;
+                    }
+
+                    /*
+                     * NVL kho: map từ material_usage_json.
+                     */
+                    var materialMatches = materialUsages
+                        .Where(x =>
+                            SameDetailCode(x.material_code, input.code)
+                            || SameDetailCode(x.material_name, input.name)
+                            || (IsLaminationCode(inputCode) && IsLaminationCode(x.material_code))
+                            || (IsCoatingCode(inputCode) && IsCoatingCode(x.material_code))
+                            || (IsMountingGlueCode(inputCode) && IsMountingGlueCode(x.material_code))
+                            || (IsInkCode(inputCode) && IsInkCode(x.material_code))
+                            || (IsPlateCode(inputCode) && IsPlateCode(x.material_code)))
+                        .ToList();
+
+                    if (materialMatches.Count == 0)
+                        continue;
+
+                    var materialUsed = materialMatches.Sum(x => x.quantity_used);
+                    var materialEstimated = materialMatches.Sum(x =>
+                        x.estimated_input_qty > 0
+                            ? x.estimated_input_qty
+                            : x.quantity_used + x.quantity_left + x.quantity_waste);
+
+                    if (materialUsed > 0)
+                        input.actual_quantity = Math.Round(materialUsed, 4);
+
+                    if ((input.estimated_quantity <= 0 || input.estimated_quantity == null) &&
+                        materialEstimated > 0)
+                    {
+                        input.estimated_quantity = Math.Round(materialEstimated, 4);
+                    }
+
+                    var firstMaterial = materialMatches.FirstOrDefault();
+                    if (firstMaterial != null)
+                    {
+                        if (string.IsNullOrWhiteSpace(input.code))
+                            input.code = firstMaterial.material_code;
+
+                        if (string.IsNullOrWhiteSpace(input.name))
+                            input.name = firstMaterial.material_name;
+
+                        if (string.IsNullOrWhiteSpace(input.unit))
+                            input.unit = firstMaterial.unit;
+                    }
+                }
+            }
+
+            /*
+             * 2. Map output_product từ output_json.
+             */
+            if (stage.output_product != null)
+            {
+                var outputMatches = outputs
+                    .Where(x =>
+                        SameDetailCode(x.output_code, stage.output_product.code)
+                        || SameDetailCode(x.output_name, stage.output_product.name))
+                    .ToList();
+
+                if (outputMatches.Count == 0 && outputs.Count > 0)
+                    outputMatches = outputs;
+
+                if (outputMatches.Count > 0)
+                {
+                    var good = outputMatches.Sum(x => x.quantity_good);
+                    var bad = outputMatches.Sum(x => x.quantity_bad);
+
+                    if (good > 0)
+                    {
+                        stage.output_product.actual_quantity = Math.Round(good, 4);
+                        stage.actual_output_quantity = Math.Round(good, 4);
+                        stage.qty_good = (int)Math.Ceiling(good);
+                    }
+
+                    if (bad > 0)
+                    {
+                        var denom = good + bad;
+                        stage.waste_percent = denom <= 0
+                            ? 0m
+                            : Math.Round((bad * 100m) / denom, 2);
+                    }
+
+                    var firstOutput = outputMatches.FirstOrDefault();
+                    if (firstOutput != null)
+                    {
+                        if (string.IsNullOrWhiteSpace(stage.output_product.code))
+                            stage.output_product.code = firstOutput.output_code;
+
+                        if (string.IsNullOrWhiteSpace(stage.output_product.name))
+                            stage.output_product.name = firstOutput.output_name;
+
+                        if (string.IsNullOrWhiteSpace(stage.output_product.unit))
+                            stage.output_product.unit = firstOutput.unit;
+                    }
+                }
+                else if (stage.qty_good > 0)
+                {
+                    stage.output_product.actual_quantity = stage.qty_good;
+                    stage.actual_output_quantity = stage.qty_good;
+                }
+
+                if (stage.estimated_output_quantity <= 0 &&
+                    stage.output_product.estimated_quantity > 0)
+                {
+                    stage.estimated_output_quantity = stage.output_product.estimated_quantity;
+                }
+            }
+        }
 
         public async Task<ProductionDetailDto?> GetProductionDetailByOrderIdAsync(int orderId, CancellationToken ct = default)
         {

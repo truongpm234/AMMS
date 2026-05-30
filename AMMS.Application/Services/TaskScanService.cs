@@ -1576,6 +1576,9 @@ namespace AMMS.Application.Services
                 return null;
             }
 
+            var currentProcessCode = ProductionFlowHelper.Norm(
+                groupTask.process?.process_code);
+
             var links = await _db.task_links
                 .AsNoTracking()
                 .Where(x =>
@@ -1609,11 +1612,27 @@ namespace AMMS.Application.Services
                 if (singleCtx == null)
                     continue;
 
+                /*
+                 * FIX:
+                 * Không lấy đại diện 1 order.
+                 * Mỗi order trong group tự build NVL theo cost_estimate của nó.
+                 * Sau đó AggregateConsumableMaterials sẽ SUM theo material_id/material_code/unit.
+                 *
+                 * CAN/CAN_MANG:
+                 * estimated_input_qty = SUM(cost_estimate.lamination_weight_kg của từng order)
+                 *
+                 * PHU:
+                 * estimated_input_qty = SUM(coating_glue_weight_kg)
+                 *
+                 * BOI:
+                 * estimated_input_qty = SUM(wave_sheets_used + mounting_glue_weight_kg)
+                 */
                 var mats = await BuildConsumableMaterialsAsync(singleCtx, ct);
+
                 var refs = await BuildReferenceInputsForGroupLinkAsync(
                     singleCtx,
                     link,
-                    link.process_code ?? groupTask.process?.process_code,
+                    link.process_code ?? currentProcessCode,
                     ct);
 
                 allMaterials.AddRange(mats);
@@ -2025,21 +2044,45 @@ namespace AMMS.Application.Services
             return items
                 .GroupBy(x => new
                 {
-                    material_id = x.material_id ?? 0,
-                    material_code = NormalizeMaterialCode(x.material_code),
+                    /*
+                     * Nếu material_id có thì dùng material_id.
+                     * Nếu chưa map material_id thì dùng material_code đã normalize.
+                     */
+                    key = x.material_id.HasValue && x.material_id.Value > 0
+                        ? $"ID={x.material_id.Value}"
+                        : $"CODE={NormalizeMaterialCode(x.material_code)}",
+
                     unit = (x.unit ?? "").Trim().ToLowerInvariant()
                 })
                 .Select(g =>
                 {
                     var first = g.First();
 
+                    var mapped = g
+                        .Where(x => x.material_id.HasValue && x.material_id.Value > 0)
+                        .OrderBy(x => x.material_id)
+                        .FirstOrDefault();
+
                     return new TaskConsumableMaterialDto
                     {
-                        material_id = first.material_id,
-                        material_code = first.material_code,
-                        material_name = first.material_name,
+                        material_id = mapped?.material_id ?? first.material_id,
+                        material_code = !string.IsNullOrWhiteSpace(mapped?.material_code)
+                            ? mapped!.material_code
+                            : first.material_code,
+
+                        material_name = !string.IsNullOrWhiteSpace(mapped?.material_name)
+                            ? mapped!.material_name
+                            : first.material_name,
+
                         unit = first.unit,
-                        estimated_input_qty = Math.Round(g.Sum(x => x.estimated_input_qty), 4),
+
+                        estimated_input_qty = Math.Round(
+                            g.Sum(x => x.estimated_input_qty),
+                            4),
+
+                        /*
+                         * Nếu có dòng chưa map thì is_mapped=false để FE biết.
+                         */
                         is_mapped = g.All(x => x.is_mapped)
                     };
                 })
@@ -2399,17 +2442,26 @@ namespace AMMS.Application.Services
                         break;
                     }
 
-                case "CAT":
+                case "CAN":
+                case "CAN_MANG":
                     {
-                        var paperMat = await ResolvePaperMaterialAsync(est, ct);
+                        var filmMat = await ResolveLaminationMaterialAsync(est, ct);
+
+                        var fallbackCode = !string.IsNullOrWhiteSpace(est.lamination_material_code)
+                            ? est.lamination_material_code
+                            : "LAMINATION_NOT_SELECTED";
+
+                        var fallbackName = !string.IsNullOrWhiteSpace(est.lamination_material_name)
+                            ? est.lamination_material_name
+                            : "Chưa chọn loại màng cán";
 
                         await AddMaterialAsync(
-                            estimatedQty: est.sheets_total > 0 ? est.sheets_total : est.sheets_required,
-                            fallbackCode: est.paper_code ?? "PAPER",
-                            fallbackName: est.paper_name ?? "Giấy thô",
-                            unit: "tờ",
-                            resolvedMaterial: paperMat,
-                            ceilWhenBothRatio: true);
+                            estimatedQty: est.lamination_weight_kg,
+                            fallbackCode: fallbackCode,
+                            fallbackName: fallbackName,
+                            unit: filmMat?.unit ?? "kg",
+                            resolvedMaterial: filmMat);
+
                         break;
                     }
 
@@ -2455,28 +2507,6 @@ namespace AMMS.Application.Services
                                 ?? ProductionFlowHelper.ResolveCoatingDisplayName(est.coating_type),
                             unit: coatingMat?.unit ?? "kg",
                             resolvedMaterial: coatingMat);
-
-                        break;
-                    }
-
-                case "CAN":
-                    {
-                        var filmMat = await ResolveLaminationMaterialAsync(est, ct);
-
-                        var fallbackCode = !string.IsNullOrWhiteSpace(est.lamination_material_code)
-                            ? est.lamination_material_code
-                            : "LAMINATION_NOT_SELECTED";
-
-                        var fallbackName = !string.IsNullOrWhiteSpace(est.lamination_material_name)
-                            ? est.lamination_material_name
-                            : "Chưa chọn loại màng cán";
-
-                        await AddMaterialAsync(
-                            estimatedQty: est.lamination_weight_kg,
-                            fallbackCode: fallbackCode,
-                            fallbackName: fallbackName,
-                            unit: filmMat?.unit ?? "kg",
-                            resolvedMaterial: filmMat);
 
                         break;
                     }

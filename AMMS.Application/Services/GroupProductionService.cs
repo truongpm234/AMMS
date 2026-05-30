@@ -47,132 +47,260 @@ namespace AMMS.Application.Services
             if (selectedCodes.Count > 0)
                 GroupProductionHelper.EnsureShareableCodes(selectedCodes);
 
-            var today = AppTime.NowVnUnspecified().Date;
-            var minDeliveryDate = today.AddDays(7);
+            /*
+             * Lấy danh sách order:
+             * - SINGLE production
+             * - production Scheduled
+             * - order Scheduled
+             * - đã layout_confirmed
+             * - đã is_production_ready
+             * - chưa nằm trong GROUP active
+             * - chưa có task nào bắt đầu/Ready/Finished/log
+             * - có method hợp lệ NVL/SUB/BOTH
+             * - nếu truyền processCodes thì order phải có đủ process đó
+             */
+            var rows = await LoadCleanRowsForSuggestionAsync(
+                productTypeId,
+                selectedCodes,
+                ct);
 
-            var rows = await (
-    from o in _db.orders.AsNoTracking()
-    join pr in _db.productions.AsNoTracking()
-        on o.order_id equals pr.order_id
-    where pr.prod_kind == "SINGLE"
-          && pr.status == "Scheduled"
-          && o.layout_confirmed
-          && o.is_production_ready
-          && o.status == "Scheduled"
-          && o.delivery_date != null
-          && o.delivery_date >= minDeliveryDate
-          && !_db.prod_orders.Any(po =>
-                po.order_id == o.order_id &&
-                po.status == "Active" &&
-                _db.productions.Any(g =>
-                    g.prod_id == po.prod_id &&
-                    g.prod_kind == "GROUP" &&
-                    g.status != "Cancelled" &&
-                    g.status != "Completed"))
-    select new
-    {
-        o.order_id,
-        order_code = o.code,
-        single_prod_id = pr.prod_id,
-        prod_method = pr.prod_method,
-        o.delivery_date,
-        item = _db.order_items.AsNoTracking()
-            .Where(i => i.order_id == o.order_id)
-            .OrderBy(i => i.item_id)
-            .Select(i => new
-            {
-                i.product_type_id,
-                i.product_name,
-                i.quantity,
-                i.production_process
-            })
-            .FirstOrDefault()
-    }
-).ToListAsync(ct);
+            if (rows.Count < 2)
+                return new List<GroupProductionCandidateDto>();
+
+            var rawSuggestions = selectedCodes.Count > 0
+                ? BuildSuggestionPreviewFromSelectedCodes(rows, selectedCodes)
+                : BuildAutoDept2Suggestions(rows);
+
+            var suggestedOrderIds = rawSuggestions
+                .Where(x => !string.Equals(
+                    x.suggestion_type,
+                    "SPLIT_ONLY",
+                    StringComparison.OrdinalIgnoreCase))
+                .Where(x => x.suggest_order != null && x.suggest_order.Count >= 2)
+                .Where(x => x.suggest_process != null && x.suggest_process.Count > 0)
+                .SelectMany(x => x.suggest_order)
+                .Distinct()
+                .ToHashSet();
+
+            if (suggestedOrderIds.Count == 0)
+                return new List<GroupProductionCandidateDto>();
+
+            var productTypeIds = rows
+                .Where(x => suggestedOrderIds.Contains(x.Order.order_id))
+                .Where(x => x.Item.product_type_id.HasValue)
+                .Select(x => x.Item.product_type_id!.Value)
+                .Distinct()
+                .ToList();
+
+            var productTypeNameMap = productTypeIds.Count == 0
+                ? new Dictionary<int, string?>()
+                : await _db.product_types
+                    .AsNoTracking()
+                    .Where(x => productTypeIds.Contains(x.product_type_id))
+                    .ToDictionaryAsync(
+                        x => x.product_type_id,
+                        x => x.name,
+                        ct);
+
+            return rows
+                .Where(x => suggestedOrderIds.Contains(x.Order.order_id))
+                .OrderBy(x => x.Item.product_type_id)
+                .ThenBy(x => x.Order.delivery_date)
+                .ThenBy(x => x.Order.order_id)
+                .Select(x =>
+                {
+                    var productTypeName =
+                        x.Item.product_type_id.HasValue &&
+                        productTypeNameMap.TryGetValue(x.Item.product_type_id.Value, out var ptName)
+                            ? ptName
+                            : null;
+
+                    var method = ResolveRowProductionMethodOrNull(x);
+
+                    var processKey = string.Join(
+                        ",",
+                        x.RouteCodes
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .OrderBy(FullRouteIndex));
+
+                    return new GroupProductionCandidateDto
+                    {
+                        order_id = x.Order.order_id,
+                        order_code = x.Order.code,
+
+                        single_prod_id = x.SingleProd.prod_id,
+
+                        product_type_id = x.Item.product_type_id,
+                        product_type_name = productTypeName,
+
+                        product_name = x.Item.product_name,
+                        quantity = x.Item.quantity,
+
+                        production_process = x.Item.production_process,
+                        process_key = processKey,
+
+                        delivery_date = x.Order.delivery_date,
+
+                        /*
+                         * Vì chỉ trả order nằm trong raw suggestion hợp lệ,
+                         * candidate trả ra luôn là có thể ghép.
+                         */
+                        can_group = true,
+                        reason = null,
+
+                        production_method = method,
+                        has_started_task = false
+                    };
+                })
+                .ToList();
+        }
+
+        private async Task<List<GroupOrderRow>> LoadCleanRowsForSuggestionAsync(
+    int? productTypeId,
+    List<string> selectedCodes,
+    CancellationToken ct)
+        {
+            var today = AppTime.NowVnUnspecified().Date;
+            var minDeliveryDate = today.AddDays(MinProductionDays);
+
+            /*
+             * Seed chỉ lấy order có SINGLE production còn Scheduled.
+             * Không lấy GROUP/SPLIT.
+             */
+            var orderIds = await (
+                from o in _db.orders.AsNoTracking()
+                join pr in _db.productions.AsNoTracking()
+                    on o.order_id equals pr.order_id
+
+                where pr.prod_kind == "SINGLE"
+                      && pr.status == "Scheduled"
+
+                      && o.status == "Scheduled"
+                      && o.layout_confirmed
+                      && o.is_production_ready
+
+                      && o.delivery_date != null
+                      && o.delivery_date >= minDeliveryDate
+
+                      /*
+                       * Phải có task rồi mới được xét ghép.
+                       */
+                      && _db.tasks.Any(t => t.prod_id == pr.prod_id)
+
+                      /*
+                       * Không lấy order đã nằm trong GROUP active.
+                       */
+                      && !_db.prod_orders.Any(po =>
+                            po.order_id == o.order_id &&
+                            po.status == "Active" &&
+                            _db.productions.Any(g =>
+                                g.prod_id == po.prod_id &&
+                                g.prod_kind == "GROUP" &&
+                                g.status != "Cancelled" &&
+                                g.status != "Completed"))
+
+                select o.order_id
+            )
+            .Distinct()
+            .ToListAsync(ct);
+
+            if (orderIds.Count == 0)
+                return new List<GroupOrderRow>();
+
+            var rows = await LoadGroupOrderRowsAsync(orderIds, ct);
+
+            return await ApplySuggestionEligibilityFilterAsync(
+                rows,
+                productTypeId,
+                selectedCodes,
+                ct);
+        }
+
+        private async Task<List<GroupOrderRow>> ApplySuggestionEligibilityFilterAsync(
+    List<GroupOrderRow> rows,
+    int? productTypeId,
+    List<string> selectedCodes,
+    CancellationToken ct)
+        {
+            if (rows == null || rows.Count == 0)
+                return new List<GroupOrderRow>();
+
+            var orderIds = rows
+                .Select(x => x.Order.order_id)
+                .Distinct()
+                .ToList();
 
             var singleProdIds = rows
-    .Select(x => x.single_prod_id)
-    .Distinct()
-    .ToList();
+                .Select(x => x.SingleProd.prod_id)
+                .Distinct()
+                .ToList();
+
+            var activeGroupedOrderIds = await LoadActiveGroupedOrderIdsAsync(
+                orderIds,
+                ct);
 
             var startedSingleProdIds = await LoadSingleProdIdsHavingStartedTaskAsync(
                 singleProdIds,
                 ct);
 
-            var result = new List<GroupProductionCandidateDto>();
+            return rows
+                .Where(x => x.Item != null)
+                .Where(x => x.Item.product_type_id.HasValue)
+                .Where(x => !productTypeId.HasValue || x.Item.product_type_id == productTypeId.Value)
 
-            foreach (var row in rows)
-            {
-                if (row.item == null)
-                    continue;
+                .Where(x => string.Equals(x.SingleProd.prod_kind, "SINGLE", StringComparison.OrdinalIgnoreCase))
+                .Where(x => string.Equals(x.SingleProd.status, "Scheduled", StringComparison.OrdinalIgnoreCase))
 
-                if (productTypeId.HasValue && row.item.product_type_id != productTypeId.Value)
-                    continue;
+                .Where(x => string.Equals(x.Order.status, "Scheduled", StringComparison.OrdinalIgnoreCase))
+                .Where(x => x.Order.layout_confirmed)
+                .Where(x => x.Order.is_production_ready)
 
-                var orderCodes = GroupProductionHelper.ParseCodes(row.item.production_process);
-                var processKey = string.Join(",", orderCodes);
+                .Where(x => !activeGroupedOrderIds.Contains(x.Order.order_id))
+                .Where(x => !startedSingleProdIds.Contains(x.SingleProd.prod_id))
 
-                var hasAllSelectedCodes = selectedCodes.Count == 0 ||
-                                          selectedCodes.All(x =>
-                                              orderCodes.Contains(x, StringComparer.OrdinalIgnoreCase));
+                /*
+                 * Phải có method đã duyệt: NVL/SUB/BOTH.
+                 */
+                .Where(x => ResolveRowProductionMethodOrNull(x) != null)
 
-                var productTypeName = row.item.product_type_id.HasValue
-                    ? await _db.product_types.AsNoTracking()
-                        .Where(x => x.product_type_id == row.item.product_type_id.Value)
-                        .Select(x => x.name)
-                        .FirstOrDefaultAsync(ct)
-                    : null;
+                /*
+                 * Nếu FE truyền processCodes thì order phải có đủ các process đó.
+                 */
+                .Where(x =>
+                    selectedCodes.Count == 0 ||
+                    selectedCodes.All(code =>
+                        x.RouteCodes.Contains(code, StringComparer.OrdinalIgnoreCase)))
 
-                var method = NormalizeProductionMethod(row.prod_method);
-                var hasStartedTask = startedSingleProdIds.Contains(row.single_prod_id);
-
-                var canGroup =
-                    method != null &&
-                    !hasStartedTask &&
-                    hasAllSelectedCodes;
-
-                string? reason = null;
-
-                if (method == null)
-                {
-                    reason = "Order chưa có prod_method hợp lệ SUB/NVL/BOTH nên chưa được ghép.";
-                }
-                else if (hasStartedTask)
-                {
-                    reason = "Order đã có ít nhất một task bắt đầu/Ready/Finished/có log nên không được ghép nhóm.";
-                }
-                else if (!hasAllSelectedCodes)
-                {
-                    reason = "Order không có đủ các công đoạn được chọn để ghép.";
-                }
-
-                result.Add(new GroupProductionCandidateDto
-                {
-                    order_id = row.order_id,
-                    order_code = row.order_code,
-                    single_prod_id = row.single_prod_id,
-
-                    production_method = method,
-                    has_started_task = hasStartedTask,
-
-                    product_type_id = row.item.product_type_id,
-                    product_type_name = productTypeName,
-                    product_name = row.item.product_name,
-                    quantity = row.item.quantity,
-                    production_process = row.item.production_process,
-                    process_key = processKey,
-                    delivery_date = row.delivery_date,
-
-                    can_group = canGroup,
-                    reason = reason
-                });
-            }
-
-            return result
-                .OrderBy(x => x.product_type_id)
-                .ThenBy(x => x.delivery_date)
-                .ThenBy(x => x.order_id)
                 .ToList();
+        }
+
+        private async Task<HashSet<int>> LoadActiveGroupedOrderIdsAsync(
+    List<int> orderIds,
+    CancellationToken ct)
+        {
+            orderIds = orderIds?
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList() ?? new List<int>();
+
+            if (orderIds.Count == 0)
+                return new HashSet<int>();
+
+            var ids = await _db.prod_orders
+                .AsNoTracking()
+                .Where(po =>
+                    orderIds.Contains(po.order_id) &&
+                    po.status == "Active" &&
+                    _db.productions.Any(g =>
+                        g.prod_id == po.prod_id &&
+                        g.prod_kind == "GROUP" &&
+                        g.status != "Cancelled" &&
+                        g.status != "Completed"))
+                .Select(po => po.order_id)
+                .Distinct()
+                .ToListAsync(ct);
+
+            return ids.ToHashSet();
         }
 
         public async Task<CreateGroupProductionResponse> CreateAsync(
@@ -371,6 +499,27 @@ namespace AMMS.Application.Services
                     message = "Đã tạo production theo phòng ban, path công đoạn và điều kiện NVL."
                 };
             });
+        }
+
+        private static bool IsTaskStartedForGrouping(
+    string? status,
+    DateTime? startTime,
+    DateTime? endTime,
+    bool hasLog)
+        {
+            if (startTime != null || endTime != null || hasLog)
+                return true;
+
+            var s = (status ?? "").Trim().ToUpperInvariant();
+
+            /*
+             * Chỉ null hoặc Unassigned là chưa bắt đầu.
+             * Ready cũng xem là đã bắt đầu vì task đã được mở để sản xuất/báo cáo.
+             */
+            if (string.IsNullOrWhiteSpace(s))
+                return false;
+
+            return s != "UNASSIGNED";
         }
 
         private async Task<production> CreateDepartmentGroupProductionAsync(
@@ -1790,13 +1939,18 @@ namespace AMMS.Application.Services
             ).ToListAsync(ct);
 
             var stages = new List<GroupProductionStageDto>();
-            var previousOutputQty = (decimal)prod.group_total_qty;
+
+            var previousOutputQty = prod.group_total_qty > 0
+                ? (decimal)prod.group_total_qty
+                : orderRows.Sum(x => x.qty);
+
             var previousOutputName = "Bán thành phẩm từ các order ghép";
 
             foreach (var task in tasks)
             {
                 var taskLogs = logs
                     .Where(x => x.task_id == task.task_id)
+                    .OrderBy(x => x.log_time)
                     .ToList();
 
                 var stageAllocations = allocations
@@ -1814,14 +1968,29 @@ namespace AMMS.Application.Services
                 var io = BuildGroupStageIO(
                     task.process?.process_code,
                     task.process?.process_name,
-                    prod.group_total_qty,
+                    prod.group_total_qty > 0 ? prod.group_total_qty : orderRows.Sum(x => x.qty),
                     previousOutputQty,
                     previousOutputName,
                     taskLogs);
 
-                var actualOutput = taskLogs.Sum(x => x.qty_good);
+                /*
+                 * FIX:
+                 * actualOutput ưu tiên output_json.
+                 * Nếu output_json trống thì fallback qty_good.
+                 */
+                var actualOutput = ResolveGroupActualOutputQty(taskLogs);
 
-                stages.Add(new GroupProductionStageDto
+                /*
+                 * FIX:
+                 * input_materials / outputs phải lấy lại data từ JSON log,
+                 * vì log có material_usage_json/reference_input_json/output_json đầy đủ.
+                 */
+                ApplyTaskLogJsonToGroupStageIo(
+                    io.inputs,
+                    io.outputs,
+                    taskLogs);
+
+                var stage = new GroupProductionStageDto
                 {
                     task_id = task.task_id,
                     seq_num = task.seq_num,
@@ -1832,7 +2001,10 @@ namespace AMMS.Application.Services
                     end_time = task.end_time,
 
                     estimated_output_qty = io.estimatedOutputQty,
-                    actual_output_qty = actualOutput,
+
+                    actual_output_qty = actualOutput > 0
+                        ? actualOutput
+                        : io.outputs.Sum(x => x.actual_qty),
 
                     report_image_urls = taskLogs
                         .SelectMany(x => x.report_image_urls)
@@ -1843,10 +2015,26 @@ namespace AMMS.Application.Services
                     outputs = io.outputs,
                     logs = taskLogs,
                     allocations = stageAllocations
-                });
+                };
 
-                previousOutputQty = actualOutput > 0 ? actualOutput : io.estimatedOutputQty;
-                previousOutputName = io.outputs.FirstOrDefault()?.name ?? $"BTP sau {task.process?.process_code}";
+                stages.Add(stage);
+
+                /*
+                 * Previous stage cho stage kế tiếp:
+                 * ưu tiên output_json actual > qty_good > estimated.
+                 */
+                var firstOutput = io.outputs.FirstOrDefault();
+
+                previousOutputQty =
+                    stage.actual_output_qty > 0
+                        ? stage.actual_output_qty
+                        : firstOutput?.estimated_qty > 0
+                            ? firstOutput.estimated_qty
+                            : io.estimatedOutputQty;
+
+                previousOutputName =
+                    firstOutput?.name
+                    ?? $"BTP sau {task.process?.process_code}";
             }
 
             var previousStageContext = await BuildPreviousStageContextForGroupAsync(
@@ -1865,6 +2053,13 @@ namespace AMMS.Application.Services
                 string.Equals(prod.status, "Unassigned", StringComparison.OrdinalIgnoreCase);
 
             var canStart = isScheduled && dep.can_start;
+
+            var canStartMessage = canStart
+                ? "Có thể bắt đầu lệnh sản xuất."
+                : !isScheduled
+                    ? $"Production đang ở trạng thái {prod.status}, không thể start bằng API start."
+                    : dep.message;
+
             return new GroupProductionDetailDto
             {
                 prod_id = prod.prod_id,
@@ -1872,8 +2067,7 @@ namespace AMMS.Application.Services
                 status = prod.status,
 
                 can_start = canStart,
-                can_start_message = canStart ? "Có thể bắt đầu lệnh sản xuất." : dep.message,
-
+                can_start_message = canStartMessage,
                 product_type_id = prod.product_type_id,
                 product_type_name = productTypeName,
                 total_qty = prod.group_total_qty,
@@ -1911,6 +2105,10 @@ namespace AMMS.Application.Services
             GroupProductionHelper.EnsureShareableCodes(selectedCodes);
 
             var rows = await LoadGroupOrderRowsAsync(orderIds, ct);
+            await ValidateManualSelectionMatchesCurrentSuggestionAsync(
+    orderIds,
+    selectedCodes,
+    ct);
 
             if (rows.Count != orderIds.Count)
             {
@@ -2043,6 +2241,107 @@ namespace AMMS.Application.Services
                 days_late_if_any = daysLate,
                 notes = notes
             };
+        }
+
+        private async Task ValidateManualSelectionMatchesCurrentSuggestionAsync(
+    List<int> selectedOrderIds,
+    List<string> selectedCodes,
+    CancellationToken ct)
+        {
+            selectedOrderIds = selectedOrderIds
+                .Where(x => x > 0)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToList();
+
+            selectedCodes = selectedCodes
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+
+            if (selectedOrderIds.Count < 2)
+                return;
+
+            if (selectedCodes.Count == 0)
+                throw new InvalidOperationException("Cần chọn process_codes để preview/tạo lệnh ghép.");
+
+            /*
+             * Lấy toàn bộ clean rows giống Candidate/Suggestion.
+             * Không truyền selectedCodes để lấy full suggestion hiện tại.
+             */
+            var allCleanRows = await LoadCleanRowsForSuggestionAsync(
+                productTypeId: null,
+                selectedCodes: new List<string>(),
+                ct: ct);
+
+            if (allCleanRows.Count < 2)
+            {
+                throw new InvalidOperationException(
+                    "Hiện không có suggestion ghép hợp lệ nào. Không thể ghép tay.");
+            }
+
+            /*
+             * Dùng raw auto suggestion, không gọi PreviewAsync ở đây để tránh đệ quy.
+             */
+            var autoSuggestions = BuildAutoDept2Suggestions(allCleanRows)
+                .Where(x => x.suggestion_type != "SPLIT_ONLY")
+                .Where(x => x.suggest_order != null && x.suggest_order.Count >= 2)
+                .Where(x => x.suggest_process != null && x.suggest_process.Count > 0)
+                .ToList();
+
+            var matched = autoSuggestions.Any(s =>
+                SameOrderSet(s.suggest_order, selectedOrderIds) &&
+                SameProcessSet(s.suggest_process, selectedCodes));
+
+            if (!matched)
+            {
+                throw new InvalidOperationException(
+                    "Tổ hợp order/process bạn chọn không khớp với suggestion hiện tại. " +
+                    "Vui lòng chỉ ghép các order/process đang được API suggestions đề xuất. " +
+                    $"SelectedOrders={string.Join(",", selectedOrderIds)}, SelectedProcess={string.Join(",", selectedCodes)}");
+            }
+        }
+
+        private static bool SameOrderSet(
+            List<int>? a,
+            List<int> b)
+        {
+            var aa = (a ?? new List<int>())
+                .Where(x => x > 0)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToList();
+
+            var bb = b
+                .Where(x => x > 0)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToList();
+
+            return aa.SequenceEqual(bb);
+        }
+
+        private static bool SameProcessSet(
+            List<string>? a,
+            List<string> b)
+        {
+            var aa = (a ?? new List<string>())
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+
+            var bb = b
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+
+            return aa.SequenceEqual(bb, StringComparer.OrdinalIgnoreCase);
         }
 
         private static List<string> SplitImageUrls(string? csv)
@@ -3156,6 +3455,266 @@ namespace AMMS.Application.Services
             };
         }
 
+        private static readonly JsonSerializerOptions GroupDetailJsonOptions = new()
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
+        private static List<T> ParseGroupJsonArraySafe<T>(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+                return new List<T>();
+
+            try
+            {
+                return JsonSerializer.Deserialize<List<T>>(json, GroupDetailJsonOptions)
+                       ?? new List<T>();
+            }
+            catch
+            {
+                return new List<T>();
+            }
+        }
+
+        private static string NormGroupDetailCode(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+        }
+
+        private static bool SameGroupDetailCode(string? a, string? b)
+        {
+            var aa = NormGroupDetailCode(a);
+            var bb = NormGroupDetailCode(b);
+
+            if (string.IsNullOrWhiteSpace(aa) || string.IsNullOrWhiteSpace(bb))
+                return false;
+
+            return aa == bb;
+        }
+
+        private static bool IsGroupPrevInputCode(string? code)
+        {
+            var c = NormGroupDetailCode(code);
+
+            return c is "PREV" or "INPUT" or "BTP" or "REFERENCE";
+        }
+
+        private static bool IsGroupLaminationCode(string? code)
+        {
+            var c = NormGroupDetailCode(code);
+
+            return c.Contains("LAMINATION")
+                || c.Contains("MANG")
+                || c.Contains("CAN");
+        }
+
+        private static bool IsGroupCoatingCode(string? code)
+        {
+            var c = NormGroupDetailCode(code);
+
+            return c.Contains("COATING")
+                || c.Contains("KEO_PHU")
+                || c.Contains("PHU");
+        }
+
+        private static bool IsGroupMountingGlueCode(string? code)
+        {
+            var c = NormGroupDetailCode(code);
+
+            return c.Contains("KEO_BOI")
+                || c.Contains("MOUNTING_GLUE");
+        }
+
+        private static List<TaskMaterialUsageLogItemDto> ResolveGroupMaterialUsages(
+            List<GroupTaskLogDto> logs)
+        {
+            return logs
+                .SelectMany(log =>
+                    ParseGroupJsonArraySafe<TaskMaterialUsageLogItemDto>(
+                        log.material_usage_json))
+                .ToList();
+        }
+
+        private static List<TaskReferenceUsageInputDto> ResolveGroupReferenceInputs(
+            List<GroupTaskLogDto> logs)
+        {
+            return logs
+                .SelectMany(log =>
+                    ParseGroupJsonArraySafe<TaskReferenceUsageInputDto>(
+                        log.reference_input_json))
+                .ToList();
+        }
+
+        private static List<TaskOutputReportDto> ResolveGroupOutputs(
+            List<GroupTaskLogDto> logs)
+        {
+            return logs
+                .SelectMany(log =>
+                    ParseGroupJsonArraySafe<TaskOutputReportDto>(
+                        log.output_json))
+                .ToList();
+        }
+
+        private static decimal ResolveGroupActualOutputQty(
+            List<GroupTaskLogDto> logs)
+        {
+            var fromOutputJson = ResolveGroupOutputs(logs)
+                .Sum(x => x.quantity_good);
+
+            if (fromOutputJson > 0)
+                return Math.Round(fromOutputJson, 4);
+
+            return logs.Sum(x => x.qty_good);
+        }
+
+        private static void ApplyTaskLogJsonToGroupStageIo(
+            List<GroupStageMaterialDto> inputs,
+            List<GroupStageMaterialDto> outputs,
+            List<GroupTaskLogDto> logs)
+        {
+            if (logs == null || logs.Count == 0)
+                return;
+
+            var materialUsages = ResolveGroupMaterialUsages(logs);
+            var referenceInputs = ResolveGroupReferenceInputs(logs);
+            var outputReports = ResolveGroupOutputs(logs);
+
+            /*
+             * 1. input_materials
+             */
+            if (inputs != null)
+            {
+                foreach (var input in inputs)
+                {
+                    var inputCode = NormGroupDetailCode(input.code);
+
+                    /*
+                     * BTP từ công đoạn trước.
+                     */
+                    var refMatches = referenceInputs
+                        .Where(x =>
+                            SameGroupDetailCode(x.input_code, input.code)
+                            || IsGroupPrevInputCode(input.code))
+                        .ToList();
+
+                    if (refMatches.Count > 0)
+                    {
+                        var used = refMatches.Sum(x => x.quantity_used);
+                        var estimated = refMatches.Sum(x => x.quantity_used + x.quantity_left);
+
+                        if (used > 0)
+                            input.actual_qty = Math.Round(used, 4);
+
+                        if (input.estimated_qty <= 0 && estimated > 0)
+                            input.estimated_qty = Math.Round(estimated, 4);
+
+                        var firstRef = refMatches.FirstOrDefault();
+
+                        if (firstRef != null)
+                        {
+                            if (string.IsNullOrWhiteSpace(input.name))
+                                input.name = firstRef.input_name;
+
+                            if (string.IsNullOrWhiteSpace(input.unit))
+                                input.unit = firstRef.unit;
+                        }
+
+                        continue;
+                    }
+
+                    /*
+                     * NVL kho: màng/keo phủ/keo bồi...
+                     */
+                    var materialMatches = materialUsages
+                        .Where(x =>
+                            SameGroupDetailCode(x.material_code, input.code)
+                            || SameGroupDetailCode(x.material_name, input.name)
+                            || (IsGroupLaminationCode(inputCode) && IsGroupLaminationCode(x.material_code))
+                            || (IsGroupCoatingCode(inputCode) && IsGroupCoatingCode(x.material_code))
+                            || (IsGroupMountingGlueCode(inputCode) && IsGroupMountingGlueCode(x.material_code)))
+                        .ToList();
+
+                    if (materialMatches.Count == 0)
+                        continue;
+
+                    var usedQty = materialMatches.Sum(x => x.quantity_used);
+
+                    var estimatedQty = materialMatches.Sum(x =>
+                        x.estimated_input_qty > 0
+                            ? x.estimated_input_qty
+                            : x.quantity_used + x.quantity_left + x.quantity_waste);
+
+                    if (usedQty > 0)
+                        input.actual_qty = Math.Round(usedQty, 4);
+
+                    if (input.estimated_qty <= 0 && estimatedQty > 0)
+                        input.estimated_qty = Math.Round(estimatedQty, 4);
+
+                    var firstMaterial = materialMatches.FirstOrDefault();
+
+                    if (firstMaterial != null)
+                    {
+                        if (string.IsNullOrWhiteSpace(input.code))
+                            input.code = firstMaterial.material_code;
+
+                        if (string.IsNullOrWhiteSpace(input.name))
+                            input.name = firstMaterial.material_name;
+
+                        if (string.IsNullOrWhiteSpace(input.unit))
+                            input.unit = firstMaterial.unit;
+                    }
+                }
+            }
+
+            /*
+             * 2. outputs
+             */
+            if (outputs != null)
+            {
+                foreach (var output in outputs)
+                {
+                    var matches = outputReports
+                        .Where(x =>
+                            SameGroupDetailCode(x.output_code, output.code)
+                            || SameGroupDetailCode(x.output_name, output.name))
+                        .ToList();
+
+                    if (matches.Count == 0 && outputReports.Count > 0)
+                        matches = outputReports;
+
+                    if (matches.Count == 0)
+                        continue;
+
+                    var good = matches.Sum(x => x.quantity_good);
+                    var bad = matches.Sum(x => x.quantity_bad);
+
+                    if (good > 0)
+                        output.actual_qty = Math.Round(good, 4);
+
+                    var first = matches.FirstOrDefault();
+
+                    if (first != null)
+                    {
+                        if (string.IsNullOrWhiteSpace(output.code))
+                            output.code = first.output_code;
+
+                        if (string.IsNullOrWhiteSpace(output.name))
+                            output.name = first.output_name;
+
+                        if (string.IsNullOrWhiteSpace(output.unit))
+                            output.unit = first.unit;
+                    }
+
+                    if (output.estimated_qty <= 0 && good + bad > 0)
+                        output.estimated_qty = Math.Round(good + bad, 4);
+                }
+            }
+        }
+
         private async Task<string> GenerateShortProductionCodeAsync(
             string prefix,
             string? departmentCode,
@@ -3459,13 +4018,13 @@ namespace AMMS.Application.Services
         }
 
         private async Task<HashSet<int>> LoadSingleProdIdsHavingStartedTaskAsync(
-            List<int> singleProdIds,
-            CancellationToken ct)
+    List<int> singleProdIds,
+    CancellationToken ct)
         {
-            singleProdIds = singleProdIds
+            singleProdIds = singleProdIds?
                 .Where(x => x > 0)
                 .Distinct()
-                .ToList();
+                .ToList() ?? new List<int>();
 
             if (singleProdIds.Count == 0)
                 return new HashSet<int>();
@@ -3505,7 +4064,7 @@ namespace AMMS.Application.Services
             var logSet = taskIdsWithLogs.ToHashSet();
 
             return taskRows
-                .Where(x => IsTaskStartedForGroupSuggestion(
+                .Where(x => IsTaskStartedForGrouping(
                     x.status,
                     x.start_time,
                     x.end_time,

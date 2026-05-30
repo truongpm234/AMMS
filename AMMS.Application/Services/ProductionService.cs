@@ -2694,40 +2694,36 @@ namespace AMMS.Application.Services
 
             /*
              * NVL:
-             * Theo yêu cầu: lấy thẳng final_total_cost từ báo giá đã chốt.
+             * Tính theo chi phí sản xuất nội bộ từ đầu:
+             * material_cost + process_cost + design_cost.
+             *
+             * Không lấy final_total_cost nữa vì final_total_cost có thể là giá báo cho khách,
+             * có thể đã gồm rush/discount/overhead hoặc dữ liệu bị lệch.
+             * Nếu lấy final_total_cost còn SUB/BOTH tính theo cost nội bộ thì sẽ so sánh sai.
              */
-            var nvlTotalCost = Money(est.final_total_cost);
-
-            if (nvlTotalCost <= 0m)
-            {
-                /*
-                 * Fallback cho dữ liệu cũ chưa có final_total_cost.
-                 * Fallback này cũng không cộng overhead/rush/discount.
-                 */
-                var nvlFallback = BuildMethodCostWithoutOverheadRushDiscount(
-                    est,
-                    materialCost: GetFullNvlMaterialCost(est),
-                    processCost: GetFullProcessCost(processCosts),
-                    orderQty: orderQty);
-
-                nvlTotalCost = nvlFallback.total_cost;
-            }
-
-            var nvlUnitCost = SafeUnitCost(nvlTotalCost, orderQty);
+            var nvlCost = BuildMethodCostWithoutOverheadRushDiscount(
+                est,
+                materialCost: GetFullNvlMaterialCost(est),
+                processCost: GetFullProcessCost(processCosts),
+                orderQty: orderQty,
+                includeDesignCost: true);
 
             result.Add(new ProductionMethodCostOptionDto
             {
                 method = "NVL",
                 is_available = true,
-                unit_cost = nvlUnitCost,
-                total_cost = nvlTotalCost,
+                unit_cost = nvlCost.unit_cost,
+                total_cost = nvlCost.total_cost,
                 nvl_qty = orderQty,
-                reason = "Sản xuất toàn bộ từ NVL. Total cost lấy từ final_total_cost của báo giá đã chốt."
+                reason =
+                    "NVL = chi phí sản xuất toàn bộ từ đầu: vật liệu + công đoạn + design_cost. " +
+                    "Không dùng final_total_cost để tránh lệch khi so sánh với SUB/BOTH."
             });
 
             /*
              * SUB:
-             * Chỉ available nếu có BTP phù hợp và đủ quantity.
+             * Không cộng giá trị lịch sử của BTP vào total_cost.
+             * Chỉ tính chi phí phát sinh để hoàn thiện các công đoạn order còn thiếu.
              */
             if (subOptionForSub == null)
             {
@@ -2742,14 +2738,15 @@ namespace AMMS.Application.Services
             {
                 var sub = subOptionForSub.Sub;
 
-                var subCost = BuildSubOrBothMethodCostWithoutOverheadRushDiscount(
+                var subCost = BuildSubOrBothIncrementalMethodCost(
                     est,
                     processCosts,
                     orderRoute,
                     sub,
                     subUsedQty: orderQty,
                     nvlQty: 0,
-                    orderQty: orderQty);
+                    orderQty: orderQty,
+                    includeDesignCost: true);
 
                 result.Add(new ProductionMethodCostOptionDto
                 {
@@ -2764,22 +2761,24 @@ namespace AMMS.Application.Services
                     unit_cost = subCost.unit_cost,
                     total_cost = subCost.total_cost,
 
-                    saving_vs_nvl_unit = Math.Round(nvlUnitCost - subCost.unit_cost, 4),
-                    saving_vs_nvl_total = Math.Round(nvlTotalCost - subCost.total_cost, 2),
+                    saving_vs_nvl_unit = Math.Round(nvlCost.unit_cost - subCost.unit_cost, 4),
+                    saving_vs_nvl_total = Math.Round(nvlCost.total_cost - subCost.total_cost, 2),
 
                     reason =
-                        $"SUB = giá trị BTP đã có + vật liệu/công đoạn còn thiếu + design_cost. " +
-                        $"Không tính overhead, rush, discount. " +
+                        $"SUB = chỉ tính chi phí phát sinh để hoàn thiện BTP. " +
+                        $"Không cộng unit_cost_to_stage × quantity vào total_cost vì BTP đã có trong kho. " +
                         $"SubPath={sub.product_process}. " +
                         $"CoveredStages={string.Join(",", subCost.covered_stages)}. " +
-                        $"ExtraStages={string.Join(",", subCost.extra_stages)}."
+                        $"ExtraStages={string.Join(",", subCost.extra_stages)}. " +
+                        $"InventoryValueRef={Math.Round(Money(sub.unit_cost_to_stage) * orderQty, 2)}."
                 });
             }
 
             /*
              * BOTH:
-             * Dùng một phần BTP, phần thiếu sản xuất bằng NVL.
-             * Cũng không cộng overhead/rush/discount trong cost đề xuất.
+             * - Phần có BTP: chỉ tính chi phí hoàn thiện các stage còn thiếu.
+             * - Phần thiếu BTP: tính chi phí sản xuất từ NVL theo tỷ lệ nvlQty/orderQty.
+             * - Không cộng lại giá trị lịch sử BTP vào total_cost.
              */
             if (subOptionForBoth == null)
             {
@@ -2814,14 +2813,15 @@ namespace AMMS.Application.Services
                 }
                 else
                 {
-                    var bothCost = BuildSubOrBothMethodCostWithoutOverheadRushDiscount(
+                    var bothCost = BuildSubOrBothIncrementalMethodCost(
                         est,
                         processCosts,
                         orderRoute,
                         sub,
                         subUsedQty: subUseQty,
                         nvlQty: nvlQty,
-                        orderQty: orderQty);
+                        orderQty: orderQty,
+                        includeDesignCost: true);
 
                     result.Add(new ProductionMethodCostOptionDto
                     {
@@ -2836,20 +2836,108 @@ namespace AMMS.Application.Services
                         unit_cost = bothCost.unit_cost,
                         total_cost = bothCost.total_cost,
 
-                        saving_vs_nvl_unit = Math.Round(nvlUnitCost - bothCost.unit_cost, 4),
-                        saving_vs_nvl_total = Math.Round(nvlTotalCost - bothCost.total_cost, 2),
+                        saving_vs_nvl_unit = Math.Round(nvlCost.unit_cost - bothCost.unit_cost, 4),
+                        saving_vs_nvl_total = Math.Round(nvlCost.total_cost - bothCost.total_cost, 2),
 
                         reason =
-                            $"BOTH dùng {subUseQty} BTP và sản xuất thêm {nvlQty} bằng NVL. " +
-                            $"Không tính overhead, rush, discount trong cost đề xuất. " +
+                            $"BOTH = dùng {subUseQty} BTP + sản xuất thêm {nvlQty} bằng NVL. " +
+                            $"Không cộng giá trị lịch sử BTP vào total_cost. " +
                             $"SubPath={sub.product_process}. " +
                             $"CoveredStages={string.Join(",", bothCost.covered_stages)}. " +
-                            $"ExtraStagesForSubPart={string.Join(",", bothCost.extra_stages)}."
+                            $"ExtraStagesForSubPart={string.Join(",", bothCost.extra_stages)}. " +
+                            $"InventoryValueRef={Math.Round(Money(sub.unit_cost_to_stage) * subUseQty, 2)}."
                     });
                 }
             }
 
             return result;
+        }
+
+        private static MethodCostBuildResult BuildSubOrBothIncrementalMethodCost(
+    cost_estimate est,
+    List<EstimateProcessCostRow> processCosts,
+    List<string> orderRoute,
+    sub_product sub,
+    int subUsedQty,
+    int nvlQty,
+    int orderQty,
+    bool includeDesignCost)
+        {
+            orderQty = orderQty > 0 ? orderQty : 1;
+            subUsedQty = Math.Max(subUsedQty, 0);
+            nvlQty = Math.Max(nvlQty, 0);
+
+            var subPath = SubProductCompatibilityHelper.ParseRoute(sub.product_process);
+
+            /*
+             * Các công đoạn order còn thiếu sau phần BTP.
+             * Ví dụ:
+             * OrderRoute = RALO,CAT,IN,PHU,CAN,BE,DUT,DAN
+             * SubPath    = RALO,CAT,IN
+             * Extra      = PHU,CAN,BE,DUT,DAN
+             */
+            var extraStagesForSubPart = orderRoute
+                .Where(x => !IsStageCoveredBySub(x, subPath))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            /*
+             * SUB/BOTH theo logic đề xuất method:
+             * KHÔNG cộng giá trị lịch sử của BTP vào chi phí sản xuất mới.
+             *
+             * Không làm:
+             * sub.unit_cost_to_stage * subUsedQty
+             *
+             * Vì đây là giá trị tồn kho/kế toán, không phải chi phí phát sinh
+             * để sản xuất order hiện tại.
+             */
+            var subRatio = orderQty <= 0
+                ? 0m
+                : subUsedQty / (decimal)orderQty;
+
+            /*
+             * Chi phí hoàn thiện phần BTP:
+             * chỉ tính vật liệu/công đoạn mà order cần nhưng sub chưa cover.
+             */
+            var remainingMaterialForSubPart =
+                GetRemainingMaterialCostAfterSub(est, orderRoute, subPath) * subRatio;
+
+            var remainingProcessForSubPart =
+                GetRemainingProcessCostAfterSub(processCosts, subPath) * subRatio;
+
+            /*
+             * Phần NVL trong BOTH:
+             * phần thiếu BTP phải sản xuất từ đầu theo tỷ lệ nvlQty/orderQty.
+             */
+            var nvlRatio = orderQty <= 0
+                ? 0m
+                : nvlQty / (decimal)orderQty;
+
+            var nvlMaterialPart =
+                GetFullNvlMaterialCost(est) * nvlRatio;
+
+            var nvlProcessPart =
+                GetFullProcessCost(processCosts) * nvlRatio;
+
+            var methodMaterialCost =
+                remainingMaterialForSubPart +
+                nvlMaterialPart;
+
+            var methodProcessCost =
+                remainingProcessForSubPart +
+                nvlProcessPart;
+
+            var built = BuildMethodCostWithoutOverheadRushDiscount(
+                est,
+                methodMaterialCost,
+                methodProcessCost,
+                orderQty,
+                includeDesignCost);
+
+            built.covered_stages = subPath;
+            built.extra_stages = extraStagesForSubPart;
+
+            return built;
         }
 
         private async Task ReleasePreviousProductionMaterialReserveAsync(
@@ -3486,26 +3574,20 @@ namespace AMMS.Application.Services
         }
 
         private static MethodCostBuildResult BuildMethodCostWithoutOverheadRushDiscount(
-            cost_estimate est,
-            decimal materialCost,
-            decimal processCost,
-            int orderQty)
+    cost_estimate est,
+    decimal materialCost,
+    decimal processCost,
+    int orderQty,
+    bool includeDesignCost = true)
         {
             orderQty = orderQty > 0 ? orderQty : 1;
 
             materialCost = Money(materialCost);
             processCost = Money(processCost);
 
-            /*
-             * Theo yêu cầu mới:
-             * Không tính:
-             * - overhead
-             * - rush
-             * - discount
-             *
-             * Chỉ cộng design_cost nếu báo giá có.
-             */
-            var designCost = Money(est.design_cost);
+            var designCost = includeDesignCost
+                ? Money(est.design_cost)
+                : 0m;
 
             var total =
                 materialCost +
