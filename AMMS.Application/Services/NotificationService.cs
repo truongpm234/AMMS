@@ -21,6 +21,12 @@ namespace AMMS.Application.Services
             return await _notiRepo.GetNotificationByRoleId(id);
         }
 
+        public async Task<List<notification>> StaffGetNoti(string role)
+        {
+            var res = await _notiRepo.StaffGetNoti(role);
+            return res;
+        }
+
         public async Task<List<notification>> GetConsultantNotiByUserId(int id, int? user_id)
         {
             return await _notiRepo.GetConsultantNotificationUserId(id, user_id);
