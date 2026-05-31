@@ -1,6 +1,7 @@
 ﻿using AMMS.Application.Helpers;
 using AMMS.Application.Interfaces;
 using AMMS.Infrastructure.DBContext;
+using AMMS.Infrastructure.Entities;
 using AMMS.Infrastructure.Interfaces;
 using AMMS.Shared.DTOs.Productions;
 using Microsoft.AspNetCore.Mvc;
@@ -61,8 +62,22 @@ public class TasksController : ControllerBase
             });
         }
 
-        var t = await _taskRepo.GetByIdAsync(taskId);
-        if (t == null)
+        /*
+         * FIX:
+         * Không chỉ dùng _taskRepo.GetByIdAsync(taskId) vì có thể chưa Include:
+         * - process
+         * - prod
+         *
+         * API qr-prepare cần biết prod_kind/prod_method/process_code
+         * để xử lý riêng GROUP + SUB.
+         */
+        var taskForPrepare = await _db.tasks
+            .AsNoTracking()
+            .Include(x => x.process)
+            .Include(x => x.prod)
+            .FirstOrDefaultAsync(x => x.task_id == taskId, ct);
+
+        if (taskForPrepare == null)
         {
             return NotFound(new
             {
@@ -70,42 +85,77 @@ public class TasksController : ControllerBase
                 task_id = taskId
             });
         }
-        var taskForGroup = await _db.tasks
-    .AsNoTracking()
-    .Include(x => x.prod)
-    .Include(x => x.process)
-    .FirstOrDefaultAsync(x => x.task_id == taskId, ct);
 
-        if (taskForGroup?.prod != null &&
-    string.Equals(taskForGroup.prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
+        var isGroupProduction =
+            taskForPrepare.prod != null &&
+            string.Equals(
+                taskForPrepare.prod.prod_kind,
+                "GROUP",
+                StringComparison.OrdinalIgnoreCase);
+
+        /*
+         * CASE 1:
+         * GROUP production
+         *
+         * Với GROUP + SUB:
+         * - suggested_qty vẫn là group_total_qty, ví dụ 6000.
+         * - max_allowed phải lấy theo actual_qty_prev_stage từ reference_inputs, ví dụ 7674.
+         *
+         * Với GROUP + NVL/BOTH:
+         * - giữ logic cũ, max_allowed theo group_total_qty.
+         */
+        if (isGroupProduction)
         {
-            var groupBundle = await _scanSvc.GetTaskQrMaterialBundleAsync(taskId, ct);
+            var groupBundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
+                taskId,
+                ct);
+
+            var groupPolicy = await ResolveGroupQrQtyPolicyAsync(
+                taskMeta: taskForPrepare,
+                preparedReferenceInputs: groupBundle.reference_inputs,
+                submittedReferenceInputs: null,
+                ct: ct);
+
+            var groupStageCount = await _db.tasks
+                .AsNoTracking()
+                .CountAsync(x => x.prod_id == taskForPrepare.prod_id, ct);
 
             return Ok(new
             {
                 task_id = taskId,
 
-                process_code = taskForGroup.process?.process_code,
-                process_name = taskForGroup.process?.process_name,
+                process_code = taskForPrepare.process?.process_code,
+                process_name = taskForPrepare.process?.process_name,
 
-                qty_unit = "sp",
-                min_allowed = 1,
-                max_allowed = taskForGroup.prod.group_total_qty,
-                suggested_qty = taskForGroup.prod.group_total_qty,
-                happy_case_qty = taskForGroup.prod.group_total_qty,
+                qty_unit = groupPolicy.QtyUnit,
+                min_allowed = groupPolicy.MinAllowed,
 
-                order_qty = taskForGroup.prod.group_total_qty,
+                /*
+                 * GROUP + SUB:
+                 * max_allowed = actual_qty_prev_stage
+                 *
+                 * Ví dụ:
+                 * group_total_qty = 6000
+                 * reference_inputs.actual_qty_prev_stage = 7674
+                 * => max_allowed = 7674
+                 */
+                max_allowed = groupPolicy.MaxAllowed,
+                suggested_qty = groupPolicy.SuggestedQty,
+                happy_case_qty = groupPolicy.HappyCaseQty,
+
+                order_qty = taskForPrepare.prod!.group_total_qty,
+
                 sheets_required = 0,
                 sheets_waste = 0,
                 sheets_total = 0,
                 n_up = 1,
                 number_of_plates = 0,
 
-                stage_index = taskForGroup.seq_num ?? 1,
-                stage_count = await _db.tasks.CountAsync(x => x.prod_id == taskForGroup.prod_id, ct),
+                stage_index = taskForPrepare.seq_num ?? 1,
+                stage_count = groupStageCount,
 
-                production_output_qty = taskForGroup.prod.group_total_qty,
-                production_output_unit = "sp",
+                production_output_qty = groupPolicy.SuggestedQty,
+                production_output_unit = groupPolicy.QtyUnit,
 
                 input_mode = "MANUAL",
                 allow_manual_input = true,
@@ -113,17 +163,22 @@ public class TasksController : ControllerBase
                 manual_input_optional = false,
 
                 is_group_production = true,
-                group_prod_id = taskForGroup.prod.prod_id,
-                group_total_qty = taskForGroup.prod.group_total_qty,
+                group_prod_id = taskForPrepare.prod.prod_id,
+                group_total_qty = taskForPrepare.prod.group_total_qty,
 
-                manual_input_hint = "Task group cho phép nhập tay NVL, BTP input và output khi finish. Các danh sách dưới đây là estimate tổng để FE tham khảo.",
+                manual_input_hint = groupPolicy.Hint,
 
                 consumable_materials = groupBundle.consumable_materials,
                 reference_inputs = groupBundle.reference_inputs
             });
         }
 
+        /*
+         * CASE 2:
+         * SINGLE / SPLIT production
+         */
         var policy = await _taskRepo.GetQtyPolicyAsync(taskId, ct);
+
         if (policy == null)
         {
             return BadRequest(new
@@ -133,11 +188,16 @@ public class TasksController : ControllerBase
             });
         }
 
-        var bundle = await _scanSvc.GetTaskQrMaterialBundleAsync(taskId, ct);
+        var bundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
+            taskId,
+            ct);
 
-        var singleInputMode = taskForGroup?.input_mode ?? "ESTIMATE";
-        var singleForceManual = string.Equals(
-            singleInputMode,
+        var inputMode = string.IsNullOrWhiteSpace(taskForPrepare.input_mode)
+            ? "ESTIMATE"
+            : taskForPrepare.input_mode.Trim();
+
+        var forceManual = string.Equals(
+            inputMode,
             "MANUAL",
             StringComparison.OrdinalIgnoreCase);
 
@@ -167,15 +227,16 @@ public class TasksController : ControllerBase
             production_output_qty = policy.suggested_qty,
             production_output_unit = policy.qty_unit,
 
-            input_mode = singleInputMode,
-            allow_manual_input = singleForceManual,
+            input_mode = inputMode,
+            allow_manual_input = forceManual,
             can_use_manual_input = true,
-            manual_input_optional = !singleForceManual,
+            manual_input_optional = !forceManual,
+
             is_group_production = false,
             group_prod_id = (int?)null,
             group_total_qty = (int?)null,
 
-            manual_input_hint = singleForceManual
+            manual_input_hint = forceManual
                 ? "Task này đang được cấu hình MANUAL, FE cần gửi manual input khi finish."
                 : "Task SINGLE có thể chọn nhập tay input. Nếu không chọn thì dùng estimate như logic cũ.",
 
@@ -998,5 +1059,176 @@ public class TasksController : ControllerBase
             "BOI" or
             "BE" or
             "DUT";
+    }
+
+    private sealed class GroupQrQtyPolicy
+    {
+        public bool IsGroupSub { get; set; }
+
+        public int MinAllowed { get; set; } = 1;
+
+        /*
+         * Với GROUP + SUB:
+         * - SuggestedQty = group_total_qty, ví dụ 6000.
+         * - MaxAllowed = actual_qty_prev_stage, ví dụ 7674.
+         */
+        public int MaxAllowed { get; set; }
+        public int SuggestedQty { get; set; }
+        public int HappyCaseQty { get; set; }
+
+        public string QtyUnit { get; set; } = "sp";
+        public string Hint { get; set; } = "";
+    }
+
+    private static string NormQrCode(string? value)
+    {
+        return (value ?? "")
+            .Trim()
+            .ToUpperInvariant()
+            .Replace(" ", "_")
+            .Replace("-", "_");
+    }
+
+    private static bool IsGroupSubTask(task taskMeta)
+    {
+        return taskMeta?.prod != null
+               && string.Equals(taskMeta.prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase)
+               && string.Equals(taskMeta.prod.prod_method, "SUB", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int CeilPositive(decimal value)
+    {
+        return value <= 0
+            ? 0
+            : (int)Math.Ceiling(value);
+    }
+
+    private static decimal ResolveActualQtyFromPreparedReferenceInputs(
+        IReadOnlyList<TaskReferenceInputDto>? referenceInputs)
+    {
+        if (referenceInputs == null || referenceInputs.Count == 0)
+            return 0m;
+
+        /*
+         * Với GROUP + SUB, input BTP thực tế nằm ở actual_qty_prev_stage.
+         * Ví dụ:
+         * reference_inputs[0].actual_qty_prev_stage = 7674
+         */
+        return referenceInputs
+            .Where(x => x != null)
+            .Sum(x => x.actual_qty_prev_stage);
+    }
+
+    private static decimal ResolveActualQtyFromSubmittedReferenceInputs(
+        List<TaskReferenceUsageInputDto>? referenceInputs)
+    {
+        if (referenceInputs == null || referenceInputs.Count == 0)
+            return 0m;
+
+        /*
+         * Khi FE submit CreateQr, reference_inputs_json thường gửi quantity_used.
+         * Với GROUP + SUB thì đây chính là input BTP thực tế user chọn.
+         */
+        return referenceInputs
+            .Where(x => x != null)
+            .Sum(x => x.quantity_used);
+    }
+
+    private async Task<GroupQrQtyPolicy> ResolveGroupQrQtyPolicyAsync(
+        task taskMeta,
+        IReadOnlyList<TaskReferenceInputDto>? preparedReferenceInputs,
+        List<TaskReferenceUsageInputDto>? submittedReferenceInputs,
+        CancellationToken ct)
+    {
+        if (taskMeta?.prod == null)
+        {
+            return new GroupQrQtyPolicy
+            {
+                MinAllowed = 1,
+                MaxAllowed = 1,
+                SuggestedQty = 1,
+                HappyCaseQty = 1,
+                QtyUnit = "sp",
+                Hint = "Không tìm thấy production của task."
+            };
+        }
+
+        var groupTotalQty = taskMeta.prod.group_total_qty > 0
+            ? taskMeta.prod.group_total_qty
+            : 1;
+
+        /*
+         * Default cho GROUP thường / GROUP + NVL:
+         * Giữ logic cũ: validate theo group_total_qty.
+         */
+        var policy = new GroupQrQtyPolicy
+        {
+            IsGroupSub = false,
+            MinAllowed = 1,
+            MaxAllowed = groupTotalQty,
+            SuggestedQty = groupTotalQty,
+            HappyCaseQty = groupTotalQty,
+            QtyUnit = "sp",
+            Hint = "Task group cho phép nhập tay NVL, BTP input và output khi finish."
+        };
+
+        /*
+         * FIX RIÊNG GROUP + SUB:
+         * Không dùng group_total_qty làm max.
+         * max_allowed phải lấy theo actual_qty_prev_stage của BTP đầu vào.
+         */
+        if (IsGroupSubTask(taskMeta))
+        {
+            var actualFromSubmitted = ResolveActualQtyFromSubmittedReferenceInputs(
+                submittedReferenceInputs);
+
+            var actualFromPrepared = ResolveActualQtyFromPreparedReferenceInputs(
+                preparedReferenceInputs);
+
+            decimal actualInputQty = 0m;
+
+            if (actualFromSubmitted > 0)
+                actualInputQty = actualFromSubmitted;
+            else if (actualFromPrepared > 0)
+                actualInputQty = actualFromPrepared;
+            else
+            {
+                /*
+                 * Fallback nếu caller chưa truyền preparedReferenceInputs.
+                 */
+                var bundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
+                    taskMeta.task_id,
+                    ct);
+
+                actualInputQty = ResolveActualQtyFromPreparedReferenceInputs(
+                    bundle.reference_inputs);
+            }
+
+            var actualInputInt = CeilPositive(actualInputQty);
+
+            /*
+             * Nếu không có actual thì fallback group_total_qty để không vỡ API.
+             * Nếu có actual, dùng actual làm max.
+             */
+            var maxByActualInput = actualInputInt > 0
+                ? actualInputInt
+                : groupTotalQty;
+
+            policy.IsGroupSub = true;
+            policy.MaxAllowed = maxByActualInput;
+
+            /*
+             * Suggested vẫn giữ số lượng sản phẩm đơn ghép.
+             * Ví dụ suggested = 6000, max = 7674.
+             */
+            policy.SuggestedQty = groupTotalQty;
+            policy.HappyCaseQty = groupTotalQty;
+
+            policy.Hint =
+                $"GROUP + SUB: suggested_qty lấy theo tổng SL đơn ghép = {groupTotalQty} sp; " +
+                $"max_allowed lấy theo BTP thực tế đầu vào actual_qty_prev_stage = {maxByActualInput} sp.";
+        }
+
+        return policy;
     }
 }

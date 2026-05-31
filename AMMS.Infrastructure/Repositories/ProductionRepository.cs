@@ -1463,7 +1463,30 @@ namespace AMMS.Infrastructure.Repositories
                  * Lấy lại actual/estimated từ material_usage_json,
                  * reference_input_json, output_json nếu log đã có data.
                  */
+                /*
+ * 1. Map actual từ JSON nếu có:
+ * - material_usage_json
+ * - reference_input_json
+ * - output_json
+ */
                 ApplyTaskLogJsonToProductionStage(stage, stageLogs);
+
+                /*
+                 * 2. Nếu output_json không có nhưng task_log.qty_good có,
+                 * vẫn phải set actual output để công đoạn sau lấy được.
+                 */
+                ApplyOutputActualFallbackFromQtyGood(stage);
+
+                /*
+                 * 3. Nếu input là BTP từ công đoạn trước,
+                 * lấy actual từ output thực tế của công đoạn trước.
+                 */
+                ApplyPreviousStageActualToInputMaterials(stage, prevOutput);
+
+                /*
+                 * 4. Cuối cùng không để input_material.actual_quantity = null.
+                 */
+                NormalizeNullActualInputMaterials(stage);
 
                 stages.Add(stage);
 
@@ -1472,8 +1495,18 @@ namespace AMMS.Infrastructure.Repositories
                     Name = stage.output_product?.name ?? io.nextOutput.Name,
                     Code = stage.output_product?.code ?? io.nextOutput.Code,
                     Unit = stage.output_product?.unit ?? io.nextOutput.Unit,
-                    EstimatedQuantity = stage.output_product?.estimated_quantity ?? io.nextOutput.EstimatedQuantity,
-                    ActualQuantity = stage.output_product?.actual_quantity ?? io.nextOutput.ActualQuantity
+
+                    EstimatedQuantity =
+                        stage.output_product?.estimated_quantity > 0
+                            ? stage.output_product.estimated_quantity
+                            : io.nextOutput.EstimatedQuantity,
+
+                    ActualQuantity =
+                        stage.output_product?.actual_quantity > 0
+                            ? stage.output_product.actual_quantity.Value
+                            : stage.qty_good > 0
+                                ? stage.qty_good
+                                : io.nextOutput.ActualQuantity
                 };
             }
 
@@ -2191,8 +2224,31 @@ namespace AMMS.Infrastructure.Repositories
                     is_taken_sub_product = task?.is_taken_sub_product ?? false
                 };
 
+                ApplyTaskLogJsonToProductionStage(stage, stageLogs);
+                ApplyOutputActualFallbackFromQtyGood(stage);
+                ApplyPreviousStageActualToInputMaterials(stage, prevOutput);
+                NormalizeNullActualInputMaterials(stage);
+
                 stages.Add(stage);
-                prevOutput = io.nextOutput;
+
+                prevOutput = new StageOutputRef
+                {
+                    Name = stage.output_product?.name ?? io.nextOutput.Name,
+                    Code = stage.output_product?.code ?? io.nextOutput.Code,
+                    Unit = stage.output_product?.unit ?? io.nextOutput.Unit,
+
+                    EstimatedQuantity =
+                        stage.output_product?.estimated_quantity > 0
+                            ? stage.output_product.estimated_quantity
+                            : io.nextOutput.EstimatedQuantity,
+
+                    ActualQuantity =
+                        stage.output_product?.actual_quantity > 0
+                            ? stage.output_product.actual_quantity.Value
+                            : stage.qty_good > 0
+                                ? stage.qty_good
+                                : io.nextOutput.ActualQuantity
+                };
             }
 
             dto.stages = stages;
@@ -6812,6 +6868,100 @@ namespace AMMS.Infrastructure.Repositories
                 .FirstOrDefaultAsync(ct);
 
             return est;
+        }
+
+        private static bool IsActualMissing(decimal? value)
+        {
+            return !value.HasValue;
+        }
+
+        private static bool IsPreviousStageInputForDetail(
+            StageMaterialDto input,
+            StageOutputRef? prevOutput)
+        {
+            if (input == null || prevOutput == null)
+                return false;
+
+            var inputCode = NormDetailCode(input.code);
+            var inputName = NormDetailCode(input.name);
+
+            var prevCode = NormDetailCode(prevOutput.Code);
+            var prevName = NormDetailCode(prevOutput.Name);
+
+            if (!string.IsNullOrWhiteSpace(prevCode) && inputCode == prevCode)
+                return true;
+
+            if (!string.IsNullOrWhiteSpace(prevName) && inputName == prevName)
+                return true;
+
+            return inputCode is "PREV" or "INPUT" or "BTP" or "REFERENCE"
+                   || inputName.Contains("BAN_THANH_PHAM")
+                   || inputName.Contains("BTP")
+                   || inputName.Contains("GIAY_DA_CAT")
+                   || inputName.Contains("CONG_DOAN_TRUOC");
+        }
+
+        private static void ApplyOutputActualFallbackFromQtyGood(
+            ProductionStageDto stage)
+        {
+            if (stage?.output_product == null)
+                return;
+
+            if (stage.output_product.actual_quantity.HasValue &&
+                stage.output_product.actual_quantity.Value > 0)
+                return;
+
+            if (stage.qty_good <= 0)
+                return;
+
+            stage.output_product.actual_quantity = stage.qty_good;
+            stage.actual_output_quantity = stage.qty_good;
+        }
+
+        private static void ApplyPreviousStageActualToInputMaterials(
+            ProductionStageDto stage,
+            StageOutputRef? prevOutput)
+        {
+            if (stage?.input_materials == null || stage.input_materials.Count == 0)
+                return;
+
+            if (prevOutput == null)
+                return;
+
+            var prevActual = prevOutput.ActualQuantity > 0
+                ? prevOutput.ActualQuantity
+                : prevOutput.EstimatedQuantity;
+
+            if (prevActual <= 0)
+                return;
+
+            foreach (var input in stage.input_materials)
+            {
+                if (!IsPreviousStageInputForDetail(input, prevOutput))
+                    continue;
+
+                if (IsActualMissing(input.actual_quantity))
+                {
+                    input.actual_quantity = Math.Round((decimal)prevActual, 4);
+                }
+            }
+        }
+
+        private static void NormalizeNullActualInputMaterials(
+            ProductionStageDto stage)
+        {
+            if (stage?.input_materials == null || stage.input_materials.Count == 0)
+                return;
+
+            foreach (var input in stage.input_materials)
+            {
+                /*
+                 * Không để API trả null.
+                 * Nếu chưa có log thực tế thì trả 0 để FE hiển thị ổn định.
+                 */
+                if (!input.actual_quantity.HasValue)
+                    input.actual_quantity = 0m;
+            }
         }
     }
 }
