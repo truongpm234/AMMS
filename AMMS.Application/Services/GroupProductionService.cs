@@ -317,20 +317,16 @@ namespace AMMS.Application.Services
              * vì nếu FE gửi ["PHU,CAN"] thì sẽ thành 1 code "PHU,CAN".
              */
             var selectedCodes = req.process_codes
-                .SelectMany(x => GroupProductionHelper.ParseCodes(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(FullRouteIndex)
-                .ToList();
+    .SelectMany(x => GroupProductionHelper.ParseCodes(x))
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .OrderBy(FullRouteIndex)
+    .ToList();
 
             if (selectedCodes.Count == 0)
                 throw new InvalidOperationException("Cần chọn ít nhất 1 công đoạn để tạo lệnh sản xuất ghép/tách.");
 
             GroupProductionHelper.EnsureShareableCodes(selectedCodes);
 
-            /*
-             * Preview dùng cùng body request.
-             * Nếu req.planned_start_date null thì preview tự tính suggested_planned_start_date.
-             */
             var preview = await PreviewAsync(req, ct);
 
             if (preview.days_late_if_any > 0)
@@ -2037,14 +2033,20 @@ namespace AMMS.Application.Services
 
             GroupProductionHelper.EnsureShareableCodes(selectedCodes);
 
+            /*
+             * FIX:
+             * Preview được phép chọn subset order trong suggestion.
+             * Ví dụ suggestion [1,2,5,6], thì preview [1,5] vẫn hợp lệ.
+             */
+            await ValidateManualSelectionMatchesCurrentSuggestionAsync(
+                orderIds,
+                selectedCodes,
+                ct);
+
             var rows = await LoadGroupOrderRowsAsync(
                 orderIds,
                 selectedCodes,
                 ct);
-            await ValidateManualSelectionMatchesCurrentSuggestionAsync(
-    orderIds,
-    selectedCodes,
-    ct);
 
             if (rows.Count != orderIds.Count)
             {
@@ -2055,6 +2057,9 @@ namespace AMMS.Application.Services
                     $"Không tìm thấy đủ order hợp lệ để preview. Missing: {string.Join(",", missing)}");
             }
 
+            if (rows.Any(x => x.Item == null))
+                throw new InvalidOperationException("Một số order chưa có order_item.");
+
             if (rows.Any(x => !x.Order.layout_confirmed || !x.Order.is_production_ready))
                 throw new InvalidOperationException("Tất cả order phải xác nhận file thiết kế chuẩn và sẵn sàng sản xuất.");
 
@@ -2064,19 +2069,19 @@ namespace AMMS.Application.Services
                 .ToList();
 
             if (invalidStatusOrders.Count > 0)
-                throw new InvalidOperationException($"Order không ở trạng thái Đã lập lịch.");
+                throw new InvalidOperationException($"Order không ở trạng thái Đã lập lịch: {string.Join(",", invalidStatusOrders)}");
 
             var productTypeIds = rows
-    .Select(x => x.Item.product_type_id)
-    .Distinct()
-    .ToList();
+                .Select(x => x.Item.product_type_id)
+                .Distinct()
+                .ToList();
 
             if (productTypeIds.Count != 1 || productTypeIds[0] == null)
                 throw new InvalidOperationException("Các order phải cùng loại sản phẩm.");
 
             ValidateRowsHaveSameProductionMethodOrThrow(
-    rows,
-    "preview ghép/tách production");
+                rows,
+                "preview ghép/tách production");
 
             ValidateRowsHaveNoStartedTaskOrThrow(
                 rows,
@@ -2094,6 +2099,7 @@ namespace AMMS.Application.Services
             var suggestedStart = req.planned_start_date?.Date ?? ResolveSuggestedStart(commonDeadline);
 
             var dept1Start = suggestedStart;
+
             var dept1Stage = BuildStageDto(
                 deptCode: "DEPT_1",
                 deptName: "Dept 1 - RALO,CAT,IN riêng từng đơn",
@@ -2120,7 +2126,10 @@ namespace AMMS.Application.Services
                         deptName: segment.DepartmentName,
                         stageType: "GROUP",
                         processCodes: segment.ProcessCodes,
-                        orderIds: segment.Members.Select(x => x.Order.order_id).Distinct().ToList(),
+                        orderIds: segment.Members
+                            .Select(x => x.Order.order_id)
+                            .Distinct()
+                            .ToList(),
                         start: dept2Start,
                         durationDays: Dept2Days,
                         note: $"Gợi ý ghép vì cùng loại sản phẩm, cùng nhóm vật liệu và cùng mốc giao chung {commonDeadline:yyyy-MM-dd}."));
@@ -2132,7 +2141,10 @@ namespace AMMS.Application.Services
                         deptName: segment.DepartmentName,
                         stageType: "SPLIT",
                         processCodes: segment.ProcessCodes,
-                        orderIds: segment.Members.Select(x => x.Order.order_id).Distinct().ToList(),
+                        orderIds: segment.Members
+                            .Select(x => x.Order.order_id)
+                            .Distinct()
+                            .ToList(),
                         start: dept3Start,
                         durationDays: Dept3Days,
                         note: "Phòng ban 3 là công đoạn cuối theo từng lệnh sản xuất, tách riêng để không làm sai luồng sản xuất từng đơn."));
@@ -2199,8 +2211,69 @@ namespace AMMS.Application.Services
                 throw new InvalidOperationException("Cần chọn process_codes để preview/tạo lệnh ghép.");
 
             /*
-             * Lấy clean rows theo đúng selectedCodes.
-             * NVL strict, SUB relaxed theo task group.
+             * FIX:
+             * Không còn bắt buộc selectedOrderIds phải bằng đúng toàn bộ suggestion.
+             * Chỉ cần selectedOrderIds là tập con của một suggestion hợp lệ hiện tại.
+             *
+             * Ví dụ suggestion = [1,2,5,6]
+             * thì [1,2], [1,5], [2,6], [1,2,5] đều hợp lệ.
+             */
+            var currentSuggestions = await BuildCurrentSuggestionsForManualSelectionAsync(
+                selectedCodes,
+                ct);
+
+            if (currentSuggestions.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "Hiện không có suggestion ghép hợp lệ nào với process đã chọn. Không thể preview/tạo lệnh ghép.");
+            }
+
+            var matchedSuggestion = currentSuggestions.FirstOrDefault(s =>
+                IsSelectedOrderSubsetOfSuggestion(
+                    suggestionOrderIds: s.suggest_order,
+                    selectedOrderIds: selectedOrderIds)
+                &&
+                SameProcessSet(
+                    s.suggest_process,
+                    selectedCodes));
+
+            if (matchedSuggestion != null)
+                return;
+
+            var validSuggestionText = string.Join(" | ",
+                currentSuggestions.Select(FormatSuggestionForManualSelectionError));
+
+            var selectedText =
+                $"Order chọn=[{string.Join(",", selectedOrderIds)}], " +
+                $"Process chọn=[{string.Join(",", selectedCodes)}]";
+
+            throw new InvalidOperationException(
+                "Tổ hợp order/process bạn chọn không thuộc bất kỳ suggestion hợp lệ nào hiện tại. " +
+                "Bạn được phép chọn một phần order trong suggestion, nhưng tất cả order đã chọn phải cùng nằm trong một suggestion. " +
+                $"{selectedText}. " +
+                $"Suggestion hợp lệ hiện tại: {validSuggestionText}");
+        }
+
+        private async Task<List<SuggestedGroupProductionDto>> BuildCurrentSuggestionsForManualSelectionAsync(
+    List<string> selectedCodes,
+    CancellationToken ct)
+        {
+            selectedCodes = NormalizeSelectedCodesForGroup(selectedCodes);
+
+            if (selectedCodes.Count == 0)
+                return new List<SuggestedGroupProductionDto>();
+
+            /*
+             * Load theo đúng selectedCodes để đồng bộ với getCandidates/suggestions.
+             * Hàm này đã áp dụng:
+             * - order Scheduled
+             * - production SINGLE + Scheduled
+             * - layout_confirmed
+             * - is_production_ready
+             * - chưa nằm trong GROUP active
+             * - NVL strict task check
+             * - SUB relaxed task check
+             * - route có đủ selectedCodes
              */
             var allCleanRows = await LoadCleanRowsForSuggestionAsync(
                 productTypeId: null,
@@ -2208,31 +2281,119 @@ namespace AMMS.Application.Services
                 ct: ct);
 
             if (allCleanRows.Count < 2)
+                return new List<SuggestedGroupProductionDto>();
+
+            var result = new List<SuggestedGroupProductionDto>();
+
+            /*
+             * Phải group giống SuggestAsync:
+             * - không ghép khác product_type
+             * - không ghép lẫn NVL/SUB/BOTH
+             */
+            foreach (var productMethodGroup in allCleanRows
+                .Where(x => x.Item != null)
+                .Where(x => x.Item.product_type_id.HasValue)
+                .Where(x => ResolveRowProductionMethodOrNull(x) != null)
+                .GroupBy(x => new
+                {
+                    product_type_id = x.Item.product_type_id!.Value,
+                    prod_method = ResolveRowProductionMethodOrNull(x)!
+                })
+                .Where(g => g.Count() >= 2))
             {
-                throw new InvalidOperationException(
-                    "Hiện không có suggestion ghép hợp lệ nào. Không thể ghép tay.");
+                var rowsOfOneProductTypeAndMethod = productMethodGroup
+                    .OrderBy(x => x.Order.delivery_date)
+                    .ThenBy(x => x.Order.order_id)
+                    .ToList();
+
+                var suggestions = BuildSuggestionPreviewFromSelectedCodes(
+                    rowsOfOneProductTypeAndMethod,
+                    selectedCodes)
+                    .Where(x => !string.Equals(
+                        x.suggestion_type,
+                        "SPLIT_ONLY",
+                        StringComparison.OrdinalIgnoreCase))
+                    .Where(x => x.suggest_order != null && x.suggest_order.Count >= 2)
+                    .Where(x => x.suggest_process != null && x.suggest_process.Count > 0)
+                    .ToList();
+
+                foreach (var s in suggestions)
+                {
+                    s.product_type_id = productMethodGroup.Key.product_type_id;
+                    s.production_method = productMethodGroup.Key.prod_method;
+                    result.Add(s);
+                }
             }
 
-            var manualSuggestions = BuildSuggestionPreviewFromSelectedCodes(
-                allCleanRows,
-                selectedCodes)
-                .Where(x => x.suggestion_type != "SPLIT_ONLY")
-                .Where(x => x.suggest_order != null && x.suggest_order.Count >= 2)
-                .Where(x => x.suggest_process != null && x.suggest_process.Count > 0)
+            return result;
+        }
+
+        private static bool IsSelectedOrderSubsetOfSuggestion(
+            List<int>? suggestionOrderIds,
+            List<int> selectedOrderIds)
+        {
+            var suggestionSet = (suggestionOrderIds ?? new List<int>())
+                .Where(x => x > 0)
+                .Distinct()
+                .ToHashSet();
+
+            var selectedSet = selectedOrderIds
+                .Where(x => x > 0)
+                .Distinct()
                 .ToList();
 
-            var matched = manualSuggestions.Any(s =>
-                SameOrderSet(s.suggest_order, selectedOrderIds) &&
-                SameProcessSet(s.suggest_process, selectedCodes));
+            if (selectedSet.Count < 2)
+                return false;
 
-            if (!matched)
-            {
-                throw new InvalidOperationException(
-                    "Tổ hợp order/process bạn chọn không khớp với suggestion hiện tại. " +
-                    "Vui lòng chỉ ghép các order/process đang được API suggestions đề xuất. " +
-                    $"Order chọn: {string.Join(",", selectedOrderIds)}. " +
-                    $"Process chọn: {string.Join(",", selectedCodes)}.");
-            }
+            /*
+             * Quan trọng:
+             * Không check bằng nhau nữa.
+             * Chỉ cần selected là tập con của suggestion.
+             */
+            return selectedSet.All(suggestionSet.Contains);
+        }
+
+        private static bool SameProcessSet(
+    List<string>? a,
+    List<string> b)
+        {
+            var aa = (a ?? new List<string>())
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+
+            var bb = b
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+
+            return aa.SequenceEqual(bb, StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static string FormatSuggestionForManualSelectionError(
+            SuggestedGroupProductionDto s)
+        {
+            var orders = s.suggest_order == null
+                ? ""
+                : string.Join(",", s.suggest_order.Distinct().OrderBy(x => x));
+
+            var processes = s.suggest_process == null
+                ? ""
+                : string.Join(",", s.suggest_process
+                    .Select(NormProcessCode)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(FullRouteIndex));
+
+            return
+                $"orders=[{orders}], " +
+                $"process=[{processes}], " +
+                $"method={s.production_method ?? "(unknown)"}, " +
+                $"product_type_id={(s.product_type_id.HasValue ? s.product_type_id.Value.ToString() : "(null)")}, " +
+                $"material_key={s.material_key ?? "(null)"}";
         }
 
         private static bool SameOrderSet(
@@ -2252,27 +2413,6 @@ namespace AMMS.Application.Services
                 .ToList();
 
             return aa.SequenceEqual(bb);
-        }
-
-        private static bool SameProcessSet(
-            List<string>? a,
-            List<string> b)
-        {
-            var aa = (a ?? new List<string>())
-                .Select(NormProcessCode)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(FullRouteIndex)
-                .ToList();
-
-            var bb = b
-                .Select(NormProcessCode)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(FullRouteIndex)
-                .ToList();
-
-            return aa.SequenceEqual(bb, StringComparer.OrdinalIgnoreCase);
         }
 
         private static List<string> SplitImageUrls(string? csv)
@@ -4231,32 +4371,6 @@ namespace AMMS.Application.Services
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(FullRouteIndex)
                 .ToList();
-        }
-
-        private static List<string> ResolveStartedTaskCheckCodesForSuggestion(
-            List<string>? selectedCodes)
-        {
-            var codes = NormalizeProcessListForGroupCheck(selectedCodes);
-
-            /*
-             * Nếu FE không truyền processCodes, API auto suggest Dept2.
-             * Do đó chỉ cần check task Dept2 đã bắt đầu chưa.
-             *
-             * Không check RALO/CAT/IN vì SUB SINGLE có thể đã Finished các task này từ BTP.
-             */
-            if (codes.Count == 0)
-            {
-                return Dept2Codes
-                    .Select(NormProcessCode)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .OrderBy(FullRouteIndex)
-                    .ToList();
-            }
-
-            /*
-             * Nếu FE truyền processCodes, chỉ check đúng những process được chọn.
-             */
-            return codes;
         }
     }
 }
