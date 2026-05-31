@@ -396,7 +396,7 @@ namespace AMMS.Infrastructure.Repositories
                 ? pcode
                 : stage.process!.process_name!;
 
-            var orderQty = SafePositive(req.quantity ?? 0, 1);
+            var orderQty = await ResolvePolicyProductionQtyAsync(prod, req, ct);
 
             var sheetsRequired = Math.Max(est?.sheets_required ?? 0, 0);
             var sheetsWaste = Math.Max(est?.sheets_waste ?? 0, 0);
@@ -429,6 +429,7 @@ namespace AMMS.Infrastructure.Repositories
                 req,
                 est,
                 routeCodes,
+                orderQty,
                 ct);
 
             if (subPolicy != null)
@@ -570,9 +571,11 @@ namespace AMMS.Infrastructure.Repositories
     order_request req,
     cost_estimate est,
     IReadOnlyList<string?> routeCodes,
+    int policyProductQty,
     CancellationToken ct)
         {
             var method = NormPolicyCode(prod.prod_method);
+
             if (method != "SUB" && method != "BOTH")
                 return null;
 
@@ -603,14 +606,19 @@ namespace AMMS.Infrastructure.Repositories
                 }
             }
 
-            decimal productQty =
-    req.quantity.HasValue && req.quantity.Value > 0
-        ? req.quantity.Value
-        : prod.group_total_qty > 0
-            ? prod.group_total_qty
-            : Math.Max(
-                (decimal)(prod.sub_product_used_qty + prod.nvl_qty),
-                1m);
+            /*
+             * FIX:
+             * Không lấy req.quantity trước nữa.
+             * Với SUB/BOTH downstream, số lượng report phải theo production đã được duyệt:
+             * - SUB  => prod.sub_product_used_qty
+             * - BOTH => prod.sub_product_used_qty + prod.nvl_qty
+             * - GROUP => prod.group_total_qty
+             */
+            decimal productQty = policyProductQty > 0
+                ? policyProductQty
+                : Math.Max(
+                    (decimal)(prod.sub_product_used_qty + prod.nvl_qty),
+                    1m);
 
             var nUp = est.n_up > 0 ? est.n_up : 1;
 
@@ -651,9 +659,9 @@ namespace AMMS.Infrastructure.Repositories
                 number_of_plates = req.number_of_plates ?? 0,
 
                 stage_index = routeCodes
-                .Select(NormPolicyCode)
-                .ToList()
-                .FindIndex(x => string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase)),
+                    .Select(NormPolicyCode)
+                    .ToList()
+                    .FindIndex(x => string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase)),
 
                 stage_count = routeCodes.Count,
 
@@ -670,21 +678,21 @@ namespace AMMS.Infrastructure.Repositories
                 is_split_production = string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase),
 
                 group_prod_id = string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase)
-        ? prod.prod_id
-        : null,
+                    ? prod.prod_id
+                    : null,
 
                 split_prod_id = string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase)
-        ? prod.prod_id
-        : null,
+                    ? prod.prod_id
+                    : null,
 
                 group_total_qty = prod.group_total_qty,
 
                 manual_input_hint =
-        $"SUB/BOTH downstream: qty_good là output sau công đoạn {currentCode}. " +
-        $"ProductQty={stageQty.product_qty}, " +
-        $"CurrentWaste={stageQty.current_stage_waste_qty}, " +
-        $"DownstreamWaste={stageQty.downstream_waste_qty}, " +
-        $"InputQty={stageQty.input_qty}, OutputQty={stageQty.output_qty}."
+                    $"SUB/BOTH downstream: qty_good là output sau công đoạn {currentCode}. " +
+                    $"ProductQty={stageQty.product_qty}, " +
+                    $"CurrentWaste={stageQty.current_stage_waste_qty}, " +
+                    $"DownstreamWaste={stageQty.downstream_waste_qty}, " +
+                    $"InputQty={stageQty.input_qty}, OutputQty={stageQty.output_qty}."
             };
         }
 
@@ -993,6 +1001,60 @@ namespace AMMS.Infrastructure.Repositories
                 SubLastIndex = subLastIndex,
                 NvlRatio = ratio
             };
+        }
+
+        private async Task<int> ResolvePolicyProductionQtyAsync(
+    production prod,
+    order_request req,
+    CancellationToken ct)
+        {
+            /*
+             * Số lượng để validate QR phải lấy theo production đã được duyệt,
+             * không ưu tiên order_request.quantity nữa.
+             *
+             * Lý do:
+             * - SUB: production có sub_product_used_qty.
+             * - BOTH: production có sub_product_used_qty + nvl_qty.
+             * - NVL: production có nvl_qty.
+             * - order_request.quantity có thể là data cũ hoặc khác với production thực tế.
+             */
+
+            var prodKind = NormPolicyCode(prod.prod_kind);
+            var method = NormPolicyCode(prod.prod_method);
+
+            if (prodKind == "GROUP" && prod.group_total_qty > 0)
+                return prod.group_total_qty;
+
+            if (method == "SUB" && prod.sub_product_used_qty > 0)
+                return prod.sub_product_used_qty;
+
+            if (method == "BOTH")
+            {
+                var total = Math.Max(prod.sub_product_used_qty, 0) + Math.Max(prod.nvl_qty, 0);
+                if (total > 0)
+                    return total;
+            }
+
+            if (method == "NVL" && prod.nvl_qty > 0)
+                return prod.nvl_qty;
+
+            if (prod.order_id.HasValue && prod.order_id.Value > 0)
+            {
+                var itemQty = await _db.order_items
+                    .AsNoTracking()
+                    .Where(x => x.order_id == prod.order_id.Value)
+                    .OrderBy(x => x.item_id)
+                    .Select(x => (int?)x.quantity)
+                    .FirstOrDefaultAsync(ct);
+
+                if (itemQty.HasValue && itemQty.Value > 0)
+                    return itemQty.Value;
+            }
+
+            if (req.quantity.HasValue && req.quantity.Value > 0)
+                return req.quantity.Value;
+
+            return 1;
         }
     }
 }
