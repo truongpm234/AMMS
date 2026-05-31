@@ -163,10 +163,6 @@ namespace AMMS.Application.Services
             var today = AppTime.NowVnUnspecified().Date;
             var minDeliveryDate = today.AddDays(MinProductionDays);
 
-            /*
-             * Seed chỉ lấy order có SINGLE production còn Scheduled.
-             * Không lấy GROUP/SPLIT.
-             */
             var orderIds = await (
                 from o in _db.orders.AsNoTracking()
                 join pr in _db.productions.AsNoTracking()
@@ -182,14 +178,8 @@ namespace AMMS.Application.Services
                       && o.delivery_date != null
                       && o.delivery_date >= minDeliveryDate
 
-                      /*
-                       * Phải có task rồi mới được xét ghép.
-                       */
                       && _db.tasks.Any(t => t.prod_id == pr.prod_id)
 
-                      /*
-                       * Không lấy order đã nằm trong GROUP active.
-                       */
                       && !_db.prod_orders.Any(po =>
                             po.order_id == o.order_id &&
                             po.status == "Active" &&
@@ -207,7 +197,10 @@ namespace AMMS.Application.Services
             if (orderIds.Count == 0)
                 return new List<GroupOrderRow>();
 
-            var rows = await LoadGroupOrderRowsAsync(orderIds, ct);
+            var rows = await LoadGroupOrderRowsAsync(
+                orderIds,
+                selectedCodes,
+                ct);
 
             return await ApplySuggestionEligibilityFilterAsync(
                 rows,
@@ -225,6 +218,8 @@ namespace AMMS.Application.Services
             if (rows == null || rows.Count == 0)
                 return new List<GroupOrderRow>();
 
+            selectedCodes = NormalizeSelectedCodesForGroup(selectedCodes);
+
             var orderIds = rows
                 .Select(x => x.Order.order_id)
                 .Distinct()
@@ -239,33 +234,30 @@ namespace AMMS.Application.Services
                 orderIds,
                 ct);
 
+            /*
+             * FIX CHÍNH:
+             * NVL: check toàn bộ task như cũ.
+             * SUB: chỉ check task công đoạn group đang chọn / Dept2.
+             */
             var startedSingleProdIds = await LoadSingleProdIdsHavingStartedTaskAsync(
                 singleProdIds,
+                selectedCodes,
                 ct);
 
             return rows
+                .Where(x => x.Order != null)
+                .Where(x => x.SingleProd != null)
                 .Where(x => x.Item != null)
-                .Where(x => x.Item.product_type_id.HasValue)
-                .Where(x => !productTypeId.HasValue || x.Item.product_type_id == productTypeId.Value)
-
-                .Where(x => string.Equals(x.SingleProd.prod_kind, "SINGLE", StringComparison.OrdinalIgnoreCase))
-                .Where(x => string.Equals(x.SingleProd.status, "Scheduled", StringComparison.OrdinalIgnoreCase))
-
-                .Where(x => string.Equals(x.Order.status, "Scheduled", StringComparison.OrdinalIgnoreCase))
-                .Where(x => x.Order.layout_confirmed)
-                .Where(x => x.Order.is_production_ready)
-
                 .Where(x => !activeGroupedOrderIds.Contains(x.Order.order_id))
                 .Where(x => !startedSingleProdIds.Contains(x.SingleProd.prod_id))
+                .Where(x => !x.HasAnyStartedTask)
 
-                /*
-                 * Phải có method đã duyệt: NVL/SUB/BOTH.
-                 */
+                .Where(x =>
+                    !productTypeId.HasValue ||
+                    x.Item.product_type_id == productTypeId.Value)
+
                 .Where(x => ResolveRowProductionMethodOrNull(x) != null)
 
-                /*
-                 * Nếu FE truyền processCodes thì order phải có đủ các process đó.
-                 */
                 .Where(x =>
                     selectedCodes.Count == 0 ||
                     selectedCodes.All(code =>
@@ -353,8 +345,10 @@ namespace AMMS.Application.Services
             {
                 await using var tx = await _db.Database.BeginTransactionAsync(ct);
 
-                var rows = await LoadGroupOrderRowsAsync(orderIds, ct);
-
+                var rows = await LoadGroupOrderRowsAsync(
+                    orderIds,
+                    selectedCodes,
+                    ct);
                 if (rows.Count != orderIds.Count)
                     throw new InvalidOperationException("Một số order không tồn tại hoặc chưa có production riêng.");
 
@@ -499,27 +493,6 @@ namespace AMMS.Application.Services
                     message = "Đã tạo production theo phòng ban, path công đoạn và điều kiện NVL."
                 };
             });
-        }
-
-        private static bool IsTaskStartedForGrouping(
-    string? status,
-    DateTime? startTime,
-    DateTime? endTime,
-    bool hasLog)
-        {
-            if (startTime != null || endTime != null || hasLog)
-                return true;
-
-            var s = (status ?? "").Trim().ToUpperInvariant();
-
-            /*
-             * Chỉ null hoặc Unassigned là chưa bắt đầu.
-             * Ready cũng xem là đã bắt đầu vì task đã được mở để sản xuất/báo cáo.
-             */
-            if (string.IsNullOrWhiteSpace(s))
-                return false;
-
-            return s != "UNASSIGNED";
         }
 
         private async Task<production> CreateDepartmentGroupProductionAsync(
@@ -1071,138 +1044,100 @@ namespace AMMS.Application.Services
 
             /*
              * CASE 1:
-             * FE có truyền orderIds thì chỉ suggest trong danh sách order đó.
+             * Nếu FE truyền orderIds thì chỉ xét trong danh sách đó.
+             * Nhưng vẫn phải đi qua ApplySuggestionEligibilityFilterAsync
+             * để đồng bộ validate NVL/SUB với getCandidates.
              */
             if (selectedOrderIds.Count > 0)
             {
-                allRows = await LoadGroupOrderRowsAsync(selectedOrderIds, ct);
+                var manualRows = await LoadGroupOrderRowsAsync(
+                    selectedOrderIds,
+                    selectedCodes,
+                    ct);
 
-                if (allRows.Count != selectedOrderIds.Count)
-                {
-                    var found = allRows
-                        .Select(x => x.Order.order_id)
-                        .ToHashSet();
-
-                    var missing = selectedOrderIds
-                        .Where(x => !found.Contains(x))
-                        .ToList();
-
-                    throw new InvalidOperationException(
-                        $"Không tìm thấy đủ order hoặc production SINGLE để gợi ý. Missing: {string.Join(",", missing)}");
-                }
+                allRows = await ApplySuggestionEligibilityFilterAsync(
+                    manualRows,
+                    productTypeId,
+                    selectedCodes,
+                    ct);
             }
             /*
              * CASE 2:
-             * FE không truyền gì.
-             * Backend tự lấy tất cả order có thể ghép.
+             * Không truyền gì thì tự lấy toàn bộ order đủ điều kiện.
              */
             else
             {
-                var candidateProcessFilter = selectedCodes.Count > 0
-                    ? processCodes
-                    : null;
-
-                var candidates = await GetCandidatesAsync(
+                allRows = await LoadCleanRowsForSuggestionAsync(
                     productTypeId,
-                    candidateProcessFilter,
+                    selectedCodes,
                     ct);
-
-                var candidateOrderIds = candidates
-                    .Where(x => x.can_group)
-                    .Select(x => x.order_id)
-                    .Distinct()
-                    .ToList();
-
-                if (candidateOrderIds.Count < 2)
-                    return new List<SuggestedGroupProductionDto>();
-
-                allRows = await LoadGroupOrderRowsAsync(candidateOrderIds, ct);
             }
-
-            /*
-             * Nếu API vẫn truyền productTypeId thì lọc lại thêm 1 lần.
-             */
-            if (productTypeId.HasValue)
-            {
-                allRows = allRows
-                    .Where(x => x.Item.product_type_id == productTypeId.Value)
-                    .ToList();
-            }
-
-            allRows = allRows
-                    .Where(x => x.Item != null)
-                    .Where(x => x.Item.product_type_id.HasValue)
-                    .Where(x => x.Order.layout_confirmed)
-                    .Where(x => x.Order.is_production_ready)
-                    .Where(x => string.Equals(x.Order.status, "Scheduled", StringComparison.OrdinalIgnoreCase))
-                    .Where(x => string.Equals(x.SingleProd.status, "Scheduled", StringComparison.OrdinalIgnoreCase))
-                    .Where(x => ResolveRowProductionMethodOrNull(x) != null)
-                    .Where(x => !x.HasAnyStartedTask)
-                    .ToList();
 
             if (allRows.Count < 2)
                 return new List<SuggestedGroupProductionDto>();
 
-            /*
-             * Lấy tên product_type để trả ra response.
-             */
             var productTypeIds = allRows
-                .Where(x => x.Item.product_type_id.HasValue)
+                .Where(x => x.Item != null && x.Item.product_type_id.HasValue)
                 .Select(x => x.Item.product_type_id!.Value)
                 .Distinct()
                 .ToList();
 
-            var productTypeNameMap = await _db.product_types
-                .AsNoTracking()
-                .Where(x => productTypeIds.Contains(x.product_type_id))
-                .ToDictionaryAsync(
-                    x => x.product_type_id,
-                    x => x.name,
-                    ct);
+            var productTypeNameMap = productTypeIds.Count == 0
+                ? new Dictionary<int, string?>()
+                : await _db.product_types
+                    .AsNoTracking()
+                    .Where(x => productTypeIds.Contains(x.product_type_id))
+                    .ToDictionaryAsync(
+                        x => x.product_type_id,
+                        x => x.name,
+                        ct);
 
             var finalSuggestions = new List<SuggestedGroupProductionDto>();
 
+            /*
+             * Không ghép lẫn NVL với SUB.
+             * Không ghép khác product_type_id.
+             */
             foreach (var productMethodGroup in allRows
-             .GroupBy(x => new
-             {
-                 product_type_id = x.Item.product_type_id!.Value,
-                 prod_method = ResolveRowProductionMethodOrNull(x)
-             })
-             .Where(g => !string.IsNullOrWhiteSpace(g.Key.prod_method))
-             .OrderBy(g => g.Key.product_type_id)
-             .ThenBy(g => g.Key.prod_method))
+                .Where(x => x.Item != null)
+                .Where(x => x.Item.product_type_id.HasValue)
+                .Where(x => ResolveRowProductionMethodOrNull(x) != null)
+                .GroupBy(x => new
+                {
+                    product_type_id = x.Item.product_type_id!.Value,
+                    prod_method = ResolveRowProductionMethodOrNull(x)!
+                })
+                .Where(g => g.Count() >= 2)
+                .OrderBy(g => g.Key.product_type_id)
+                .ThenBy(g => g.Key.prod_method))
             {
                 var rowsOfOneProductTypeAndMethod = productMethodGroup
                     .OrderBy(x => x.Order.delivery_date)
                     .ThenBy(x => x.Order.order_id)
                     .ToList();
 
-                if (rowsOfOneProductTypeAndMethod.Count < 2)
-                    continue;
-
                 var currentProductTypeId = productMethodGroup.Key.product_type_id;
-                var currentProdMethod = productMethodGroup.Key.prod_method!;
+                var currentProdMethod = productMethodGroup.Key.prod_method;
 
                 productTypeNameMap.TryGetValue(
                     currentProductTypeId,
                     out var currentProductTypeName);
 
-                List<SuggestedGroupProductionDto> suggestionsOfType;
-
-                if (selectedCodes.Count > 0)
-                {
-                    suggestionsOfType = BuildSuggestionPreviewFromSelectedCodes(
+                var suggestionsOfType = selectedCodes.Count > 0
+                    ? BuildSuggestionPreviewFromSelectedCodes(
                         rowsOfOneProductTypeAndMethod,
-                        selectedCodes);
-                }
-                else
-                {
-                    suggestionsOfType = BuildAutoDept2Suggestions(
+                        selectedCodes)
+                    : BuildAutoDept2Suggestions(
                         rowsOfOneProductTypeAndMethod);
-                }
 
                 foreach (var suggestion in suggestionsOfType)
                 {
+                    if (suggestion.suggest_order == null || suggestion.suggest_order.Count < 2)
+                        continue;
+
+                    if (suggestion.suggest_process == null || suggestion.suggest_process.Count == 0)
+                        continue;
+
                     suggestion.product_type_id = currentProductTypeId;
                     suggestion.product_type_name = currentProductTypeName;
                     suggestion.production_method = currentProdMethod;
@@ -1212,16 +1147,14 @@ namespace AMMS.Application.Services
                         currentProductTypeId,
                         currentProductTypeName,
                         ct);
-                }
 
-                finalSuggestions.AddRange(suggestionsOfType);
+                    finalSuggestions.Add(suggestion);
+                }
             }
 
             return finalSuggestions
-                .Where(x => x.suggest_order != null)
-                .Where(x => x.suggest_order.Count >= 2)
-                .Where(x => x.suggest_process != null)
-                .Where(x => x.suggest_process.Count > 0)
+                .Where(x => x.suggest_order != null && x.suggest_order.Count >= 2)
+                .Where(x => x.suggest_process != null && x.suggest_process.Count > 0)
                 .OrderByDescending(x =>
                     string.Equals(x.suggestion_type, "GROUP_WITH_AUTO_SPLIT", StringComparison.OrdinalIgnoreCase))
                 .ThenByDescending(x =>
@@ -2104,7 +2037,10 @@ namespace AMMS.Application.Services
 
             GroupProductionHelper.EnsureShareableCodes(selectedCodes);
 
-            var rows = await LoadGroupOrderRowsAsync(orderIds, ct);
+            var rows = await LoadGroupOrderRowsAsync(
+                orderIds,
+                selectedCodes,
+                ct);
             await ValidateManualSelectionMatchesCurrentSuggestionAsync(
     orderIds,
     selectedCodes,
@@ -2254,12 +2190,7 @@ namespace AMMS.Application.Services
                 .OrderBy(x => x)
                 .ToList();
 
-            selectedCodes = selectedCodes
-                .Select(NormProcessCode)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(FullRouteIndex)
-                .ToList();
+            selectedCodes = NormalizeSelectedCodesForGroup(selectedCodes);
 
             if (selectedOrderIds.Count < 2)
                 return;
@@ -2268,12 +2199,12 @@ namespace AMMS.Application.Services
                 throw new InvalidOperationException("Cần chọn process_codes để preview/tạo lệnh ghép.");
 
             /*
-             * Lấy toàn bộ clean rows giống Candidate/Suggestion.
-             * Không truyền selectedCodes để lấy full suggestion hiện tại.
+             * Lấy clean rows theo đúng selectedCodes.
+             * NVL strict, SUB relaxed theo task group.
              */
             var allCleanRows = await LoadCleanRowsForSuggestionAsync(
                 productTypeId: null,
-                selectedCodes: new List<string>(),
+                selectedCodes: selectedCodes,
                 ct: ct);
 
             if (allCleanRows.Count < 2)
@@ -2282,16 +2213,15 @@ namespace AMMS.Application.Services
                     "Hiện không có suggestion ghép hợp lệ nào. Không thể ghép tay.");
             }
 
-            /*
-             * Dùng raw auto suggestion, không gọi PreviewAsync ở đây để tránh đệ quy.
-             */
-            var autoSuggestions = BuildAutoDept2Suggestions(allCleanRows)
+            var manualSuggestions = BuildSuggestionPreviewFromSelectedCodes(
+                allCleanRows,
+                selectedCodes)
                 .Where(x => x.suggestion_type != "SPLIT_ONLY")
                 .Where(x => x.suggest_order != null && x.suggest_order.Count >= 2)
                 .Where(x => x.suggest_process != null && x.suggest_process.Count > 0)
                 .ToList();
 
-            var matched = autoSuggestions.Any(s =>
+            var matched = manualSuggestions.Any(s =>
                 SameOrderSet(s.suggest_order, selectedOrderIds) &&
                 SameProcessSet(s.suggest_process, selectedCodes));
 
@@ -2300,7 +2230,8 @@ namespace AMMS.Application.Services
                 throw new InvalidOperationException(
                     "Tổ hợp order/process bạn chọn không khớp với suggestion hiện tại. " +
                     "Vui lòng chỉ ghép các order/process đang được API suggestions đề xuất. " +
-                    $"SelectedOrders={string.Join(",", selectedOrderIds)}, SelectedProcess={string.Join(",", selectedCodes)}");
+                    $"Order chọn: {string.Join(",", selectedOrderIds)}. " +
+                    $"Process chọn: {string.Join(",", selectedCodes)}.");
             }
         }
 
@@ -3057,19 +2988,35 @@ namespace AMMS.Application.Services
     List<int> orderIds,
     CancellationToken ct)
         {
+            return await LoadGroupOrderRowsAsync(
+                orderIds,
+                selectedCodes: new List<string>(),
+                ct);
+        }
+
+        private async Task<List<GroupOrderRow>> LoadGroupOrderRowsAsync(
+            List<int> orderIds,
+            List<string>? selectedCodes,
+            CancellationToken ct)
+        {
             orderIds = orderIds
                 .Where(x => x > 0)
                 .Distinct()
                 .ToList();
+
+            selectedCodes = NormalizeSelectedCodesForGroup(selectedCodes);
 
             if (orderIds.Count == 0)
                 return new List<GroupOrderRow>();
 
             var rows = await (
                 from o in _db.orders
-                join pr in _db.productions on o.order_id equals pr.order_id
+                join pr in _db.productions
+                    on o.order_id equals pr.order_id
+
                 where orderIds.Contains(o.order_id)
                       && pr.prod_kind == "SINGLE"
+
                 select new
                 {
                     order = o,
@@ -3086,8 +3033,15 @@ namespace AMMS.Application.Services
                 .Distinct()
                 .ToList();
 
+            /*
+             * FIX:
+             * HasAnyStartedTask không còn check giống nhau cho mọi method.
+             * NVL: check toàn bộ task.
+             * SUB: chỉ check task công đoạn đang group.
+             */
             var startedSingleProdIds = await LoadSingleProdIdsHavingStartedTaskAsync(
                 singleProdIds,
+                selectedCodes,
                 ct);
 
             var result = new List<GroupOrderRow>();
@@ -3107,7 +3061,8 @@ namespace AMMS.Application.Services
 
                 if (req != null)
                 {
-                    if (req.accepted_estimate_id.HasValue && req.accepted_estimate_id.Value > 0)
+                    if (req.accepted_estimate_id.HasValue &&
+                        req.accepted_estimate_id.Value > 0)
                     {
                         est = await _db.cost_estimates
                             .AsNoTracking()
@@ -3125,6 +3080,22 @@ namespace AMMS.Application.Services
                         .FirstOrDefaultAsync(ct);
                 }
 
+                var itemRouteCodes = ParseProcessCodes(row.item.production_process);
+                var estimateRouteCodes = ParseProcessCodes(est?.production_processes);
+
+                var finalRouteCodes = itemRouteCodes.Count > 0
+                    ? itemRouteCodes
+                    : estimateRouteCodes;
+
+                /*
+                 * Chỉ để response dễ đọc.
+                 * Không SaveChanges ở đây.
+                 */
+                if (itemRouteCodes.Count == 0 && estimateRouteCodes.Count > 0)
+                {
+                    row.item.production_process = est?.production_processes;
+                }
+
                 result.Add(new GroupOrderRow
                 {
                     Order = row.order,
@@ -3132,12 +3103,240 @@ namespace AMMS.Application.Services
                     Item = row.item,
                     Request = req,
                     Estimate = est,
-                    RouteCodes = ParseProcessCodes(row.item.production_process),
+                    RouteCodes = finalRouteCodes,
                     HasAnyStartedTask = startedSingleProdIds.Contains(row.singleProd.prod_id)
                 });
             }
 
             return result;
+        }
+
+        private static string NormalizeProductionMethodForGroup(string? method)
+        {
+            var value = (method ?? "")
+                .Trim()
+                .ToUpperInvariant();
+
+            return value switch
+            {
+                "NVL" => "NVL",
+                "SUB" => "SUB",
+                "BOTH" => "BOTH",
+                _ => ""
+            };
+        }
+
+        private static List<string> NormalizeSelectedCodesForGroup(
+            IEnumerable<string>? selectedCodes)
+        {
+            return (selectedCodes ?? Enumerable.Empty<string>())
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+        }
+
+        private static List<string> ResolveSubTaskCheckCodesForGroup(
+            List<string>? selectedCodes)
+        {
+            var codes = NormalizeSelectedCodesForGroup(selectedCodes);
+
+            /*
+             * Nếu FE không truyền processCodes thì API auto suggest Dept2.
+             * Với SUB, chỉ check Dept2 vì Dept1 có thể đã Finished do dùng BTP.
+             */
+            if (codes.Count == 0)
+            {
+                return Dept2Codes
+                    .Select(NormProcessCode)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(FullRouteIndex)
+                    .ToList();
+            }
+
+            return codes;
+        }
+
+        private static bool IsTaskStartedForGrouping(
+            string? status,
+            DateTime? startTime,
+            DateTime? endTime,
+            bool hasLog)
+        {
+            if (startTime != null || endTime != null || hasLog)
+                return true;
+
+            var s = (status ?? "").Trim().ToUpperInvariant();
+
+            if (string.IsNullOrWhiteSpace(s))
+                return false;
+
+            /*
+             * Chỉ Unassigned/null được xem là chưa bắt đầu.
+             * Ready cũng xem là đã bắt đầu vì task đã được mở/giữ máy/cho phép report.
+             */
+            return s != "UNASSIGNED";
+        }
+
+        private async Task<HashSet<int>> LoadSingleProdIdsHavingStartedTaskAsync(
+            List<int> singleProdIds,
+            CancellationToken ct)
+        {
+            return await LoadSingleProdIdsHavingStartedTaskAsync(
+                singleProdIds,
+                selectedCodes: new List<string>(),
+                ct);
+        }
+
+        private async Task<HashSet<int>> LoadSingleProdIdsHavingStartedTaskAsync(
+            List<int> singleProdIds,
+            List<string>? selectedCodes,
+            CancellationToken ct)
+        {
+            singleProdIds = singleProdIds?
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList() ?? new List<int>();
+
+            selectedCodes = NormalizeSelectedCodesForGroup(selectedCodes);
+
+            if (singleProdIds.Count == 0)
+                return new HashSet<int>();
+
+            var prodMethodMap = await _db.productions
+                .AsNoTracking()
+                .Where(x => singleProdIds.Contains(x.prod_id))
+                .Select(x => new
+                {
+                    x.prod_id,
+                    x.prod_method
+                })
+                .ToDictionaryAsync(
+                    x => x.prod_id,
+                    x => NormalizeProductionMethodForGroup(x.prod_method),
+                    ct);
+
+            if (prodMethodMap.Count == 0)
+                return new HashSet<int>();
+
+            var taskRows = await (
+                from t in _db.tasks.AsNoTracking()
+
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                where t.prod_id.HasValue &&
+                      singleProdIds.Contains(t.prod_id.Value)
+
+                select new
+                {
+                    t.task_id,
+                    prod_id = t.prod_id!.Value,
+                    process_code = pp != null ? pp.process_code : null,
+                    task_name = t.name,
+                    t.status,
+                    t.start_time,
+                    t.end_time
+                }
+            ).ToListAsync(ct);
+
+            if (taskRows.Count == 0)
+                return new HashSet<int>();
+
+            var taskIds = taskRows
+                .Select(x => x.task_id)
+                .Distinct()
+                .ToList();
+
+            var taskIdsWithLogs = await _db.task_logs
+                .AsNoTracking()
+                .Where(x =>
+                    x.task_id.HasValue &&
+                    taskIds.Contains(x.task_id.Value))
+                .Select(x => x.task_id!.Value)
+                .Distinct()
+                .ToListAsync(ct);
+
+            var logSet = taskIdsWithLogs.ToHashSet();
+
+            var subTaskCheckCodes = ResolveSubTaskCheckCodesForGroup(selectedCodes);
+
+            var startedProdIds = new HashSet<int>();
+
+            foreach (var task in taskRows)
+            {
+                if (!prodMethodMap.TryGetValue(task.prod_id, out var method))
+                    continue;
+
+                var processCode = NormProcessCode(task.process_code);
+
+                if (string.IsNullOrWhiteSpace(processCode))
+                    processCode = NormProcessCode(task.task_name);
+
+                /*
+                 * CASE NVL:
+                 * Check toàn bộ task như logic cũ.
+                 * Nếu bất kỳ task nào đã Ready/Finished/log/start/end thì loại production.
+                 */
+                if (method == "NVL")
+                {
+                    if (IsTaskStartedForGrouping(
+                        task.status,
+                        task.start_time,
+                        task.end_time,
+                        logSet.Contains(task.task_id)))
+                    {
+                        startedProdIds.Add(task.prod_id);
+                    }
+
+                    continue;
+                }
+
+                /*
+                 * CASE SUB:
+                 * Cho phép RALO/CAT/IN đã Finished vì đó là phần lấy BTP.
+                 * Chỉ check các công đoạn group đang xét, mặc định là Dept2.
+                 */
+                if (method == "SUB")
+                {
+                    if (!subTaskCheckCodes.Contains(
+                        processCode,
+                        StringComparer.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (IsTaskStartedForGrouping(
+                        task.status,
+                        task.start_time,
+                        task.end_time,
+                        logSet.Contains(task.task_id)))
+                    {
+                        startedProdIds.Add(task.prod_id);
+                    }
+
+                    continue;
+                }
+
+                /*
+                 * CASE BOTH hoặc method khác:
+                 * Giữ chặt như NVL để tránh group sai khi một phần đã chạy.
+                 * Nếu sau này muốn BOTH riêng thì tách tiếp.
+                 */
+                if (IsTaskStartedForGrouping(
+                    task.status,
+                    task.start_time,
+                    task.end_time,
+                    logSet.Contains(task.task_id)))
+                {
+                    startedProdIds.Add(task.prod_id);
+                }
+            }
+
+            return startedProdIds;
         }
 
         private List<ProductionPlanSegment> BuildDepartmentProductionPlan(
@@ -3996,100 +4195,68 @@ namespace AMMS.Application.Services
             return $"METHOD={method}|{materialKey}";
         }
 
-        private static bool IsTaskStartedForGroupSuggestion(
-    string? status,
-    DateTime? startTime,
-    DateTime? endTime,
-    bool hasLog)
-        {
-            if (startTime != null || endTime != null || hasLog)
-                return true;
-
-            var s = (status ?? "").Trim().ToUpperInvariant();
-
-            if (string.IsNullOrWhiteSpace(s))
-                return false;
-
-            /*
-             * Chỉ Unassigned/null được xem là chưa bắt đầu.
-             * Ready cũng loại, vì Ready thường đã giữ máy / đã cho phép báo cáo.
-             */
-            return s != "UNASSIGNED";
-        }
-
-        private async Task<HashSet<int>> LoadSingleProdIdsHavingStartedTaskAsync(
-    List<int> singleProdIds,
-    CancellationToken ct)
-        {
-            singleProdIds = singleProdIds?
-                .Where(x => x > 0)
-                .Distinct()
-                .ToList() ?? new List<int>();
-
-            if (singleProdIds.Count == 0)
-                return new HashSet<int>();
-
-            var taskRows = await _db.tasks
-                .AsNoTracking()
-                .Where(x =>
-                    x.prod_id.HasValue &&
-                    singleProdIds.Contains(x.prod_id.Value))
-                .Select(x => new
-                {
-                    x.task_id,
-                    prod_id = x.prod_id!.Value,
-                    x.status,
-                    x.start_time,
-                    x.end_time
-                })
-                .ToListAsync(ct);
-
-            if (taskRows.Count == 0)
-                return new HashSet<int>();
-
-            var taskIds = taskRows
-                .Select(x => x.task_id)
-                .Distinct()
-                .ToList();
-
-            var taskIdsWithLogs = await _db.task_logs
-                .AsNoTracking()
-                .Where(x =>
-                    x.task_id.HasValue &&
-                    taskIds.Contains(x.task_id.Value))
-                .Select(x => x.task_id!.Value)
-                .Distinct()
-                .ToListAsync(ct);
-
-            var logSet = taskIdsWithLogs.ToHashSet();
-
-            return taskRows
-                .Where(x => IsTaskStartedForGrouping(
-                    x.status,
-                    x.start_time,
-                    x.end_time,
-                    logSet.Contains(x.task_id)))
-                .Select(x => x.prod_id)
-                .Distinct()
-                .ToHashSet();
-        }
-
         private static void ValidateRowsHaveNoStartedTaskOrThrow(
-            List<GroupOrderRow> rows,
-            string actionName)
+    List<GroupOrderRow> rows,
+    string actionName)
         {
             var invalidRows = rows
                 .Where(x => x.HasAnyStartedTask)
                 .Select(x =>
-                    $"order_id={x.Order.order_id}, single_prod_id={x.SingleProd.prod_id}")
+                {
+                    var method = NormalizeProductionMethodForGroup(x.SingleProd.prod_method);
+
+                    return
+                        $"order_id={x.Order.order_id}, " +
+                        $"single_prod_id={x.SingleProd.prod_id}, " +
+                        $"prod_method={method}";
+                })
                 .ToList();
 
             if (invalidRows.Count == 0)
                 return;
 
             throw new InvalidOperationException(
-                $"Không thể {actionName} vì có order đã bắt đầu ít nhất một công đoạn sản xuất. " +
-                $"Các order đã bắt đầu không được ghép/tách production. Chi tiết: {string.Join(" | ", invalidRows)}");
+                $"Không thể {actionName} vì có order đã bắt đầu công đoạn không được phép ghép. " +
+                $"Với NVL: không được có bất kỳ task nào đã bắt đầu. " +
+                $"Với SUB: chỉ cho phép RALO/CAT/IN đã Finished do lấy BTP, nhưng công đoạn group đang chọn phải chưa bắt đầu. " +
+                $"Chi tiết: {string.Join(" | ", invalidRows)}");
+        }
+
+        private static List<string> NormalizeProcessListForGroupCheck(
+    IEnumerable<string>? codes)
+        {
+            return (codes ?? Enumerable.Empty<string>())
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+        }
+
+        private static List<string> ResolveStartedTaskCheckCodesForSuggestion(
+            List<string>? selectedCodes)
+        {
+            var codes = NormalizeProcessListForGroupCheck(selectedCodes);
+
+            /*
+             * Nếu FE không truyền processCodes, API auto suggest Dept2.
+             * Do đó chỉ cần check task Dept2 đã bắt đầu chưa.
+             *
+             * Không check RALO/CAT/IN vì SUB SINGLE có thể đã Finished các task này từ BTP.
+             */
+            if (codes.Count == 0)
+            {
+                return Dept2Codes
+                    .Select(NormProcessCode)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(FullRouteIndex)
+                    .ToList();
+            }
+
+            /*
+             * Nếu FE truyền processCodes, chỉ check đúng những process được chọn.
+             */
+            return codes;
         }
     }
 }
