@@ -2706,16 +2706,14 @@ namespace AMMS.Application.Services
                 case "IN":
                 case "PHU":
                 case "CAN":
-                case "CAN_MANG":
                 case "BOI":
                 case "BE":
                 case "DUT":
                 case "DAN":
                     /*
- * FIX SUB SINGLE:
- * Nếu actual công đoạn trước có dữ liệu thì estimated_qty hiển thị cho FE
- * phải lấy theo actual, không lấy theo estimate/NVL.
- */
+                     * Với SUB SINGLE, nếu công đoạn trước đã có actual,
+                     * estimated_qty nên hiển thị theo actual để FE không bị lệch.
+                     */
                     if (IsDirectSingleSubProductionForScan(ctx, null) && actualQtyPrevStage > 0)
                     {
                         qty = actualQtyPrevStage;
@@ -2725,15 +2723,300 @@ namespace AMMS.Application.Services
                     result.Add(new TaskReferenceInputDto
                     {
                         input_code = previousCtx.previous_process_code,
-                        input_name = $"Bán thành phẩm từ công đoạn {previousCtx.previous_process_code}",
+                        input_name = ResolveReferenceInputDisplayName(
+                            previousCtx.previous_process_code),
                         unit = unit,
                         estimated_qty = Math.Round(qty, 4),
                         actual_qty_prev_stage = Math.Round(actualQtyPrevStage, 4)
                     });
+
                     break;
             }
 
+            /*
+             * FIX CHÍNH:
+             * Task IN ngoài giấy đã cắt từ CAT còn cần bản kẽm đã ralo từ RALO.
+             * RALO không phải previous liền kề của IN nên logic cũ bị thiếu.
+             */
+            var plateInput = await TryBuildPlateReferenceInputForInAsync(
+                ctx,
+                ct);
+
+            if (plateInput != null)
+            {
+                var existed = result.Any(x =>
+                    string.Equals(
+                        ProductionFlowHelper.Norm(x.input_code),
+                        ProductionFlowHelper.Norm(plateInput.input_code),
+                        StringComparison.OrdinalIgnoreCase));
+
+                if (!existed)
+                    result.Add(plateInput);
+            }
+
             return result;
+        }
+
+        private static string ResolveReferenceInputDisplayName(string? processCode)
+        {
+            var code = ProductionFlowHelper.Norm(processCode);
+
+            return code switch
+            {
+                "RALO" => "Bản kẽm đã ralo",
+                "CAT" => "Giấy đã cắt",
+                "IN" => "Bán thành phẩm in",
+                "PHU" => "Bán thành phẩm phủ",
+                "CAN" => "Bán thành phẩm cán màng",
+                "BOI" => "Bán thành phẩm bồi",
+                "BE" => "Bán thành phẩm bế",
+                "DUT" => "Bán thành phẩm dứt",
+                "DAN" => "Bán thành phẩm dán",
+                _ => $"Bán thành phẩm từ công đoạn {code}"
+            };
+        }
+
+        private async Task<TaskReferenceInputDto?> TryBuildPlateReferenceInputForInAsync(
+    TaskEstimateContext ctx,
+    CancellationToken ct)
+        {
+            var currentCode = ProductionFlowHelper.Norm(
+                ctx.Task.process?.process_code);
+
+            if (!string.Equals(currentCode, "IN", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            var routeCodes = await ResolveRouteProcessCodesForProductionAsync(
+                ctx.Production,
+                ctx.Task,
+                ct);
+
+            var normalizedRoute = routeCodes
+                .Select(ProductionFlowHelper.Norm)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            var inIndex = normalizedRoute.FindIndex(x =>
+                string.Equals(x, "IN", StringComparison.OrdinalIgnoreCase));
+
+            var raloIndex = normalizedRoute.FindIndex(x =>
+                string.Equals(x, "RALO", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(x, "RA_LO", StringComparison.OrdinalIgnoreCase));
+
+            /*
+             * Chỉ thêm bản kẽm nếu route thật có RALO đứng trước IN.
+             */
+            if (inIndex < 0 || raloIndex < 0 || raloIndex >= inIndex)
+                return null;
+
+            var estimatedPlateQty = Math.Max(ctx.Request.number_of_plates ?? 0, 0);
+
+            var actualPlateQty = await ResolveActualPlateOutputForInAsync(
+                ctx,
+                ct);
+
+            if (estimatedPlateQty <= 0 && actualPlateQty <= 0)
+                return null;
+
+            return new TaskReferenceInputDto
+            {
+                /*
+                 * Không dùng input_code = RALO để tránh FE hiểu nhầm đây là BTP RALO thường.
+                 * Đây là bản kẽm đã ralo dùng cho IN.
+                 */
+                input_code = "PLATE_FROM_RALO",
+                input_name = "Bản kẽm in",
+                unit = "bản",
+
+                estimated_qty = Math.Round(
+                    estimatedPlateQty > 0 ? estimatedPlateQty : actualPlateQty,
+                    4),
+
+                actual_qty_prev_stage = Math.Round(actualPlateQty, 4)
+            };
+        }
+
+        private async Task<decimal> ResolveActualPlateOutputForInAsync(
+    TaskEstimateContext ctx,
+    CancellationToken ct)
+        {
+            /*
+             * Ưu tiên dùng output chuẩn của công đoạn RALO.
+             * Với data hiện tại:
+             * task_id = 22, process = RALO, qty_good = 4
+             * => actualPlateQty = 4
+             */
+            if (ctx.Production.order_id.HasValue && ctx.Production.order_id.Value > 0)
+            {
+                var actualByOrder = await ResolveActualOutputQtyForOrderProcessAsync(
+                    ctx.Production.order_id.Value,
+                    "RALO",
+                    ct);
+
+                if (actualByOrder > 0)
+                    return actualByOrder;
+            }
+
+            if (ctx.Task.prod_id.HasValue && ctx.Task.prod_id.Value > 0)
+            {
+                var actualByProduction = await ResolveActualOutputQtyInProductionAsync(
+                    ctx.Task.prod_id.Value,
+                    "RALO",
+                    ct);
+
+                if (actualByProduction > 0)
+                    return actualByProduction;
+            }
+
+            /*
+             * Fallback:
+             * Nếu vì lý do nào đó qty_good của RALO không có,
+             * thử tính từ material_usage_json:
+             * actual = quantity_used - quantity_waste.
+             *
+             * Ví dụ log:
+             * quantity_used = 5
+             * quantity_waste = 1
+             * => actual = 4
+             */
+            return await ResolveActualPlateOutputFromRaloMaterialUsageAsync(
+                ctx,
+                ct);
+        }
+
+        private async Task<decimal> ResolveActualPlateOutputFromRaloMaterialUsageAsync(
+    TaskEstimateContext ctx,
+    CancellationToken ct)
+        {
+            var raloTaskIds = await ResolveTaskIdsForCurrentOrderOrProductionProcessAsync(
+                ctx,
+                "RALO",
+                ct);
+
+            if (raloTaskIds.Count == 0)
+                return 0m;
+
+            var logs = await _db.task_logs
+                .AsNoTracking()
+                .Where(x =>
+                    x.task_id.HasValue &&
+                    raloTaskIds.Contains(x.task_id.Value) &&
+                    x.action_type == "Finished")
+                .OrderByDescending(x => x.log_time)
+                .ThenByDescending(x => x.log_id)
+                .Select(x => new
+                {
+                    x.task_id,
+                    x.material_usage_json
+                })
+                .ToListAsync(ct);
+
+            if (logs.Count == 0)
+                return 0m;
+
+            /*
+             * Lấy log mới nhất theo từng task RALO.
+             */
+            var latestLogs = logs
+                .GroupBy(x => x.task_id!.Value)
+                .Select(g => g.First())
+                .ToList();
+
+            decimal totalActual = 0m;
+
+            foreach (var log in latestLogs)
+            {
+                var usages = ParseMaterialUsageLogItems(log.material_usage_json);
+
+                var plateUsages = usages
+                    .Where(x => IsPlateMaterialForQrPrepare(
+                        x.material_code,
+                        x.material_name))
+                    .ToList();
+
+                foreach (var item in plateUsages)
+                {
+                    var actual = item.quantity_used - item.quantity_waste;
+
+                    if (actual > 0)
+                        totalActual += actual;
+                }
+            }
+
+            return Math.Round(totalActual, 4);
+        }
+
+        private async Task<List<int>> ResolveTaskIdsForCurrentOrderOrProductionProcessAsync(
+    TaskEstimateContext ctx,
+    string processCode,
+    CancellationToken ct)
+        {
+            var code = ProductionFlowHelper.Norm(processCode);
+
+            if (string.IsNullOrWhiteSpace(code))
+                return new List<int>();
+
+            if (ctx.Production.order_id.HasValue && ctx.Production.order_id.Value > 0)
+            {
+                return await (
+                    from t in _db.tasks.AsNoTracking()
+
+                    join p in _db.productions.AsNoTracking()
+                        on t.prod_id equals p.prod_id
+
+                    join pp0 in _db.product_type_processes.AsNoTracking()
+                        on t.process_id equals pp0.process_id into ppj
+                    from pp in ppj.DefaultIfEmpty()
+
+                    where p.order_id == ctx.Production.order_id.Value
+                          && p.status != "Cancelled"
+                          && pp != null
+                          && pp.process_code != null
+                          && pp.process_code.Trim().ToUpper() == code
+
+                    select t.task_id
+                )
+                .Distinct()
+                .ToListAsync(ct);
+            }
+
+            if (ctx.Task.prod_id.HasValue && ctx.Task.prod_id.Value > 0)
+            {
+                return await (
+                    from t in _db.tasks.AsNoTracking()
+
+                    join pp0 in _db.product_type_processes.AsNoTracking()
+                        on t.process_id equals pp0.process_id into ppj
+                    from pp in ppj.DefaultIfEmpty()
+
+                    where t.prod_id == ctx.Task.prod_id.Value
+                          && pp != null
+                          && pp.process_code != null
+                          && pp.process_code.Trim().ToUpper() == code
+
+                    select t.task_id
+                )
+                .Distinct()
+                .ToListAsync(ct);
+            }
+
+            return new List<int>();
+        }
+
+        private static bool IsPlateMaterialForQrPrepare(
+    string? materialCode,
+    string? materialName)
+        {
+            var code = NormalizeMaterialCode(materialCode);
+            var name = NormalizeMaterialCode(materialName);
+
+            return code == "PLATE"
+                   || code == "PLATE_INPUT"
+                   || code == "BAN_KEM"
+                   || code == "BAN_KEM_IN"
+                   || code == "KEM_THO"
+                   || name.Contains("BAN_KEM")
+                   || name.Contains("KEM");
         }
 
         private async Task<PreviousProcessContext?> GetPreviousProcessContextAsync(
