@@ -235,6 +235,32 @@ public static class ProductionDependencyValidator
             if (string.IsNullOrWhiteSpace(previousCode))
                 continue;
 
+            /*
+ * FIX CHÍNH:
+ * Với pure SUB, công đoạn trước đó có thể nằm trong sub_product,
+ * không nằm trong tasks của order hiện tại.
+ *
+ * Ví dụ:
+ * - order route: RALO,CAT,IN,PHU,CAN,BE,DUT,DAN
+ * - sub_product.product_process = RALO,CAT,IN
+ * - currentProcessCode = PHU
+ * - previousCode = IN
+ *
+ * Khi đó không được đi tìm task IN trong production hiện tại,
+ * vì IN đã nằm trong bán thành phẩm kho.
+ */
+            var previousSatisfiedBySubProduct =
+                await IsPreviousStageSatisfiedByExternalSubProductAsync(
+                    db,
+                    currentProd,
+                    currentProcessCode,
+                    previousCode,
+                    route,
+                    ct);
+
+            if (previousSatisfiedBySubProduct)
+                continue;
+
             var previous = await FindPreviousStageForOrderAsync(
                 db,
                 orderId,
@@ -266,11 +292,185 @@ public static class ProductionDependencyValidator
         return result;
     }
 
-    private static async Task<ProductionDependencyCheckResult> CheckSubHeadProductionMustBeImportingAsync(
+    private static async Task<bool> IsPureExternalSubProductionAsync(
+    AppDbContext db,
+    production prod,
+    CancellationToken ct)
+    {
+        var method = Norm(prod.prod_method);
+
+        if (method != "SUB")
+            return false;
+
+        if (!prod.sub_product_id.HasValue || prod.sub_product_id.Value <= 0)
+            return false;
+
+        if (prod.sub_product_used_qty <= 0)
+            return false;
+
+        /*
+         * Pure SUB: dùng hoàn toàn bán thành phẩm.
+         * Nếu nvl_qty > 0 thì không coi là pure SUB.
+         */
+        if (prod.nvl_qty > 0)
+            return false;
+
+        /*
+         * Chỉ cần sub_product tồn tại.
+         * Không check quantity tại đây vì lúc duyệt method có thể đã xuất/giữ BTP,
+         * quantity trong kho có thể đã giảm sau khi tạo phiếu xuất.
+         */
+        var subExists = await db.sub_products
+            .AsNoTracking()
+            .AnyAsync(x => x.id == prod.sub_product_id.Value, ct);
+
+        return subExists;
+    }
+
+    private static async Task<bool> IsPreviousStageSatisfiedByExternalSubProductAsync(
         AppDbContext db,
         production currentProd,
-        int currentTaskId,
+        string currentProcessCode,
+        string previousProcessCode,
+        IReadOnlyList<string> orderRouteCodes,
         CancellationToken ct)
+    {
+        if (!await IsPureExternalSubProductionAsync(db, currentProd, ct))
+            return false;
+
+        if (!currentProd.sub_product_id.HasValue || currentProd.sub_product_id.Value <= 0)
+            return false;
+
+        var subCodes = await GetSubProductProcessCodesAsync(
+            db,
+            currentProd.sub_product_id.Value,
+            ct);
+
+        /*
+         * Nếu không đọc được product_process của sub_product,
+         * fallback an toàn:
+         * - chỉ bỏ qua previous khi current task là task đầu tiên của production SUB.
+         */
+        if (subCodes.Count == 0)
+        {
+            return await IsFirstTaskOfProductionAsync(
+                db,
+                currentProd.prod_id,
+                currentProcessCode,
+                ct);
+        }
+
+        var prev = Norm(previousProcessCode);
+        var curr = Norm(currentProcessCode);
+
+        /*
+         * previousCode phải thật sự nằm trong sub_product.
+         * Ví dụ sub_product = RALO,CAT,IN thì previous IN được xem là đã có.
+         */
+        if (!subCodes.Contains(prev, StringComparer.OrdinalIgnoreCase))
+            return false;
+
+        /*
+         * currentCode không nên nằm trong sub_product nữa.
+         * Nếu current cũng nằm trong sub_product thì nghĩa là đang start nhầm công đoạn
+         * mà lẽ ra đã có sẵn trong BTP.
+         */
+        if (subCodes.Contains(curr, StringComparer.OrdinalIgnoreCase))
+            return false;
+
+        /*
+         * Kiểm tra current phải nằm sau boundary cuối cùng của sub_product trên route order.
+         *
+         * Ví dụ:
+         * route = RALO,CAT,IN,PHU,CAN,BE,DUT,DAN
+         * sub  = RALO,CAT,IN
+         * current PHU nằm sau IN => OK.
+         */
+        if (orderRouteCodes != null && orderRouteCodes.Count > 0)
+        {
+            var route = orderRouteCodes
+                .Select(Norm)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            var currentIndex = route.FindIndex(x =>
+                string.Equals(x, curr, StringComparison.OrdinalIgnoreCase));
+
+            var subIndexes = subCodes
+                .Select(code => route.FindIndex(x =>
+                    string.Equals(x, code, StringComparison.OrdinalIgnoreCase)))
+                .Where(index => index >= 0)
+                .ToList();
+
+            if (currentIndex >= 0 && subIndexes.Count > 0)
+            {
+                var subLastIndex = subIndexes.Max();
+                return currentIndex > subLastIndex;
+            }
+        }
+
+        /*
+         * Fallback:
+         * previous nằm trong sub_product và current không nằm trong sub_product
+         * thì xem previous đã được thỏa bởi BTP.
+         */
+        return true;
+    }
+
+    private static async Task<List<string>> GetSubProductProcessCodesAsync(
+        AppDbContext db,
+        int subProductId,
+        CancellationToken ct)
+    {
+        var processCsv = await db.sub_products
+            .AsNoTracking()
+            .Where(x => x.id == subProductId)
+            .Select(x => x.product_process)
+            .FirstOrDefaultAsync(ct);
+
+        return ParseProcessCodes(processCsv);
+    }
+
+    private static List<string> ParseProcessCodes(string? csv)
+    {
+        if (string.IsNullOrWhiteSpace(csv))
+            return new List<string>();
+
+        return csv
+            .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(Norm)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static async Task<bool> IsFirstTaskOfProductionAsync(
+        AppDbContext db,
+        int prodId,
+        string currentProcessCode,
+        CancellationToken ct)
+    {
+        var firstCode = await (
+            from t in db.tasks.AsNoTracking()
+            join pp0 in db.product_type_processes.AsNoTracking()
+                on t.process_id equals pp0.process_id into ppj
+            from pp in ppj.DefaultIfEmpty()
+            where t.prod_id == prodId
+            orderby t.seq_num, t.task_id
+            select pp != null ? pp.process_code : t.name
+        ).FirstOrDefaultAsync(ct);
+
+        return string.Equals(
+            Norm(firstCode),
+            Norm(currentProcessCode),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<ProductionDependencyCheckResult> CheckSubHeadProductionMustBeImportingAsync(
+    AppDbContext db,
+    production currentProd,
+    int currentTaskId,
+    CancellationToken ct)
     {
         var currentCodes = await GetProductionProcessCodesAsync(
             db,
@@ -289,12 +489,11 @@ public static class ProductionDependencyValidator
             };
         }
 
-        /*
-         * Chỉ áp dụng rule này cho SUB/BOTH.
-         * NVL full process thì không cần bắt buộc production đầu SUB Importing.
-         */
         var currentMethod = Norm(currentProd.prod_method);
 
+        /*
+         * NVL full process thì không cần bắt buộc production đầu SUB Importing.
+         */
         if (currentMethod != "SUB" && currentMethod != "BOTH")
         {
             return new ProductionDependencyCheckResult
@@ -303,6 +502,28 @@ public static class ProductionDependencyValidator
             };
         }
 
+        /*
+         * FIX CHÍNH:
+         * Pure SUB nghĩa là order dùng bán thành phẩm đã có trong kho.
+         *
+         * Trường hợp này KHÔNG có production đầu RALO,CAT,IN trong cùng order.
+         * Input của công đoạn đầu hiện tại, ví dụ PHU, lấy từ sub_product_id.
+         *
+         * Vì vậy không được bắt lỗi:
+         * "không tìm thấy production đầu RALO,CAT,IN để xác nhận đầu vào SUB"
+         */
+        if (await IsPureExternalSubProductionAsync(db, currentProd, ct))
+        {
+            return new ProductionDependencyCheckResult
+            {
+                can_start = true
+            };
+        }
+
+        /*
+         * BOTH hoặc SUB không đủ thông tin sub_product thì vẫn giữ logic cũ:
+         * phải tìm production đầu RALO,CAT,IN để đảm bảo đầu vào cho công đoạn sau.
+         */
         var orderIds = await ResolveOrderIdsOfProductionAsync(
             db,
             currentProd.prod_id,
@@ -323,11 +544,6 @@ public static class ProductionDependencyValidator
 
         foreach (var orderId in orderIds)
         {
-            /*
-             * FIX chính:
-             * Chỉ tìm production đầu bằng actual task path RALO/CAT/IN.
-             * Không dùng prod_method = SUB/BOTH để nhận diện.
-             */
             var headProductions = await FindSubHeadProductionsByOrderAsync(
                 db,
                 orderId,
