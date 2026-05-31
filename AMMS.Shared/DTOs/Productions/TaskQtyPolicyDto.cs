@@ -54,7 +54,7 @@ namespace AMMS.Shared.DTOs.Productions
         public int? group_prod_id { get; set; }
         public int? split_prod_id { get; set; }
 
-        public int group_total_qty { get; set; }
+        public int? group_total_qty { get; set; }
 
         /*
          * Hint để FE hiển thị hoặc debug.

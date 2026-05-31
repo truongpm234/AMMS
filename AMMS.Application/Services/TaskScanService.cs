@@ -1808,15 +1808,65 @@ namespace AMMS.Application.Services
                 return null;
 
             /*
-             * reference_inputs là input cần đưa vào công đoạn hiện tại.
-             * Với SUB/BOTH sau boundary sub_product:
-             * - dùng sp
-             * - cộng hao hụt từ công đoạn hiện tại đến cuối path
+             * FIX SUB SINGLE:
+             * Với production SINGLE + SUB, input của công đoạn hiện tại
+             * phải lấy theo actual output của công đoạn trước.
+             *
+             * Ví dụ:
+             * current = PHU
+             * previous = IN
+             * IN actual = 2835
+             * => reference_inputs.estimated_qty phải = 2835
+             * Không để 2145 theo estimate/NVL nữa.
+             *
+             * linkQtyPlan chỉ dùng cho GROUP.
+             * Nếu đang có linkQtyPlan thì không áp dụng fix này để tránh ảnh hưởng GROUP.
              */
+            if (IsDirectSingleSubProductionForScan(ctx, linkQtyPlan))
+            {
+                var actualQtyPrevStage = await ResolveActualQtyPrevStageForTaskAsync(
+                    ctx,
+                    previousProcessCode,
+                    ct);
+
+                if (actualQtyPrevStage > 0)
+                {
+                    return (
+                        unit: stageQty.unit,
+                        qty: actualQtyPrevStage
+                    );
+                }
+            }
+
             return (
                 unit: stageQty.unit,
                 qty: stageQty.input_qty
             );
+        }
+
+        private static bool IsDirectSingleSubProductionForScan(
+    TaskEstimateContext ctx,
+    int? linkQtyPlan)
+        {
+            if (ctx?.Production == null)
+                return false;
+
+            /*
+             * linkQtyPlan có giá trị nghĩa là đang build cho GROUP link.
+             * Không áp dụng fix SUB SINGLE cho GROUP.
+             */
+            if (linkQtyPlan.HasValue && linkQtyPlan.Value > 0)
+                return false;
+
+            var kind = NormBothProcessCodeForScan(ctx.Production.prod_kind);
+            var method = NormBothProcessCodeForScan(ctx.Production.prod_method);
+
+            var isSingle =
+                string.IsNullOrWhiteSpace(kind) ||
+                string.Equals(kind, "SINGLE", StringComparison.OrdinalIgnoreCase);
+
+            return isSingle &&
+                   string.Equals(method, "SUB", StringComparison.OrdinalIgnoreCase);
         }
 
         private async Task<SubStageQtyResult?> ResolveSubOrBothDownstreamStageQtyAsync(
@@ -2661,6 +2711,17 @@ namespace AMMS.Application.Services
                 case "BE":
                 case "DUT":
                 case "DAN":
+                    /*
+ * FIX SUB SINGLE:
+ * Nếu actual công đoạn trước có dữ liệu thì estimated_qty hiển thị cho FE
+ * phải lấy theo actual, không lấy theo estimate/NVL.
+ */
+                    if (IsDirectSingleSubProductionForScan(ctx, null) && actualQtyPrevStage > 0)
+                    {
+                        qty = actualQtyPrevStage;
+                        unit = "sp";
+                    }
+
                     result.Add(new TaskReferenceInputDto
                     {
                         input_code = previousCtx.previous_process_code,

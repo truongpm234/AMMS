@@ -423,14 +423,45 @@ namespace AMMS.Infrastructure.Repositories
             if (est == null)
                 return null;
 
+            /*
+             * FIX SUB SINGLE:
+             * Nếu production là SINGLE + SUB thì các công đoạn sau BTP
+             * phải validate theo actual output của công đoạn trước,
+             * không validate theo estimate/NVL.
+             *
+             * Ví dụ:
+             * IN actual = 2835
+             * PHU max_allowed phải = 2835
+             * không được dùng estimate 2145.
+             */
+            var singleSubActualPolicy = await TryBuildSingleSubActualPreviousPolicyAsync(
+                taskId: taskId,
+                stage: stage,
+                prod: prod,
+                req: req,
+                est: est,
+                route: route,
+                currentIndex: currentIndex,
+                routeCodes: routeCodes,
+                orderQty: orderQty,
+                sheetsRequired: sheetsRequired,
+                sheetsWaste: sheetsWaste,
+                sheetsTotal: sheetsTotal,
+                nUp: nUp,
+                numberOfPlates: numberOfPlates,
+                ct: ct);
+
+            if (singleSubActualPolicy != null)
+                return singleSubActualPolicy;
+
             var subPolicy = await TryBuildSubOrBothDownstreamQtyPolicyAsync(
-                stage,
-                prod,
-                req,
-                est,
-                routeCodes,
-                orderQty,
-                ct);
+    currentTask: stage,
+    prod: prod,
+    req: req,
+    est: est,
+    routeCodes: routeCodes,
+    policyProductQty: orderQty,
+    ct: ct);
 
             if (subPolicy != null)
                 return subPolicy;
@@ -1055,6 +1086,144 @@ namespace AMMS.Infrastructure.Repositories
                 return req.quantity.Value;
 
             return 1;
+        }
+
+        private static bool IsSingleSubProduction(production prod)
+        {
+            var kind = Norm(prod.prod_kind);
+            var method = Norm(prod.prod_method);
+
+            /*
+             * Có DB cũ có thể prod_kind null.
+             * Nếu method = SUB và không phải GROUP/SPLIT thì coi là SINGLE.
+             */
+            var isSingle =
+                string.IsNullOrWhiteSpace(kind) ||
+                string.Equals(kind, "SINGLE", StringComparison.OrdinalIgnoreCase);
+
+            return isSingle &&
+                   string.Equals(method, "SUB", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private async Task<TaskQtyPolicyDto?> TryBuildSingleSubActualPreviousPolicyAsync(
+            int taskId,
+            task stage,
+            production prod,
+            order_request req,
+            cost_estimate est,
+            List<task> route,
+            int currentIndex,
+            IReadOnlyList<string?> routeCodes,
+            int orderQty,
+            int sheetsRequired,
+            int sheetsWaste,
+            int sheetsTotal,
+            int nUp,
+            int numberOfPlates,
+            CancellationToken ct)
+        {
+            if (!IsSingleSubProduction(prod))
+                return null;
+
+            if (route == null || route.Count == 0)
+                return null;
+
+            if (currentIndex <= 0 || currentIndex >= route.Count)
+                return null;
+
+            var currentCode = Norm(stage.process?.process_code);
+
+            if (string.IsNullOrWhiteSpace(currentCode))
+                return null;
+
+            /*
+             * RALO và CẮT không dùng actual previous theo kiểu này.
+             * Ví dụ RALO output có thể là số kẽm/plate,
+             * CAT là bước chuyển đổi tờ, không nên ép theo previous.
+             */
+            if (ProductionFlowHelper.IsRalo(currentCode))
+                return null;
+
+            if (IsCutProcess(currentCode))
+                return null;
+
+            /*
+             * Lấy actual output của công đoạn trước.
+             * Hàm này đã có sẵn trong repository của bạn.
+             * Với task PHU, previous = IN.
+             * Nếu IN đã Finished từ SUB_PRODUCT và log qty_good = 2835,
+             * thì previousActualQty = 2835.
+             */
+            var previousActualQty = await GetPreviousFinishedQtyGoodCapAsync(
+                route,
+                currentIndex,
+                ct);
+
+            if (!previousActualQty.HasValue || previousActualQty.Value <= 0)
+                return null;
+
+            var actualQty = previousActualQty.Value;
+
+            var pcode = currentCode;
+            var pname = string.IsNullOrWhiteSpace(stage.process?.process_name)
+                ? pcode
+                : stage.process!.process_name!;
+
+            return new TaskQtyPolicyDto
+            {
+                task_id = taskId,
+
+                process_code = pcode,
+                process_name = pname,
+
+                qty_unit = "sp",
+
+                min_allowed = 1,
+                max_allowed = actualQty,
+                suggested_qty = actualQty,
+                happy_case_qty = actualQty,
+
+                /*
+                 * order_qty vẫn giữ số lượng đơn hàng gốc để tracking.
+                 * Số lượng validate/report lấy theo actualQty.
+                 */
+                order_qty = orderQty,
+
+                sheets_required = sheetsRequired,
+                sheets_waste = sheetsWaste,
+                sheets_total = sheetsTotal,
+                n_up = nUp,
+                number_of_plates = numberOfPlates,
+
+                stage_index = currentIndex,
+                stage_count = route.Count,
+
+                production_output_qty = actualQty,
+                production_output_unit = "sp",
+
+                input_mode = stage.input_mode,
+
+                /*
+                 * Không ép MANUAL.
+                 * Task vẫn có thể chạy ESTIMATE,
+                 * nhưng estimate của SUB SINGLE lúc này chính là actual previous qty.
+                 */
+                allow_manual_input = string.Equals(
+                    stage.input_mode,
+                    "MANUAL",
+                    StringComparison.OrdinalIgnoreCase),
+
+                can_use_manual_input = true,
+                manual_input_optional = true,
+
+                is_group_production = false,
+                group_prod_id = null,
+                group_total_qty = null,
+
+                manual_input_hint =
+                    $"SUB SINGLE: số lượng công đoạn {pcode} lấy theo actual output của công đoạn trước. " +
+                    $"Actual previous qty = {actualQty}. Không dùng estimate/NVL để giới hạn max_allowed."
+            };
         }
     }
 }
