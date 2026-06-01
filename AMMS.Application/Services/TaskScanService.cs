@@ -3594,8 +3594,13 @@ namespace AMMS.Application.Services
                 if (!string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("Chỉ có thể recovery task đang ở trạng thái Finished.");
 
-                // Chỉ cho cancel khi production/order đang InProcessing hoặc Importing.
-                var statusCtx = await ValidateCancelableProductionAndOrderStatusAsync(t, innerCt);
+                /*
+                 * FIX CHÍNH:
+                 * Hàm này đã hỗ trợ GROUP production order_id = null.
+                 */
+                var statusCtx = await ValidateCancelableProductionAndOrderStatusAsync(
+                    t,
+                    innerCt);
 
                 var flowTasks = await _db.tasks
                     .Include(x => x.process)
@@ -3621,8 +3626,10 @@ namespace AMMS.Application.Services
                 var laterHasLog = laterTaskIds.Count > 0 &&
                     await _db.task_logs
                         .AsNoTracking()
-                        .AnyAsync(x => x.task_id.HasValue &&
-                                       laterTaskIds.Contains(x.task_id.Value), innerCt);
+                        .AnyAsync(x =>
+                            x.task_id.HasValue &&
+                            laterTaskIds.Contains(x.task_id.Value),
+                            innerCt);
 
                 var laterProgressed = laterTasks.Any(x =>
                     string.Equals(x.status, "Ready", StringComparison.OrdinalIgnoreCase) ||
@@ -3638,17 +3645,34 @@ namespace AMMS.Application.Services
                 }
 
                 var finishLogs = await _db.task_logs
-                    .Where(x => x.task_id == taskId &&
-                                string.Equals(x.action_type, "Finished"))
+                    .Where(x =>
+                        x.task_id == taskId &&
+                        x.action_type == "Finished")
                     .OrderBy(x => x.log_time)
                     .ToListAsync(innerCt);
 
                 if (finishLogs.Count == 0)
                     throw new InvalidOperationException("Task đã Finished nhưng không tìm thấy task_log Finished để recovery.");
 
-                // Chỉ được cancel trong vòng 5 phút sau khi task hoàn thành.
                 EnsureCancelWithinFiveMinutes(t, finishLogs);
 
+                /*
+                 * Nếu là GROUP task:
+                 * - Check các task riêng phía sau của member order chưa chạy.
+                 * - Nếu chỉ được promote Ready tự động thì rollback về Unassigned.
+                 */
+                if (statusCtx.IsGroupProduction)
+                {
+                    await EnsureAndRollbackLinkedSingleTasksAfterGroupCancelAsync(
+                        groupTask: t,
+                        reason: reason,
+                        ct: innerCt);
+                }
+
+                /*
+                 * Reverse stock move do NVL dư.
+                 * Hàm này đang có sẵn trong code của bạn.
+                 */
                 var reversedStockMoveCount = await ReverseLeftoverStockFromTaskLogsAsync(
                     taskId,
                     finishLogs,
@@ -3656,18 +3680,43 @@ namespace AMMS.Application.Services
                     reason,
                     innerCt);
 
+                /*
+                 * Nếu finish group task đã tạo task_qtys + set task_links Done,
+                 * cần xóa task_qtys và mở lại task_links.
+                 */
+                var groupReverse = await ReverseGroupFinishArtifactsAsync(
+                    t,
+                    finishLogs,
+                    reason,
+                    innerCt);
+
+                /*
+                 * Nếu finish tạo sub_product pending từ BTP/NVL dư thì xóa pending đó.
+                 */
+                var deletedPendingSubProductCount = await DeletePendingSubProductsCreatedByFinishLogsAsync(
+                    t,
+                    finishLogs,
+                    innerCt);
+
                 _db.task_logs.RemoveRange(finishLogs);
 
+                /*
+                 * Rollback task hiện tại về Ready.
+                 */
                 t.status = "Ready";
                 t.end_time = null;
-
                 t.start_time ??= AppTime.NowVnUnspecified();
 
                 await ReserveMachineForRollbackReadyAsync(t, innerCt);
 
+                /*
+                 * Rollback production/order/request status.
+                 * Hàm mới này xử lý được cả GROUP order_id=null.
+                 */
                 var statusResult = await RollbackFinalTaskStatusesIfNeededAsync(
                     t,
                     flowTasks,
+                    statusCtx,
                     reason,
                     innerCt);
 
@@ -3682,15 +3731,60 @@ namespace AMMS.Application.Services
                 {
                     task_id = t.task_id,
                     prod_id = t.prod_id,
+
                     deleted_log_count = finishLogs.Count,
                     reversed_stock_move_count = reversedStockMoveCount,
+
                     task_status = "Ready",
-                    production_status = statusResult.productionStatus ?? statusCtx.prod.status,
-                    order_status = statusResult.orderStatus ?? statusCtx.ord.status,
+                    production_status = statusResult.productionStatus ?? statusCtx.Production.status,
+
+                    /*
+                     * Với GROUP có nhiều order, order_status sẽ là chuỗi tổng hợp.
+                     * Ví dụ: "InProcessing" hoặc "InProcessing,Importing".
+                     */
+                    order_status = statusResult.orderStatus ?? BuildOrderStatusText(statusCtx.Orders),
+
                     request_status = statusResult.requestStatus,
-                    message = "Đã recovery task về Ready, xóa task_log Finished cũ và hoàn tác NVL dư đã nhập kho."
+
+                    message =
+                        "Đã recovery task về Ready, xóa task_log Finished cũ, " +
+                        "hoàn tác NVL dư đã nhập kho, " +
+                        $"xóa task_qtys={groupReverse.DeletedTaskQtyCount}, " +
+                        $"reset task_links={groupReverse.ResetTaskLinkCount}, " +
+                        $"xóa pending sub_product={deletedPendingSubProductCount}."
                 };
             }, ct);
+        }
+
+        private sealed class CancelableProductionStatusContext
+        {
+            public production Production { get; set; } = null!;
+
+            public bool IsGroupProduction { get; set; }
+
+            public List<order> Orders { get; set; } = new();
+
+            public List<int> OrderIds { get; set; } = new();
+
+            public List<int> SingleProdIds { get; set; } = new();
+        }
+
+        private static string BuildOrderStatusText(List<order> orders)
+        {
+            if (orders == null || orders.Count == 0)
+                return "";
+
+            return string.Join(
+                ",",
+                orders
+                    .Select(x => ShowStatus(x.status))
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
+        private static bool IsGroupProduction(production prod)
+        {
+            return prod != null &&
+                   string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase);
         }
 
         private static List<TaskMaterialUsageInputDto> BuildReportMaterialUsageInputs(
@@ -3970,80 +4064,114 @@ namespace AMMS.Application.Services
 
         private async Task<(string? productionStatus, string? orderStatus, string? requestStatus)>
     RollbackFinalTaskStatusesIfNeededAsync(
-        task currentTask,
+        task t,
         List<task> flowTasks,
+        CancelableProductionStatusContext statusCtx,
         string reason,
         CancellationToken ct)
         {
-            if (!currentTask.prod_id.HasValue || !currentTask.seq_num.HasValue)
-                return (null, null, null);
+            var prod = statusCtx.Production;
 
-            var currentSeq = currentTask.seq_num.Value;
+            var allTasksExceptCurrentFinished = flowTasks
+                .Where(x => x.task_id != t.task_id)
+                .All(x => string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase));
 
-            var isLastTask = !flowTasks.Any(x =>
-                x.task_id != currentTask.task_id &&
-                (x.seq_num ?? int.MaxValue) > currentSeq);
-
-            if (!isLastTask)
-                return (null, null, null);
-
-            var prod = await _db.productions
-                .FirstOrDefaultAsync(x => x.prod_id == currentTask.prod_id.Value, ct);
-
-            if (prod == null)
-                return (null, null, null);
-
-            if (!prod.order_id.HasValue)
-                throw new InvalidOperationException("Production chưa gắn với order.");
-
-            var ord = await _db.orders
-                .FirstOrDefaultAsync(x => x.order_id == prod.order_id.Value, ct);
-
-            if (ord == null)
-                throw new InvalidOperationException("Không tìm thấy order của production.");
-
-            if (!IsCancelableProductionStatus(prod.status))
-            {
-                throw new InvalidOperationException(
-                    $"Không thể recovery công đoạn cuối. Production phải đang InProcessing hoặc Importing. " +
-                    $"Hiện tại: {ShowStatus(prod.status)}.");
-            }
-
-            if (!IsCancelableProductionStatus(ord.status))
-            {
-                throw new InvalidOperationException(
-                    $"Không thể recovery công đoạn cuối. Order phải đang InProcessing hoặc Importing. " +
-                    $"Hiện tại: {ShowStatus(ord.status)}.");
-            }
+            /*
+             * Nếu task vừa cancel không phải nguyên nhân làm production đóng Importing,
+             * vẫn đảm bảo end_date null khi recovery.
+             */
+            prod.end_date = null;
 
             if (string.Equals(prod.status, "Importing", StringComparison.OrdinalIgnoreCase))
             {
                 prod.status = "InProcessing";
             }
 
-            prod.end_date = null;
-
-            if (string.Equals(ord.status, "Importing", StringComparison.OrdinalIgnoreCase))
-            {
-                ord.status = "InProcessing";
-            }
-
             string? requestStatus = null;
 
-            var requests = await _db.order_requests
-                .Where(x => x.order_id == ord.order_id)
-                .ToListAsync(ct);
-
-            foreach (var request in requests)
+            /*
+             * CASE GROUP:
+             * - production.order_id null.
+             * - Rollback tất cả order active nếu đang Importing về InProcessing.
+             * - Rollback order_request.process_status tương ứng.
+             * - Rollback single productions của member nếu bị chuyển Importing.
+             */
+            if (statusCtx.IsGroupProduction)
             {
-                if (string.Equals(request.process_status, "Importing", StringComparison.OrdinalIgnoreCase))
+                foreach (var ord in statusCtx.Orders)
                 {
-                    request.process_status = "InProcessing";
-                    requestStatus = "InProcessing";
+                    if (string.Equals(ord.status, "Importing", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ord.status = "InProcessing";
+                    }
+
+                    var requests = await _db.order_requests
+                        .Where(x => x.order_id == ord.order_id)
+                        .ToListAsync(ct);
+
+                    foreach (var request in requests)
+                    {
+                        if (string.Equals(request.process_status, "Importing", StringComparison.OrdinalIgnoreCase))
+                        {
+                            request.process_status = "InProcessing";
+                            requestStatus = "InProcessing";
+                        }
+                    }
+                }
+
+                if (statusCtx.SingleProdIds.Count > 0)
+                {
+                    var singleProds = await _db.productions
+                        .Where(x => statusCtx.SingleProdIds.Contains(x.prod_id))
+                        .ToListAsync(ct);
+
+                    foreach (var singleProd in singleProds)
+                    {
+                        singleProd.end_date = null;
+
+                        if (string.Equals(singleProd.status, "Importing", StringComparison.OrdinalIgnoreCase))
+                        {
+                            singleProd.status = "InProcessing";
+                        }
+                    }
+                }
+
+                return (
+                    productionStatus: prod.status,
+                    orderStatus: BuildOrderStatusText(statusCtx.Orders),
+                    requestStatus: requestStatus);
+            }
+
+            /*
+             * CASE SINGLE/SPLIT:
+             */
+            var ordSingle = statusCtx.Orders.FirstOrDefault();
+
+            if (ordSingle != null)
+            {
+                if (string.Equals(ordSingle.status, "Importing", StringComparison.OrdinalIgnoreCase))
+                {
+                    ordSingle.status = "InProcessing";
+                }
+
+                var requests = await _db.order_requests
+                    .Where(x => x.order_id == ordSingle.order_id)
+                    .ToListAsync(ct);
+
+                foreach (var request in requests)
+                {
+                    if (string.Equals(request.process_status, "Importing", StringComparison.OrdinalIgnoreCase))
+                    {
+                        request.process_status = "InProcessing";
+                        requestStatus = "InProcessing";
+                    }
                 }
             }
 
-            return (prod.status, ord.status, requestStatus);
+            return (
+                productionStatus: prod.status,
+                orderStatus: ordSingle?.status,
+                requestStatus: requestStatus);
         }
 
         private static bool IsCancelableProductionStatus(string? status)
@@ -4096,9 +4224,9 @@ namespace AMMS.Application.Services
             }
         }
 
-        private async Task<(production prod, order ord)> ValidateCancelableProductionAndOrderStatusAsync(
-            task t,
-            CancellationToken ct)
+        private async Task<CancelableProductionStatusContext> ValidateCancelableProductionAndOrderStatusAsync(
+    task t,
+    CancellationToken ct)
         {
             if (!t.prod_id.HasValue)
                 throw new InvalidOperationException("Task chưa gắn với production.");
@@ -4109,6 +4237,105 @@ namespace AMMS.Application.Services
             if (prod == null)
                 throw new InvalidOperationException("Không tìm thấy production của task.");
 
+            if (!IsCancelableProductionStatus(prod.status))
+            {
+                throw new InvalidOperationException(
+                    $"Chỉ được cancel finish khi production đang InProcessing hoặc Importing. " +
+                    $"Trạng thái production hiện tại: {ShowStatus(prod.status)}.");
+            }
+
+            var isGroup = IsGroupProduction(prod);
+
+            /*
+             * CASE 1: GROUP production
+             * production.order_id = null là bình thường.
+             * Lấy danh sách order từ prod_orders và task_links.
+             */
+            if (isGroup)
+            {
+                var orderIdsFromProdOrders = await _db.prod_orders
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.prod_id == prod.prod_id &&
+                        (
+                            x.status == null ||
+                            x.status.ToUpper() != "CANCELLED"
+                        ))
+                    .Select(x => x.order_id)
+                    .Distinct()
+                    .ToListAsync(ct);
+
+                var links = await _db.task_links
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.group_task_id == t.task_id &&
+                        (
+                            x.status == null ||
+                            x.status.ToUpper() != "CANCELLED"
+                        ))
+                    .ToListAsync(ct);
+
+                var orderIdsFromLinks = links
+                    .Where(x => x.order_id > 0)
+                    .Select(x => x.order_id)
+                    .Distinct()
+                    .ToList();
+
+                var orderIds = orderIdsFromProdOrders
+                    .Concat(orderIdsFromLinks)
+                    .Where(x => x > 0)
+                    .Distinct()
+                    .ToList();
+
+                if (orderIds.Count == 0)
+                {
+                    throw new InvalidOperationException(
+                        "Production ghép không có order active trong prod_orders/task_links nên không thể recovery.");
+                }
+
+                var orders = await _db.orders
+                    .Where(x => orderIds.Contains(x.order_id))
+                    .ToListAsync(ct);
+
+                var missingOrderIds = orderIds
+                    .Except(orders.Select(x => x.order_id))
+                    .ToList();
+
+                if (missingOrderIds.Count > 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Không tìm thấy order của production ghép: {string.Join(",", missingOrderIds)}.");
+                }
+
+                var invalidOrders = orders
+                    .Where(x => !IsCancelableProductionStatus(x.status))
+                    .Select(x => $"order_id={x.order_id}, status={ShowStatus(x.status)}")
+                    .ToList();
+
+                if (invalidOrders.Count > 0)
+                {
+                    throw new InvalidOperationException(
+                        "Chỉ được cancel finish khi các order trong group đang InProcessing hoặc Importing. " +
+                        $"Không hợp lệ: {string.Join(" | ", invalidOrders)}.");
+                }
+
+                return new CancelableProductionStatusContext
+                {
+                    Production = prod,
+                    IsGroupProduction = true,
+                    Orders = orders,
+                    OrderIds = orderIds,
+                    SingleProdIds = links
+                        .Where(x => x.single_prod_id > 0)
+                        .Select(x => x.single_prod_id)
+                        .Distinct()
+                        .ToList()
+                };
+            }
+
+            /*
+             * CASE 2: SINGLE / SPLIT production
+             */
             if (!prod.order_id.HasValue)
                 throw new InvalidOperationException("Production chưa gắn với order.");
 
@@ -4118,13 +4345,6 @@ namespace AMMS.Application.Services
             if (ord == null)
                 throw new InvalidOperationException("Không tìm thấy order của production.");
 
-            if (!IsCancelableProductionStatus(prod.status))
-            {
-                throw new InvalidOperationException(
-                    $"Chỉ được cancel finish khi production đang InProcessing hoặc Importing. " +
-                    $"Trạng thái production hiện tại: {ShowStatus(prod.status)}.");
-            }
-
             if (!IsCancelableProductionStatus(ord.status))
             {
                 throw new InvalidOperationException(
@@ -4132,7 +4352,213 @@ namespace AMMS.Application.Services
                     $"Trạng thái order hiện tại: {ShowStatus(ord.status)}.");
             }
 
-            return (prod, ord);
+            return new CancelableProductionStatusContext
+            {
+                Production = prod,
+                IsGroupProduction = false,
+                Orders = new List<order> { ord },
+                OrderIds = new List<int> { ord.order_id },
+                SingleProdIds = prod.prod_id > 0
+                    ? new List<int> { prod.prod_id }
+                    : new List<int>()
+            };
+        }
+
+        private sealed class GroupFinishReverseResult
+        {
+            public int DeletedTaskQtyCount { get; set; }
+
+            public int ResetTaskLinkCount { get; set; }
+        }
+
+        private async Task<GroupFinishReverseResult> ReverseGroupFinishArtifactsAsync(
+            task t,
+            List<task_log> finishLogs,
+            string reason,
+            CancellationToken ct)
+        {
+            var result = new GroupFinishReverseResult();
+
+            if (!t.prod_id.HasValue)
+                return result;
+
+            var prod = await _db.productions
+                .FirstOrDefaultAsync(x => x.prod_id == t.prod_id.Value, ct);
+
+            if (prod == null || !IsGroupProduction(prod))
+                return result;
+
+            /*
+             * Xóa phân bổ sản lượng của group task.
+             * MirrorGroupFinishToSingleTasksAsync đã tạo task_qtys theo group_task_id.
+             */
+            var taskQtys = await _db.task_qtys
+                .Where(x => x.group_task_id == t.task_id)
+                .ToListAsync(ct);
+
+            result.DeletedTaskQtyCount = taskQtys.Count;
+
+            if (taskQtys.Count > 0)
+                _db.task_qtys.RemoveRange(taskQtys);
+
+            /*
+             * Mở lại task_links để có thể finish group task lại.
+             */
+            var links = await _db.task_links
+                .Where(x =>
+                    x.group_task_id == t.task_id &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
+                .ToListAsync(ct);
+
+            foreach (var link in links)
+            {
+                if (string.Equals(link.status, "Done", StringComparison.OrdinalIgnoreCase))
+                {
+                    link.status = "Active";
+                    link.done_at = null;
+                    result.ResetTaskLinkCount++;
+                }
+            }
+
+            return result;
+        }
+
+        private async Task EnsureAndRollbackLinkedSingleTasksAfterGroupCancelAsync(
+    task groupTask,
+    string reason,
+    CancellationToken ct)
+        {
+            if (!groupTask.seq_num.HasValue)
+                return;
+
+            var groupSeq = groupTask.seq_num.Value;
+
+            var links = await _db.task_links
+                .AsNoTracking()
+                .Where(x =>
+                    x.group_task_id == groupTask.task_id &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
+                .ToListAsync(ct);
+
+            if (links.Count == 0)
+                return;
+
+            var singleProdIds = links
+                .Where(x => x.single_prod_id > 0)
+                .Select(x => x.single_prod_id)
+                .Distinct()
+                .ToList();
+
+            if (singleProdIds.Count == 0)
+                return;
+
+            var downstreamTasks = await _db.tasks
+                .Include(x => x.process)
+                .Where(x =>
+                    x.prod_id.HasValue &&
+                    singleProdIds.Contains(x.prod_id.Value) &&
+                    x.seq_num.HasValue &&
+                    x.seq_num.Value > groupSeq)
+                .OrderBy(x => x.prod_id)
+                .ThenBy(x => x.seq_num)
+                .ThenBy(x => x.task_id)
+                .ToListAsync(ct);
+
+            if (downstreamTasks.Count == 0)
+                return;
+
+            var downstreamTaskIds = downstreamTasks
+                .Select(x => x.task_id)
+                .ToList();
+
+            var taskIdsHavingLog = await _db.task_logs
+                .AsNoTracking()
+                .Where(x =>
+                    x.task_id.HasValue &&
+                    downstreamTaskIds.Contains(x.task_id.Value))
+                .Select(x => x.task_id!.Value)
+                .Distinct()
+                .ToListAsync(ct);
+
+            var logSet = taskIdsHavingLog.ToHashSet();
+
+            var blocked = downstreamTasks
+                .Where(x =>
+                    string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                    x.end_time != null ||
+                    logSet.Contains(x.task_id))
+                .Select(x =>
+                    $"single_prod_id={x.prod_id}, task_id={x.task_id}, process={x.process?.process_code ?? x.name}, status={ShowStatus(x.status)}")
+                .ToList();
+
+            if (blocked.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    "Không thể recovery group task vì task riêng phía sau của order đã có log hoặc đã Finished. " +
+                    "Hãy recovery các task phía sau trước. Chi tiết: " +
+                    string.Join(" | ", blocked));
+            }
+
+            /*
+             * Các task chỉ vừa được promote Ready sau khi group finish thì rollback về Unassigned.
+             */
+            foreach (var task in downstreamTasks)
+            {
+                if (!string.Equals(task.status, "Ready", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!string.IsNullOrWhiteSpace(task.machine))
+                {
+                    await _machineRepo.ReleaseAsync(task.machine, release: 1);
+                }
+
+                task.status = "Unassigned";
+                task.start_time = null;
+                task.end_time = null;
+                task.reason = $"Rollback Ready do cancel group task_id={groupTask.task_id}. {reason}";
+            }
+        }
+
+        private async Task<int> DeletePendingSubProductsCreatedByFinishLogsAsync(
+    task t,
+    List<task_log> finishLogs,
+    CancellationToken ct)
+        {
+            if (finishLogs == null || finishLogs.Count == 0)
+                return 0;
+
+            var finishLogIds = finishLogs
+                .Where(x => x.log_id > 0)
+                .Select(x => x.log_id)
+                .Distinct()
+                .ToList();
+
+            var query = _db.sub_products
+                .Where(x =>
+                    x.source_task_id == t.task_id &&
+                    x.is_active == false &&
+                    x.is_imported == false);
+
+            if (finishLogIds.Count > 0)
+            {
+                query = query.Where(x =>
+                    x.source_task_log_id == null ||
+                    finishLogIds.Contains(x.source_task_log_id.Value));
+            }
+
+            var pending = await query.ToListAsync(ct);
+
+            if (pending.Count == 0)
+                return 0;
+
+            _db.sub_products.RemoveRange(pending);
+            return pending.Count;
         }
 
         private sealed class BothConsumableScaleContext
