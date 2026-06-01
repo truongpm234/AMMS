@@ -10,23 +10,8 @@ namespace AMMS.Application.Services
 {
     public class TaskQrTokenService : ITaskQrTokenService
     {
-        /*
-         * V3:
-         * - Token output chỉ gồm SỐ + CHỮ HOA.
-         * - Dùng Crockford Base32 để tránh ký tự dễ nhầm: I, L, O, U.
-         * - Payload compact hơn V2.
-         * - Payload dài sẽ được Brotli compress.
-         * - Không cần DB, token vẫn tự chứa đủ dữ liệu để máy khác quét finish.
-         */
         private const byte TokenVersion = 3;
-
-        /*
-         * 8 bytes = 64-bit HMAC truncated.
-         * Ngắn hơn bản cũ 10 bytes.
-         * Nếu muốn bảo mật mạnh hơn nhưng token dài hơn, đổi lại 10.
-         */
         private const int SignatureLength = 8;
-
         private const byte EnvelopeFlagCompressed = 0b0000_0001;
 
         private const byte PayloadFlagManualInput = 0b0000_0001;
@@ -35,26 +20,13 @@ namespace AMMS.Application.Services
         private const byte PayloadFlagHasMaterials = 0b0000_1000;
         private const byte PayloadFlagHasReferenceInputs = 0b0001_0000;
         private const byte PayloadFlagHasOutputs = 0b0010_0000;
-
-        /*
-         * Crockford Base32:
-         * - Toàn chữ hoa + số.
-         * - Không có I, L, O, U để hạn chế máy quét/người nhập nhầm.
-         */
         private const string Base32Alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-        /*
-         * Legacy V1/V2 giữ để token cũ chưa hết hạn vẫn finish được.
-         * Token mới sẽ không dùng Base62 nữa.
-         */
         private const byte LegacyTokenVersionV2 = 2;
         private const int LegacySignatureLength = 10;
         private const string LegacyBase62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-
+        private const string Base36Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         private readonly byte[] _secretBytes;
-
         private static readonly Dictionary<char, int> _base32Map = BuildBase32Map();
-
         private static readonly Dictionary<char, int> _legacyBase62Map = LegacyBase62Alphabet
             .Select((ch, idx) => new { ch, idx })
             .ToDictionary(x => x.ch, x => x.idx);
@@ -69,44 +41,16 @@ namespace AMMS.Application.Services
             _secretBytes = Encoding.UTF8.GetBytes(secret);
         }
 
-        public string CreateToken(int taskId, int qtyGood, TimeSpan ttl)
-            => CreateToken(
-                taskId,
-                qtyGood,
-                null,
-                ttl,
-                useManualInput: false,
-                reason: null,
-                reportImageUrl: null,
-                referenceInputs: null,
-                outputs: null);
-
         public string CreateToken(
-            int taskId,
-            int qtyGood,
-            IReadOnlyList<TaskMaterialUsageInputDto>? materials,
-            TimeSpan ttl)
-            => CreateToken(
-                taskId,
-                qtyGood,
-                materials,
-                ttl,
-                useManualInput: false,
-                reason: null,
-                reportImageUrl: null,
-                referenceInputs: null,
-                outputs: null);
-
-        public string CreateToken(
-            int taskId,
-            int qtyGood,
-            IReadOnlyList<TaskMaterialUsageInputDto>? materials,
-            TimeSpan ttl,
-            bool useManualInput,
-            string? reason,
-            string? reportImageUrl,
-            IReadOnlyList<TaskReferenceUsageInputDto>? referenceInputs,
-            IReadOnlyList<TaskOutputReportDto>? outputs)
+    int taskId,
+    int qtyGood,
+    IReadOnlyList<TaskMaterialUsageInputDto>? materials,
+    TimeSpan ttl,
+    bool useManualInput,
+    string? reason,
+    string? reportImageUrl,
+    IReadOnlyList<TaskReferenceUsageInputDto>? referenceInputs,
+    IReadOnlyList<TaskOutputReportDto>? outputs)
         {
             if (taskId <= 0)
                 throw new ArgumentException("taskId must be > 0");
@@ -139,10 +83,6 @@ namespace AMMS.Application.Services
             var envelopeFlags = (byte)0;
             var envelopeContent = payloadBody;
 
-            /*
-             * Chỉ compress khi thật sự ngắn hơn.
-             * Với token rất nhỏ, Brotli header có thể làm dài hơn.
-             */
             if (payloadBody.Length >= 48)
             {
                 var compressed = BrotliCompress(payloadBody);
@@ -173,10 +113,11 @@ namespace AMMS.Application.Services
             Buffer.BlockCopy(sig, 0, raw, envelope.Length, sig.Length);
 
             /*
-             * Kết quả chỉ có:
-             * 0123456789ABCDEFGHJKMNPQRSTVWXYZ
+             * FIX:
+             * Trước đây dùng Base32 nên token dài hơn.
+             * Bây giờ dùng Base36: chỉ A-Z + 0-9, không ký tự đặc biệt.
              */
-            return Base32Encode(raw);
+            return Base36Encode(raw);
         }
 
         public bool TryValidate(
@@ -198,72 +139,12 @@ namespace AMMS.Application.Services
         }
 
         public bool TryValidate(
-            string token,
-            out TaskQrTokenPayloadDto payload,
-            out string reason)
+    string token,
+    out TaskQrTokenPayloadDto payload,
+    out string reason)
         {
             payload = new TaskQrTokenPayloadDto();
-            reason = "Invalid token";
-
-            if (string.IsNullOrWhiteSpace(token))
-            {
-                reason = "Token is empty";
-                return false;
-            }
-
-            /*
-             * 1. Ưu tiên validate token V3 mới:
-             * - Cho phép FE/máy quét input có khoảng trắng hoặc dấu -,
-             *   backend sẽ bỏ đi.
-             * - Output token vẫn không có dấu -.
-             */
-            var normalizedV3 = NormalizeScannedV3Token(token);
-
-            if (TryValidateV3(
-                    normalizedV3,
-                    out payload,
-                    out reason,
-                    out var recognizedV3))
-            {
-                EnsurePayloadCollections(payload);
-                return true;
-            }
-
-            /*
-             * Nếu token đúng format V3 và chữ ký hợp lệ nhưng hết hạn/payload lỗi,
-             * không fallback sang legacy nữa.
-             */
-            if (recognizedV3)
-            {
-                EnsurePayloadCollections(payload);
-                return false;
-            }
-
-            /*
-             * 2. Fallback legacy để token V1/V2 cũ chưa hết hạn vẫn dùng được.
-             */
-            if (TryValidateLegacyBase62(
-                    token.Trim(),
-                    out payload,
-                    out reason))
-            {
-                EnsurePayloadCollections(payload);
-                return true;
-            }
-
-            EnsurePayloadCollections(payload);
-            return false;
-        }
-
-        private bool TryValidateV3(
-            string token,
-            out TaskQrTokenPayloadDto payload,
-            out string reason,
-            out bool recognizedV3)
-        {
-            payload = new TaskQrTokenPayloadDto();
-            reason = "Invalid V3 token";
-            recognizedV3 = false;
+            reason = "";
 
             if (string.IsNullOrWhiteSpace(token))
             {
@@ -275,190 +156,105 @@ namespace AMMS.Application.Services
 
             try
             {
-                raw = Base32Decode(token);
+                raw = Base36Decode(token);
             }
-            catch
+            catch (Exception ex)
             {
-                reason = "Cannot decode V3 token";
+                reason = $"Không decode được Base36 token. {ex.Message}";
                 return false;
             }
 
-            if (raw.Length <= 2 + SignatureLength)
-            {
-                reason = "V3 token too short";
-                return false;
-            }
+            return TryValidateRawBytes(
+                raw,
+                out payload,
+                out reason);
+        }
 
-            var envelopeLength = raw.Length - SignatureLength;
-
-            var envelope = new byte[envelopeLength];
-            var givenSig = new byte[SignatureLength];
-
-            Buffer.BlockCopy(raw, 0, envelope, 0, envelopeLength);
-            Buffer.BlockCopy(raw, envelopeLength, givenSig, 0, SignatureLength);
-
-            if (envelope[0] != TokenVersion)
-            {
-                reason = "Not V3 token";
-                return false;
-            }
-
-            var expectedSig = ComputeSignature(envelope, SignatureLength);
-
-            if (!CryptographicOperations.FixedTimeEquals(givenSig, expectedSig))
-            {
-                reason = "V3 token signature is invalid";
-                return false;
-            }
-
-            recognizedV3 = true;
+        private bool TryValidateRawBytes(
+    byte[] raw,
+    out TaskQrTokenPayloadDto payload,
+    out string reason)
+        {
+            payload = new TaskQrTokenPayloadDto();
+            reason = "";
 
             try
             {
-                var envelopeFlags = envelope[1];
-
-                var content = new byte[envelope.Length - 2];
-
-                Buffer.BlockCopy(
-                    envelope,
-                    2,
-                    content,
-                    0,
-                    content.Length);
-
-                var payloadBytes = (envelopeFlags & EnvelopeFlagCompressed) != 0
-                    ? BrotliDecompress(content)
-                    : content;
-
-                payload = ParsePayloadV3(payloadBytes);
-            }
-            catch
-            {
-                reason = "V3 token payload is invalid";
-                return false;
-            }
-
-            if (payload.exp_unix <= DateTimeOffset.UtcNow.ToUnixTimeSeconds())
-            {
-                reason = "QR token has expired";
-                return false;
-            }
-
-            if (payload.task_id <= 0)
-            {
-                reason = "task_id is invalid";
-                return false;
-            }
-
-            if (payload.qty_good <= 0)
-            {
-                reason = "qty_good is invalid";
-                return false;
-            }
-
-            reason = "";
-            return true;
-        }
-
-        private bool TryValidateLegacyBase62(
-            string token,
-            out TaskQrTokenPayloadDto payload,
-            out string reason)
-        {
-            payload = new TaskQrTokenPayloadDto();
-            reason = "Invalid legacy token";
-
-            if (string.IsNullOrWhiteSpace(token))
-            {
-                reason = "Token is empty";
-                return false;
-            }
-
-            for (var i = 0; i < token.Length; i++)
-            {
-                if (!_legacyBase62Map.ContainsKey(token[i]))
+                if (raw == null || raw.Length < 2 + SignatureLength)
                 {
-                    reason = "Legacy token contains invalid characters";
+                    reason = "Token quá ngắn.";
                     return false;
                 }
-            }
 
-            byte[] raw;
+                var envelopeLength = raw.Length - SignatureLength;
 
-            try
-            {
-                raw = LegacyBase62Decode(token);
+                var envelope = raw
+                    .Take(envelopeLength)
+                    .ToArray();
+
+                var sig = raw
+                    .Skip(envelopeLength)
+                    .Take(SignatureLength)
+                    .ToArray();
+
+                var expectedSig = ComputeSignature(
+                    envelope,
+                    SignatureLength);
+
+                if (!CryptographicOperations.FixedTimeEquals(sig, expectedSig))
+                {
+                    reason = "Token signature không hợp lệ.";
+                    return false;
+                }
+
+                var version = envelope[0];
+
+                if (version != TokenVersion)
+                {
+                    reason = $"Token version không hỗ trợ: {version}.";
+                    return false;
+                }
+
+                var envelopeFlags = envelope[1];
+
+                var payloadBytes = envelope
+                    .Skip(2)
+                    .ToArray();
+
+                if ((envelopeFlags & EnvelopeFlagCompressed) != 0)
+                {
+                    payloadBytes = BrotliDecompress(payloadBytes);
+                }
+
+                payload = ParsePayloadV3(payloadBytes);
+
+                var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+                if (payload.exp_unix <= nowUnix)
+                {
+                    reason = "Token đã hết hạn.";
+                    return false;
+                }
+
+                return true;
             }
-            catch
+            catch (Exception ex)
             {
-                reason = "Cannot decode legacy token";
+                reason = ex.Message;
                 return false;
             }
-
-            if (raw.Length <= LegacySignatureLength + 1)
-            {
-                reason = "Legacy token too short";
-                return false;
-            }
-
-            var bodyLength = raw.Length - LegacySignatureLength;
-
-            var body = new byte[bodyLength];
-            var givenSig = new byte[LegacySignatureLength];
-
-            Buffer.BlockCopy(raw, 0, body, 0, bodyLength);
-            Buffer.BlockCopy(raw, bodyLength, givenSig, 0, LegacySignatureLength);
-
-            var expectedSig = ComputeSignature(body, LegacySignatureLength);
-
-            if (!CryptographicOperations.FixedTimeEquals(givenSig, expectedSig))
-            {
-                reason = "Legacy token signature is invalid";
-                return false;
-            }
-
-            try
-            {
-                payload = ParseLegacyBody(body);
-            }
-            catch
-            {
-                reason = "Legacy token payload is invalid";
-                return false;
-            }
-
-            if (payload.exp_unix <= DateTimeOffset.UtcNow.ToUnixTimeSeconds())
-            {
-                reason = "QR token has expired";
-                return false;
-            }
-
-            if (payload.task_id <= 0)
-            {
-                reason = "task_id is invalid";
-                return false;
-            }
-
-            if (payload.qty_good <= 0)
-            {
-                reason = "qty_good is invalid";
-                return false;
-            }
-
-            reason = "";
-            return true;
         }
 
         private byte[] BuildPayloadV3(
-            int taskId,
-            int qtyGood,
-            long expUnixMinutes,
-            List<TaskMaterialUsageInputDto> materials,
-            bool useManualInput,
-            string? reason,
-            string? reportImageUrl,
-            List<TaskReferenceUsageInputDto> referenceInputs,
-            List<TaskOutputReportDto> outputs)
+    int taskId,
+    int qtyGood,
+    long expUnixMinutes,
+    List<TaskMaterialUsageInputDto> materials,
+    bool useManualInput,
+    string? reason,
+    string? reportImageUrl,
+    List<TaskReferenceUsageInputDto> referenceInputs,
+    List<TaskOutputReportDto> outputs)
         {
             using var ms = new MemoryStream();
 
@@ -650,19 +446,82 @@ namespace AMMS.Application.Services
             };
         }
 
-        private TaskQrTokenPayloadDto ParseLegacyBody(byte[] body)
+        private static string Base36Encode(byte[] data)
         {
-            using var ms = new MemoryStream(body);
+            if (data == null || data.Length == 0)
+                return "";
 
-            var version = ms.ReadByte();
+            var leadingZeroCount = data.TakeWhile(x => x == 0).Count();
 
-            if (version == 1)
-                return ParseLegacyBodyV1(ms);
+            var value = new BigInteger(
+                data,
+                isUnsigned: true,
+                isBigEndian: true);
 
-            if (version == LegacyTokenVersionV2)
-                return ParseLegacyBodyV2(ms);
+            if (value.IsZero)
+                return "0";
 
-            throw new InvalidOperationException($"Unsupported legacy token version: {version}");
+            var chars = new List<char>();
+
+            while (value > 0)
+            {
+                value = BigInteger.DivRem(
+                    value,
+                    36,
+                    out var remainder);
+
+                chars.Add(Base36Alphabet[(int)remainder]);
+            }
+
+            chars.Reverse();
+
+            var result = new string(chars.ToArray());
+
+            if (leadingZeroCount > 0)
+                result = new string('0', leadingZeroCount) + result;
+
+            return result;
+        }
+
+        private static byte[] Base36Decode(string input)
+        {
+            if (string.IsNullOrWhiteSpace(input))
+                return Array.Empty<byte>();
+
+            var clean = input
+                .Trim()
+                .Replace(" ", "")
+                .Replace("-", "")
+                .ToUpperInvariant();
+
+            var leadingZeroCount = clean.TakeWhile(x => x == '0').Count();
+
+            var value = BigInteger.Zero;
+
+            foreach (var ch in clean)
+            {
+                var digit = Base36Alphabet.IndexOf(ch);
+
+                if (digit < 0)
+                    throw new InvalidOperationException($"Token chứa ký tự không hợp lệ: {ch}");
+
+                value *= 36;
+                value += digit;
+            }
+
+            var bytes = value.IsZero
+                ? Array.Empty<byte>()
+                : value.ToByteArray(
+                    isUnsigned: true,
+                    isBigEndian: true);
+
+            if (leadingZeroCount <= 0)
+                return bytes;
+
+            return Enumerable
+                .Repeat((byte)0, leadingZeroCount)
+                .Concat(bytes)
+                .ToArray();
         }
 
         private TaskQrTokenPayloadDto ParseLegacyBodyV1(MemoryStream ms)
@@ -708,92 +567,6 @@ namespace AMMS.Application.Services
                 materials = materials,
                 reference_inputs = new List<TaskReferenceUsageInputDto>(),
                 outputs = new List<TaskOutputReportDto>()
-            };
-        }
-
-        private TaskQrTokenPayloadDto ParseLegacyBodyV2(MemoryStream ms)
-        {
-            var taskId = (int)ReadVarUInt(ms);
-            var qtyGood = (int)ReadVarUInt(ms);
-            var expUnix = (long)ReadVarUInt(ms);
-
-            var flags = ms.ReadByte();
-
-            if (flags < 0)
-                throw new EndOfStreamException("Unexpected end of token");
-
-            var useManualInput = (flags & 0b0000_0001) != 0;
-
-            var reason = ReadNullableString(ms);
-            var reportImageUrl = ReadNullableString(ms);
-
-            var materialCount = (int)ReadVarUInt(ms);
-            var materials = new List<TaskMaterialUsageInputDto>(materialCount);
-
-            for (var i = 0; i < materialCount; i++)
-            {
-                var materialId = (int)ReadVarUInt(ms);
-                var quantityUsed = FromScaledUInt64(ReadVarUInt(ms));
-                var quantityLeft = FromScaledUInt64(ReadVarUInt(ms));
-
-                var materialFlags = ms.ReadByte();
-
-                if (materialFlags < 0)
-                    throw new EndOfStreamException("Unexpected end of token");
-
-                materials.Add(new TaskMaterialUsageInputDto
-                {
-                    material_id = materialId,
-                    quantity_used = quantityUsed,
-                    quantity_left = quantityLeft,
-                    is_stock = (materialFlags & 0b0000_0001) != 0
-                });
-            }
-
-            var referenceInputCount = (int)ReadVarUInt(ms);
-            var referenceInputs = new List<TaskReferenceUsageInputDto>(referenceInputCount);
-
-            for (var i = 0; i < referenceInputCount; i++)
-            {
-                referenceInputs.Add(new TaskReferenceUsageInputDto
-                {
-                    input_code = ReadNullableString(ms) ?? "",
-                    input_name = ReadNullableString(ms),
-                    unit = ReadNullableString(ms),
-                    quantity_used = FromScaledUInt64(ReadVarUInt(ms)),
-                    quantity_left = FromScaledUInt64(ReadVarUInt(ms))
-                });
-            }
-
-            var outputCount = (int)ReadVarUInt(ms);
-            var outputs = new List<TaskOutputReportDto>(outputCount);
-
-            for (var i = 0; i < outputCount; i++)
-            {
-                outputs.Add(new TaskOutputReportDto
-                {
-                    output_code = ReadNullableString(ms) ?? "",
-                    output_name = ReadNullableString(ms),
-                    unit = ReadNullableString(ms),
-                    quantity_good = FromScaledUInt64(ReadVarUInt(ms)),
-                    quantity_bad = FromScaledUInt64(ReadVarUInt(ms))
-                });
-            }
-
-            if (ms.Position != ms.Length)
-                throw new InvalidOperationException("Token has unexpected trailing bytes");
-
-            return new TaskQrTokenPayloadDto
-            {
-                task_id = taskId,
-                qty_good = qtyGood,
-                exp_unix = expUnix,
-                use_manual_input = useManualInput,
-                reason = reason,
-                report_image_url = reportImageUrl,
-                materials = materials,
-                reference_inputs = referenceInputs,
-                outputs = outputs
             };
         }
 
@@ -856,22 +629,6 @@ namespace AMMS.Application.Services
                     quantity_bad = Math.Round(x.quantity_bad, 4)
                 })
                 .ToList();
-        }
-
-        private static void EnsurePayloadCollections(TaskQrTokenPayloadDto payload)
-        {
-            payload.materials ??= new List<TaskMaterialUsageInputDto>();
-            payload.reference_inputs ??= new List<TaskReferenceUsageInputDto>();
-            payload.outputs ??= new List<TaskOutputReportDto>();
-        }
-
-        private static string NormalizeScannedV3Token(string token)
-        {
-            return new string(
-                token
-                    .Where(ch => !char.IsWhiteSpace(ch) && ch != '-')
-                    .Select(char.ToUpperInvariant)
-                    .ToArray());
         }
 
         private static string? NormalizeTokenText(string? value, int maxLength)
@@ -1022,87 +779,6 @@ namespace AMMS.Application.Services
             map['L'] = map['1'];
 
             return map;
-        }
-
-        private static string Base32Encode(byte[] data)
-        {
-            if (data == null || data.Length == 0)
-                return "";
-
-            var sb = new StringBuilder();
-            var bitBuffer = 0;
-            var bitCount = 0;
-
-            foreach (var b in data)
-            {
-                bitBuffer = (bitBuffer << 8) | b;
-                bitCount += 8;
-
-                while (bitCount >= 5)
-                {
-                    var index = (bitBuffer >> (bitCount - 5)) & 31;
-                    sb.Append(Base32Alphabet[index]);
-                    bitCount -= 5;
-                }
-            }
-
-            if (bitCount > 0)
-            {
-                var index = (bitBuffer << (5 - bitCount)) & 31;
-                sb.Append(Base32Alphabet[index]);
-            }
-
-            return sb.ToString();
-        }
-
-        private static byte[] Base32Decode(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text))
-                throw new FormatException("Empty token");
-
-            var bytes = new List<byte>();
-            var bitBuffer = 0;
-            var bitCount = 0;
-
-            foreach (var raw in text)
-            {
-                var ch = char.ToUpperInvariant(raw);
-
-                if (!_base32Map.TryGetValue(ch, out var value))
-                    throw new FormatException($"Invalid Base32 char: {raw}");
-
-                bitBuffer = (bitBuffer << 5) | value;
-                bitCount += 5;
-
-                if (bitCount >= 8)
-                {
-                    var b = (byte)((bitBuffer >> (bitCount - 8)) & 0xFF);
-                    bytes.Add(b);
-                    bitCount -= 8;
-                }
-            }
-
-            return bytes.ToArray();
-        }
-
-        private static byte[] LegacyBase62Decode(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text))
-                throw new FormatException("Empty token");
-
-            BigInteger value = BigInteger.Zero;
-
-            foreach (var ch in text)
-            {
-                if (!_legacyBase62Map.TryGetValue(ch, out var digit))
-                    throw new FormatException($"Invalid Base62 char: {ch}");
-
-                value = (value * 62) + digit;
-            }
-
-            return value.ToByteArray(
-                isUnsigned: true,
-                isBigEndian: true);
         }
     }
 }

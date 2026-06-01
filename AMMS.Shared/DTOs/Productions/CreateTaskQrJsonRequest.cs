@@ -1,5 +1,4 @@
-﻿using Microsoft.AspNetCore.Http;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -7,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace AMMS.Shared.DTOs.Productions
 {
-    public class CreateTaskQrFormRequest
+    public class CreateTaskQrJsonRequest
     {
         public int task_id { get; set; }
 
@@ -19,27 +18,22 @@ namespace AMMS.Shared.DTOs.Productions
 
         public string? reason { get; set; }
 
-        public List<IFormFile>? images { get; set; } = new();
-
+        // Cho phép FE gửi dạng string JSON giống form-data cũ
         public string? materials_json { get; set; }
 
         public string? reference_inputs_json { get; set; }
 
         public string? outputs_json { get; set; }
 
+        public string? sub_product_leftovers_json { get; set; }
+
+        // Cho phép FE gửi dạng array JSON mới
+        public List<TaskMaterialUsageInputDto>? materials { get; set; }
+
+        public List<TaskReferenceUsageInputDto>? reference_inputs { get; set; }
+
+        public List<TaskOutputReportDto>? outputs { get; set; }
+
+        public List<TaskSubProductLeftoverInputDto>? sub_product_leftovers { get; set; }
     }
-
-    public class TaskSubProductLeftoverInputDto
-    {
-        public string? process_code { get; set; }
-
-        public string? process_name { get; set; }
-
-        public string? unit { get; set; } = "sp";
-
-        public decimal quantity_left { get; set; }
-
-        public string? note { get; set; }
-    }
-
 }

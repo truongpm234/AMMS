@@ -1987,11 +1987,11 @@ namespace AMMS.Application.Services
                 var firstOutput = io.outputs.FirstOrDefault();
 
                 previousOutputQty =
-                    stage.actual_output_qty > 0
-                        ? stage.actual_output_qty
-                        : firstOutput?.estimated_qty > 0
-                            ? firstOutput.estimated_qty
-                            : io.estimatedOutputQty;
+    stage.actual_output_qty > 0
+        ? stage.actual_output_qty
+        : firstOutput?.estimated_qty > 0
+            ? firstOutput.estimated_qty
+            : estimatedOutputQty;
 
                 previousOutputName =
                     firstOutput?.name
@@ -2021,6 +2021,11 @@ namespace AMMS.Application.Services
                     ? $"Production đang ở trạng thái {prod.status}, không thể start bằng API start."
                     : dep.message;
 
+            var displayTotalQty = ResolveGroupProductionDetailTotalQty(
+    prod,
+    orderRows,
+    stages);
+
             return new GroupProductionDetailDto
             {
                 prod_id = prod.prod_id,
@@ -2031,12 +2036,166 @@ namespace AMMS.Application.Services
                 can_start_message = canStartMessage,
                 product_type_id = prod.product_type_id,
                 product_type_name = productTypeName,
-                total_qty = prod.group_total_qty,
+
+                /*
+                 * FIX:
+                 * GROUP + SUB thì total_qty hiển thị theo số lượng cần sản xuất
+                 * đã cộng hao phí, ví dụ 6290.
+                 *
+                 * GROUP + NVL/BOTH hoặc case thường thì vẫn lấy group_total_qty.
+                 */
+                total_qty = displayTotalQty,
+
                 process_codes = prod.group_process_codes,
                 orders = orderRows,
                 stages = stages,
                 previous_stage_context = previousStageContext
             };
+        }
+
+        private static bool IsGroupSubProductionForDetail(production prod)
+        {
+            return prod != null &&
+                   string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(prod.prod_method, "SUB", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static int CeilPositiveInt(decimal value, int fallback)
+        {
+            if (value <= 0)
+                return fallback > 0 ? fallback : 1;
+
+            return Math.Max(1, (int)Math.Ceiling(value));
+        }
+
+        private static int ResolveBaseGroupOrderTotalQty(
+            production prod,
+            List<GroupProductionOrderDto> orderRows)
+        {
+            if (prod != null && prod.group_total_qty > 0)
+                return prod.group_total_qty;
+
+            var fromOrders = orderRows?
+                .Where(x => x != null)
+                .Sum(x => x.qty) ?? 0;
+
+            return fromOrders > 0 ? fromOrders : 1;
+        }
+
+        private static bool IsGroupSubPlannedInput(
+            GroupStageMaterialDto input)
+        {
+            if (input == null)
+                return false;
+
+            var code = NormGroupDetailCode(input.code);
+            var name = NormGroupDetailCode(input.name);
+
+            /*
+             * BTP input chính của công đoạn group:
+             * - PREV
+             * - IN
+             * - PHU
+             * - CAN...
+             * - hoặc tên có Bán thành phẩm/BTP
+             */
+            if (code is "PREV" or "INPUT" or "BTP" or "REFERENCE")
+                return true;
+
+            if (code is "RALO" or "CAT" or "IN" or "PHU" or "CAN" or "CAN_MANG" or "BOI" or "BE" or "DUT" or "DAN")
+                return true;
+
+            return name.Contains("BAN_THANH_PHAM") ||
+                   name.Contains("BTP") ||
+                   name.Contains("CONG_DOAN") ||
+                   name.Contains("GIAY_DA_CAT");
+        }
+
+        private static decimal ResolveGroupSubQtyWithWasteFromStages(
+            List<GroupProductionStageDto> stages)
+        {
+            if (stages == null || stages.Count == 0)
+                return 0m;
+
+            var candidates = new List<decimal>();
+
+            foreach (var stage in stages)
+            {
+                if (stage == null)
+                    continue;
+
+                /*
+                 * estimated_output_qty đã được merge từ qr-prepare.
+                 * Với case của bạn PHU/CAN = 6290.
+                 */
+                if (stage.estimated_output_qty > 0)
+                    candidates.Add(stage.estimated_output_qty);
+
+                if (stage.outputs != null)
+                {
+                    foreach (var output in stage.outputs)
+                    {
+                        if (output == null)
+                            continue;
+
+                        if (output.estimated_qty > 0)
+                            candidates.Add(output.estimated_qty);
+                    }
+                }
+
+                if (stage.input_materials != null)
+                {
+                    foreach (var input in stage.input_materials)
+                    {
+                        if (input == null)
+                            continue;
+
+                        if (!IsGroupSubPlannedInput(input))
+                            continue;
+
+                        if (input.estimated_qty > 0)
+                            candidates.Add(input.estimated_qty);
+                    }
+                }
+            }
+
+            return candidates
+                .Where(x => x > 0)
+                .DefaultIfEmpty(0m)
+                .Max();
+        }
+
+        private static int ResolveGroupProductionDetailTotalQty(
+            production prod,
+            List<GroupProductionOrderDto> orderRows,
+            List<GroupProductionStageDto> stages)
+        {
+            var baseQty = ResolveBaseGroupOrderTotalQty(
+                prod,
+                orderRows);
+
+            /*
+             * Chỉ GROUP + SUB mới đổi total_qty theo số lượng đã cộng hao phí.
+             * Các case khác giữ nguyên group_total_qty để tránh ảnh hưởng flow NVL/BOTH.
+             */
+            if (!IsGroupSubProductionForDetail(prod))
+                return baseQty;
+
+            var qtyWithWaste = ResolveGroupSubQtyWithWasteFromStages(
+                stages);
+
+            /*
+             * Không bao giờ để total_qty nhỏ hơn tổng quantity order ghép.
+             * Ví dụ:
+             * baseQty = 6000
+             * qtyWithWaste = 6290
+             * => total_qty = 6290
+             */
+            var finalQty = Math.Max(
+                baseQty,
+                CeilPositiveInt(qtyWithWaste, baseQty));
+
+            return finalQty;
         }
 
         private static decimal ResolveEstimatedGroupOutputQty(

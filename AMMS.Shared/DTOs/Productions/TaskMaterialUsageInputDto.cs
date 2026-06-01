@@ -12,5 +12,10 @@ namespace AMMS.Shared.DTOs.Productions
         public decimal quantity_used { get; set; }
         public bool is_stock { get; set; } = true;
         public decimal quantity_left { get; set; }
+        public string material_code { get; set; }
+
+        public string material_name { get; set; }
+
+        public string unit { get; set; }
     }
 }

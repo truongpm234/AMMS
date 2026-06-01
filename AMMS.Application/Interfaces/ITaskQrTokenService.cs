@@ -9,12 +9,7 @@ namespace AMMS.Application.Interfaces
 {
     public interface ITaskQrTokenService
     {
-        string CreateToken(int taskId, int qtyGood, TimeSpan ttl);
-        string CreateToken(
-            int taskId,
-            int qtyGood,
-            IReadOnlyList<TaskMaterialUsageInputDto>? materials,
-            TimeSpan ttl);
+        
         string CreateToken(
         int taskId,
         int qtyGood,
