@@ -30,6 +30,7 @@
         public bool can_group { get; set; } = false;
         public bool? can_start { get; set; }
         public string? can_start_message { get; set; }
+        public List<int>? list_order_id { get; set; }
         public List<ProductionStageStatusDto> stage_statuses { get; set; } = new();
         public List<string> stages { get; set; } = new();
         public int prod_id { get; set; }

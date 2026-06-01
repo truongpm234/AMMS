@@ -708,12 +708,31 @@ namespace AMMS.Infrastructure.Repositories
 
                 var canStart = canStartResult.can_start;
                 var canStartMessage = canStartResult.message;
+                List<int>? listOrderId = null;
 
+                if (isGroupRow)
+                {
+                    groupMembersByGroupProdId.TryGetValue(
+                        r.prod_id,
+                        out var membersForListOrderId);
+
+                    membersForListOrderId ??= new List<ProdOrderInfoDto>();
+
+                    listOrderId = membersForListOrderId
+                        .Where(x => x.order_id > 0)
+                        .Where(x =>
+                            string.IsNullOrWhiteSpace(x.status) ||
+                            !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                        .Select(x => x.order_id)
+                        .Distinct()
+                        .OrderBy(x => x)
+                        .ToList();
+                }
                 result.Add(new ProducingOrderCardDto
                 {
                     prod_id = r.prod_id,
                     production_id = r.prod_id,
-
+                    list_order_id = listOrderId,
                     order_id = r.order_id,
                     code = r.code,
 
