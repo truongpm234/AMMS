@@ -17,6 +17,7 @@ namespace AMMS.Application.Services
         private readonly AppDbContext _db;
         private readonly NotificationService _noti;
         private readonly IHubContext<RealtimeHub> _hub;
+        private readonly ITaskScanService _scanSvc;
         private static readonly string[] Dept1Codes = { "RALO", "CAT", "IN" };
         private static readonly string[] Dept2Codes = { "PHU", "CAN", "CAN_MANG", "BOI" };
         private static readonly string[] Dept3Codes = { "BE", "DUT", "DAN" };
@@ -30,11 +31,12 @@ namespace AMMS.Application.Services
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         };
 
-        public GroupProductionService(AppDbContext db, NotificationService noti, IHubContext<RealtimeHub> hub)
+        public GroupProductionService(AppDbContext db, NotificationService noti, IHubContext<RealtimeHub> hub, ITaskScanService scanSvc)
         {
             _db = db;
             _noti = noti;
             _hub = hub;
+            _scanSvc = scanSvc;
         }
 
         public async Task<List<GroupProductionCandidateDto>> GetCandidatesAsync(
@@ -1894,30 +1896,60 @@ namespace AMMS.Application.Services
                     })
                     .ToList();
 
+                var baseGroupQty = prod.group_total_qty > 0
+    ? prod.group_total_qty
+    : orderRows.Sum(x => x.qty);
+
                 var io = BuildGroupStageIO(
                     task.process?.process_code,
                     task.process?.process_name,
-                    prod.group_total_qty > 0 ? prod.group_total_qty : orderRows.Sum(x => x.qty),
+                    baseGroupQty,
                     previousOutputQty,
                     previousOutputName,
                     taskLogs);
 
                 /*
-                 * FIX:
-                 * actualOutput ưu tiên output_json.
-                 * Nếu output_json trống thì fallback qty_good.
+                 * FIX CHÍNH:
+                 * Luôn lấy estimate từ qr-prepare bundle trước.
+                 * Nhờ vậy task chưa finish/chưa có log vẫn hiển thị estimated input material.
+                 *
+                 * Ví dụ task CAN chưa finish:
+                 * - BuildGroupStageIO cũ tạo LAMINATION estimated_qty = 0
+                 * - qrBundle.consumable_materials có MANG_12MIC estimated_input_qty
+                 * - Sau merge, detail sẽ hiển thị Màng cán 12 mic estimated_qty đúng.
                  */
-                var actualOutput = ResolveGroupActualOutputQty(taskLogs);
+                var qrBundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
+                    task.task_id,
+                    ct);
+
+                ApplyQrPrepareEstimateToGroupStageIo(
+                    io.inputs,
+                    io.outputs,
+                    qrBundle,
+                    task.process?.process_code,
+                    task.process?.process_name,
+                    previousOutputQty,
+                    previousOutputName);
 
                 /*
-                 * FIX:
-                 * input_materials / outputs phải lấy lại data từ JSON log,
-                 * vì log có material_usage_json/reference_input_json/output_json đầy đủ.
+                 * Log thực tế vẫn apply sau cùng để override actual_qty.
+                 * Estimate giữ theo qr-prepare nếu log chưa có.
                  */
                 ApplyTaskLogJsonToGroupStageIo(
                     io.inputs,
                     io.outputs,
                     taskLogs);
+
+                /*
+                 * actualOutput ưu tiên output_json.
+                 * Nếu output_json trống thì fallback qty_good.
+                 */
+                var actualOutput = ResolveGroupActualOutputQty(taskLogs);
+
+                var estimatedOutputQty = ResolveEstimatedGroupOutputQty(
+                    io.outputs,
+                    io.estimatedOutputQty,
+                    previousOutputQty);
 
                 var stage = new GroupProductionStageDto
                 {
@@ -1929,7 +1961,7 @@ namespace AMMS.Application.Services
                     start_time = task.start_time,
                     end_time = task.end_time,
 
-                    estimated_output_qty = io.estimatedOutputQty,
+                    estimated_output_qty = estimatedOutputQty,
 
                     actual_output_qty = actualOutput > 0
                         ? actualOutput
@@ -2007,6 +2039,425 @@ namespace AMMS.Application.Services
             };
         }
 
+        private static decimal ResolveEstimatedGroupOutputQty(
+    List<GroupStageMaterialDto>? outputs,
+    decimal fallbackEstimatedOutput,
+    decimal previousOutputQty)
+        {
+            var fromOutputs = outputs?
+                .Where(x => x != null)
+                .Select(x => x.estimated_qty)
+                .DefaultIfEmpty(0m)
+                .Max() ?? 0m;
+
+            if (fromOutputs > 0)
+                return Math.Round(fromOutputs, 4);
+
+            if (fallbackEstimatedOutput > 0)
+                return Math.Round(fallbackEstimatedOutput, 4);
+
+            if (previousOutputQty > 0)
+                return Math.Round(previousOutputQty, 4);
+
+            return 0m;
+        }
+
+        private static void ApplyQrPrepareEstimateToGroupStageIo(
+            List<GroupStageMaterialDto> inputs,
+            List<GroupStageMaterialDto> outputs,
+            TaskQrMaterialBundleDto? qrBundle,
+            string? processCode,
+            string? processName,
+            decimal previousOutputQty,
+            string? previousOutputName)
+        {
+            if (inputs == null)
+                return;
+
+            if (outputs == null)
+                return;
+
+            if (qrBundle == null)
+                return;
+
+            /*
+             * 1. Merge BTP/reference input estimate.
+             * Đây là dòng "BTP sau phủ" hoặc "Bán thành phẩm từ công đoạn IN".
+             */
+            ApplyQrReferenceInputEstimateToGroupInputs(
+                inputs,
+                qrBundle.reference_inputs,
+                previousOutputQty,
+                previousOutputName);
+
+            /*
+             * 2. Merge NVL/consumable estimate.
+             * Đây là các dòng như:
+             * - KEO_PHU_NUOC
+             * - MANG_12MIC
+             * - KEO_BOI
+             * - WAVE...
+             */
+            ApplyQrConsumableEstimateToGroupInputs(
+                inputs,
+                qrBundle.consumable_materials);
+
+            /*
+             * 3. Đồng bộ output estimate.
+             * Nếu BTP input estimate là 6290 thì output estimate của task cũng nên là 6290,
+             * trừ khi sau này có rule riêng làm giảm output.
+             */
+            ApplyQrEstimateToGroupOutputs(
+                outputs,
+                qrBundle.reference_inputs,
+                processCode,
+                processName);
+        }
+
+        private static void ApplyQrReferenceInputEstimateToGroupInputs(
+            List<GroupStageMaterialDto> inputs,
+            IReadOnlyList<TaskReferenceInputDto>? referenceInputs,
+            decimal previousOutputQty,
+            string? previousOutputName)
+        {
+            var refs = referenceInputs?
+                .Where(x => x != null)
+                .Where(x => x.estimated_qty > 0 || x.actual_qty_prev_stage > 0)
+                .ToList() ?? new List<TaskReferenceInputDto>();
+
+            decimal estimateQty = 0m;
+
+            if (refs.Count > 0)
+            {
+                /*
+                 * Với GROUP + SUB, qr-prepare đã normalize:
+                 * estimated_qty = planned BTP input có hao phí.
+                 */
+                estimateQty = refs.Sum(x =>
+                    x.estimated_qty > 0
+                        ? x.estimated_qty
+                        : x.actual_qty_prev_stage);
+            }
+            else if (previousOutputQty > 0)
+            {
+                estimateQty = previousOutputQty;
+            }
+
+            if (estimateQty <= 0)
+                return;
+
+            estimateQty = Math.Round(estimateQty, 4);
+
+            var firstRef = refs.FirstOrDefault();
+
+            var input = inputs.FirstOrDefault(x =>
+                IsGroupPrevInputCode(x.code) ||
+                IsLikelyGroupBtpInput(x) ||
+                refs.Any(r => SameGroupDetailCode(r.input_code, x.code)));
+
+            if (input == null)
+            {
+                input = new GroupStageMaterialDto
+                {
+                    code = firstRef?.input_code ?? "PREV",
+                    name = firstRef?.input_name
+                           ?? previousOutputName
+                           ?? "Bán thành phẩm từ công đoạn trước",
+                    unit = firstRef?.unit ?? "tờ",
+                    estimated_qty = estimateQty,
+                    actual_qty = 0
+                };
+
+                inputs.Insert(0, input);
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(firstRef?.input_code) &&
+                IsGroupPrevInputCode(input.code))
+            {
+                /*
+                 * Nếu đang là PREV thì có thể giữ PREV hoặc đổi sang IN/PHU.
+                 * Để ít ảnh hưởng FE, giữ code PREV nếu FE đang dùng PREV.
+                 */
+                input.code = string.IsNullOrWhiteSpace(input.code)
+                    ? firstRef.input_code
+                    : input.code;
+            }
+
+            if (!string.IsNullOrWhiteSpace(firstRef?.input_name))
+                input.name = firstRef.input_name;
+            else if (!string.IsNullOrWhiteSpace(previousOutputName))
+                input.name = previousOutputName;
+
+            if (!string.IsNullOrWhiteSpace(firstRef?.unit))
+                input.unit = NormalizeGroupUnit(firstRef.unit);
+
+            input.estimated_qty = estimateQty;
+
+            /*
+             * Không set actual_qty ở đây.
+             * actual_qty chỉ lấy từ log sau khi task finish.
+             */
+        }
+
+        private static void ApplyQrConsumableEstimateToGroupInputs(
+            List<GroupStageMaterialDto> inputs,
+            IReadOnlyList<TaskConsumableMaterialDto>? consumables)
+        {
+            var mats = consumables?
+                .Where(x => x != null)
+                .Where(x => x.estimated_input_qty > 0)
+                .Where(x => x.is_mapped)
+                .ToList() ?? new List<TaskConsumableMaterialDto>();
+
+            if (mats.Count == 0)
+                return;
+
+            foreach (var mat in mats)
+            {
+                var estimatedQty = Math.Round(mat.estimated_input_qty, 4);
+
+                if (estimatedQty <= 0)
+                    continue;
+
+                var input = inputs.FirstOrDefault(x =>
+                    MatchesQrConsumableWithGroupInput(x, mat));
+
+                if (input == null)
+                {
+                    inputs.Add(new GroupStageMaterialDto
+                    {
+                        code = mat.material_code,
+                        name = mat.material_name,
+                        unit = mat.unit,
+                        estimated_qty = estimatedQty,
+                        actual_qty = 0
+                    });
+
+                    continue;
+                }
+
+                /*
+                 * Nếu BuildGroupStageIO tạo placeholder như LAMINATION/COATING,
+                 * đổi sang material thật để FE thấy rõ.
+                 */
+                if (!string.IsNullOrWhiteSpace(mat.material_code))
+                    input.code = mat.material_code;
+
+                if (!string.IsNullOrWhiteSpace(mat.material_name))
+                    input.name = mat.material_name;
+
+                if (!string.IsNullOrWhiteSpace(mat.unit))
+                    input.unit = mat.unit;
+
+                input.estimated_qty = estimatedQty;
+
+                /*
+                 * Không set actual_qty ở đây.
+                 * actual_qty sẽ được ApplyTaskLogJsonToGroupStageIo set từ material_usage_json.
+                 */
+            }
+        }
+
+        private static void ApplyQrEstimateToGroupOutputs(
+            List<GroupStageMaterialDto> outputs,
+            IReadOnlyList<TaskReferenceInputDto>? referenceInputs,
+            string? processCode,
+            string? processName)
+        {
+            if (outputs == null)
+                return;
+
+            var estimatedInputQty = referenceInputs?
+                .Where(x => x != null)
+                .Where(x => x.estimated_qty > 0 || x.actual_qty_prev_stage > 0)
+                .Sum(x => x.estimated_qty > 0 ? x.estimated_qty : x.actual_qty_prev_stage)
+                ?? 0m;
+
+            if (estimatedInputQty <= 0)
+                return;
+
+            estimatedInputQty = Math.Round(estimatedInputQty, 4);
+
+            var code = NormGroupDetailCode(processCode);
+
+            var output = outputs.FirstOrDefault(x =>
+                SameGroupDetailCode(x.code, code));
+
+            if (output == null)
+            {
+                output = new GroupStageMaterialDto
+                {
+                    code = code,
+                    name = ResolveGroupOutputNameForDetail(code, processName),
+                    unit = code is "BE" or "DUT" or "DAN" ? "sp" : "tờ",
+                    estimated_qty = estimatedInputQty,
+                    actual_qty = 0
+                };
+
+                outputs.Add(output);
+                return;
+            }
+
+            /*
+             * Chỉ update estimate.
+             * actual_qty sẽ được set từ output_json/qty_good sau khi task finish.
+             */
+            output.estimated_qty = estimatedInputQty;
+
+            if (string.IsNullOrWhiteSpace(output.name))
+                output.name = ResolveGroupOutputNameForDetail(code, processName);
+
+            if (string.IsNullOrWhiteSpace(output.unit))
+                output.unit = code is "BE" or "DUT" or "DAN" ? "sp" : "tờ";
+        }
+
+        private static bool MatchesQrConsumableWithGroupInput(
+            GroupStageMaterialDto input,
+            TaskConsumableMaterialDto mat)
+        {
+            if (input == null || mat == null)
+                return false;
+
+            var inputCode = NormGroupDetailCode(input.code);
+            var inputName = NormGroupDetailCode(input.name);
+
+            var matCode = NormGroupDetailCode(mat.material_code);
+            var matName = NormGroupDetailCode(mat.material_name);
+
+            if (!string.IsNullOrWhiteSpace(matCode) &&
+                SameGroupDetailCode(inputCode, matCode))
+            {
+                return true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(matName) &&
+                SameGroupDetailCode(inputName, matName))
+            {
+                return true;
+            }
+
+            /*
+             * Match placeholder cũ:
+             * - COATING -> KEO_PHU_NUOC
+             * - LAMINATION -> MANG_12MIC
+             * - KEO_BOI -> keo bồi
+             * - WAVE -> sóng carton
+             */
+            if (IsGroupCoatingCode(inputCode) && IsQrCoatingMaterial(matCode, matName))
+                return true;
+
+            if (IsGroupLaminationCode(inputCode) && IsQrLaminationMaterial(matCode, matName))
+                return true;
+
+            if (IsGroupMountingGlueCode(inputCode) && IsQrMountingGlueMaterial(matCode, matName))
+                return true;
+
+            if (inputCode == "WAVE" && IsQrWaveMaterial(matCode, matName))
+                return true;
+
+            return false;
+        }
+
+        private static bool IsLikelyGroupBtpInput(GroupStageMaterialDto input)
+        {
+            if (input == null)
+                return false;
+
+            var code = NormGroupDetailCode(input.code);
+            var name = NormGroupDetailCode(input.name);
+
+            if (code is "PREV" or "INPUT" or "BTP" or "REFERENCE")
+                return true;
+
+            if (code is "RALO" or "CAT" or "IN" or "PHU" or "CAN" or "CAN_MANG" or "BOI" or "BE" or "DUT" or "DAN")
+                return true;
+
+            return name.Contains("BAN_THANH_PHAM") ||
+                   name.Contains("BTP") ||
+                   name.Contains("CONG_DOAN") ||
+                   name.Contains("GIAY_DA_CAT");
+        }
+
+        private static bool IsQrCoatingMaterial(string? code, string? name)
+        {
+            var c = NormGroupDetailCode(code);
+            var n = NormGroupDetailCode(name);
+
+            return c.Contains("KEO_PHU") ||
+                   c.Contains("PHU_NUOC") ||
+                   c.Contains("COATING") ||
+                   n.Contains("KEO_PHU") ||
+                   n.Contains("PHU_NUOC") ||
+                   n.Contains("COATING");
+        }
+
+        private static bool IsQrLaminationMaterial(string? code, string? name)
+        {
+            var c = NormGroupDetailCode(code);
+            var n = NormGroupDetailCode(name);
+
+            return c.Contains("MANG") ||
+                   c.Contains("LAMINATION") ||
+                   c.Contains("CAN_MANG") ||
+                   n.Contains("MANG") ||
+                   n.Contains("LAMINATION") ||
+                   n.Contains("CAN_MANG");
+        }
+
+        private static bool IsQrMountingGlueMaterial(string? code, string? name)
+        {
+            var c = NormGroupDetailCode(code);
+            var n = NormGroupDetailCode(name);
+
+            return c.Contains("KEO_BOI") ||
+                   c.Contains("MOUNTING") ||
+                   n.Contains("KEO_BOI") ||
+                   n.Contains("MOUNTING");
+        }
+
+        private static bool IsQrWaveMaterial(string? code, string? name)
+        {
+            var c = NormGroupDetailCode(code);
+            var n = NormGroupDetailCode(name);
+
+            return c.Contains("SONG") ||
+                   c.Contains("WAVE") ||
+                   n.Contains("SONG") ||
+                   n.Contains("WAVE");
+        }
+
+        private static string NormalizeGroupUnit(string? unit)
+        {
+            if (string.IsNullOrWhiteSpace(unit))
+                return "tờ";
+
+            var u = unit.Trim();
+
+            if (string.Equals(u, "sp", StringComparison.OrdinalIgnoreCase))
+                return "tờ";
+
+            return u;
+        }
+
+        private static string ResolveGroupOutputNameForDetail(
+            string? processCode,
+            string? processName)
+        {
+            var code = NormGroupDetailCode(processCode);
+
+            return code switch
+            {
+                "PHU" => "BTP sau phủ",
+                "CAN" => "BTP sau cán",
+                "CAN_MANG" => "BTP sau cán màng",
+                "BOI" => "BTP sau bồi",
+                "BE" => "BTP sau bế",
+                "DUT" => "BTP sau dứt",
+                "DAN" => "Thành phẩm sau dán",
+                _ => $"BTP sau {processName ?? processCode}"
+            };
+        }
         public async Task<GroupProductionConfirmPreviewResponse> PreviewAsync(
     CreateGroupProductionRequest req,
     CancellationToken ct = default)
