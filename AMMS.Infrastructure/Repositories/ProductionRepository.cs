@@ -1493,8 +1493,150 @@ namespace AMMS.Infrastructure.Repositories
                 };
             }
 
+            ApplyGroupSubDisplayQuantityWithWasteToHeader(
+    dto,
+    header.pr,
+    stages);
+
             dto.stages = stages;
+
+            dto.all_tasks_finished = stages.Count > 0 &&
+                stages.All(x => string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase));
+
+            dto.waiting_manual_importing =
+                string.Equals(dto.production_status, "Importing", StringComparison.OrdinalIgnoreCase);
+
             return dto;
+        }
+
+        private static bool IsGroupSubProductionForDetail(production prod)
+        {
+            return prod != null &&
+                   string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(prod.prod_method, "SUB", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static int CeilPositiveIntForDetail(decimal value, int fallback)
+        {
+            if (value <= 0)
+                return fallback > 0 ? fallback : 1;
+
+            return Math.Max(1, (int)Math.Ceiling(value));
+        }
+
+        private static bool IsPlannedSubInputWithWaste(StageMaterialDto input)
+        {
+            if (input == null)
+                return false;
+
+            return string.Equals(
+                input.quantity_source,
+                "PlannedSubInputWithWaste",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static decimal ResolveGroupSubQuantityWithWasteFromStages(
+            production prod,
+            List<ProductionStageDto> stages)
+        {
+            var baseQty = prod?.group_total_qty > 0
+                ? prod.group_total_qty
+                : 0;
+
+            if (stages == null || stages.Count == 0)
+                return baseQty;
+
+            var candidates = new List<decimal>();
+
+            foreach (var stage in stages)
+            {
+                if (stage == null)
+                    continue;
+
+                /*
+                 * Sau khi sửa ApplySubFirstDownstreamActualEstimateAsync,
+                 * PHU/CAN sẽ có estimated_output_quantity = 6290.
+                 */
+                if (stage.estimated_output_quantity > 0)
+                    candidates.Add(stage.estimated_output_quantity);
+
+                if (stage.output_product != null)
+                {
+                    if (stage.output_product.estimated_quantity > 0)
+                        candidates.Add(stage.output_product.estimated_quantity);
+
+                    if (stage.output_product.quantity > 0)
+                        candidates.Add(stage.output_product.quantity);
+                }
+
+                /*
+                 * Input chính của PHU/CAN đã được set:
+                 * quantity_source = PlannedSubInputWithWaste
+                 * quantity/estimated_quantity/actual_quantity = 6290
+                 */
+                if (stage.input_materials != null && stage.input_materials.Count > 0)
+                {
+                    foreach (var input in stage.input_materials)
+                    {
+                        if (!IsPlannedSubInputWithWaste(input))
+                            continue;
+
+                        if (input.estimated_quantity > 0)
+                            candidates.Add(input.estimated_quantity);
+
+                        if (input.quantity > 0)
+                            candidates.Add(input.quantity);
+
+                        if (input.actual_quantity > 0)
+                            candidates.Add((decimal)input.actual_quantity);
+                    }
+                }
+            }
+
+            var maxCandidate = candidates
+                .Where(x => x > 0)
+                .DefaultIfEmpty(baseQty)
+                .Max();
+
+            /*
+             * Không bao giờ để quantity nhỏ hơn group_total_qty.
+             * Ví dụ:
+             * group_total_qty = 6000
+             * planned with waste = 6290
+             * => return 6290
+             */
+            return Math.Max(baseQty, maxCandidate);
+        }
+
+        private static void ApplyGroupSubDisplayQuantityWithWasteToHeader(
+            ProductionDetailDto dto,
+            production prod,
+            List<ProductionStageDto> stages)
+        {
+            if (dto == null || prod == null)
+                return;
+
+            if (!IsGroupSubProductionForDetail(prod))
+                return;
+
+            var baseQty = prod.group_total_qty > 0
+                ? prod.group_total_qty
+                : dto.quantity;
+
+            var quantityWithWaste = ResolveGroupSubQuantityWithWasteFromStages(
+                prod,
+                stages);
+
+            if (quantityWithWaste <= 0)
+                return;
+
+            /*
+             * ProductionDetailDto.quantity của bạn đang trả int trong JSON.
+             * Nên dùng Ceiling để tránh mất phần lẻ nếu sau này số có decimal.
+             */
+            dto.quantity = CeilPositiveIntForDetail(
+                quantityWithWaste,
+                baseQty);
         }
 
         private static readonly JsonSerializerOptions DetailJsonOptions = new()
