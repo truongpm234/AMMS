@@ -339,6 +339,30 @@ namespace AMMS.Application.Services
              */
             return result;
         }
+        private async Task<int> ResolveGroupSubPlannedInputQtyForScanAsync(
+    task currentTask,
+    production prod,
+    CancellationToken ct)
+        {
+            /*
+             * Ưu tiên dùng bundle reference_inputs vì đây là nơi đã tính estimated_qty = 6290.
+             */
+            var bundle = await GetTaskQrMaterialBundleAsync(
+                currentTask.task_id,
+                ct);
+
+            var estimated = bundle.reference_inputs?
+                .Where(x => x != null)
+                .Sum(x => x.estimated_qty) ?? 0m;
+
+            if (estimated > 0)
+                return (int)Math.Ceiling(estimated);
+
+            if (prod.group_total_qty > 0)
+                return prod.group_total_qty;
+
+            return 1;
+        }
 
         private async Task<int> ResolveMaxAllowedFinishQtyForTaskAsync(
     task currentTask,
@@ -362,6 +386,20 @@ namespace AMMS.Application.Services
              * max_allowed phải tính theo tổng output sau công đoạn hiện tại
              * của từng order, có cộng hao hụt SUB.
              */
+            if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.Equals(prod.prod_method, "SUB", StringComparison.OrdinalIgnoreCase))
+                {
+                    return await ResolveGroupSubPlannedInputQtyForScanAsync(
+                        currentTask,
+                        prod,
+                        ct);
+                }
+
+                /*
+                 * Logic cũ cho GROUP + NVL / BOTH giữ nguyên phía dưới.
+                 */
+            }
             if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
             {
                 var links = await _db.task_links
@@ -1770,22 +1808,46 @@ namespace AMMS.Application.Services
                 routeProcessCodes: routeCodes,
                 ctx: ctx);
 
+            var estimatedInputQty = Math.Round(shape.qty, 4);
+
             var actualQtyPrevStage = await ResolveActualOutputQtyForOrderProcessAsync(
                 link.order_id,
                 previousCode,
                 ct);
 
+            /*
+             * FIX GROUP + SUB:
+             * Với group production dùng SUB, actual_qty_prev_stage không nên lấy từ log IN thật,
+             * vì log IN có thể là số auto-finished/tồn kho/sub cũ và có thể lớn hơn lượng BTP cần cấp.
+             *
+             * Lượng chuẩn để FE validate là estimatedInputQty, ví dụ 6290.
+             */
+            var isGroupSub =
+                ctx.Production != null &&
+                string.Equals(ctx.Production.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(ctx.Production.prod_method, "SUB", StringComparison.OrdinalIgnoreCase);
+
+            var displayActualQty = isGroupSub
+                ? estimatedInputQty
+                : Math.Round(actualQtyPrevStage, 4);
+
             return new List<TaskReferenceInputDto>
+{
+    new TaskReferenceInputDto
     {
-        new TaskReferenceInputDto
-        {
-            input_code = previousCode,
-            input_name = $"Bán thành phẩm từ công đoạn {previousCode}",
-            unit = shape.unit,
-            estimated_qty = Math.Round(shape.qty, 4),
-            actual_qty_prev_stage = Math.Round(actualQtyPrevStage, 4)
-        }
-    };
+        input_code = previousCode,
+        input_name = $"Bán thành phẩm từ công đoạn {previousCode}",
+        unit = shape.unit,
+
+        /*
+         * Ví dụ GROUP + SUB:
+         * estimated_qty = 6290
+         * actual_qty_prev_stage = 6290
+         */
+        estimated_qty = estimatedInputQty,
+        actual_qty_prev_stage = displayActualQty
+    }
+};
         }
 
         private async Task<(string unit, decimal qty)?> TryResolveReferenceInputShapeByProductionMethodAsync(

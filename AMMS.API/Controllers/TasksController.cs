@@ -98,8 +98,8 @@ public class TasksController : ControllerBase
          * GROUP production
          *
          * Với GROUP + SUB:
-         * - suggested_qty vẫn là group_total_qty, ví dụ 6000.
-         * - max_allowed phải lấy theo actual_qty_prev_stage từ reference_inputs, ví dụ 7674.
+         * - suggested_qty vẫn là group_total_qty, ví dụ 6000 -> 6290.
+         * - max_allowed phải lấy theo 6290.
          *
          * Với GROUP + NVL/BOTH:
          * - giữ logic cũ, max_allowed theo group_total_qty.
@@ -132,17 +132,15 @@ public class TasksController : ControllerBase
 
                 /*
                  * GROUP + SUB:
-                 * max_allowed = actual_qty_prev_stage
-                 *
-                 * Ví dụ:
-                 * group_total_qty = 6000
-                 * reference_inputs.actual_qty_prev_stage = 7674
-                 * => max_allowed = 7674
+                 * max_allowed = BTP planned input, ví dụ 6290.
                  */
                 max_allowed = groupPolicy.MaxAllowed,
                 suggested_qty = groupPolicy.SuggestedQty,
                 happy_case_qty = groupPolicy.HappyCaseQty,
 
+                /*
+                 * order_qty vẫn là số lượng đơn ghép: 6000.
+                 */
                 order_qty = taskForPrepare.prod!.group_total_qty,
 
                 sheets_required = 0,
@@ -169,7 +167,12 @@ public class TasksController : ControllerBase
                 manual_input_hint = groupPolicy.Hint,
 
                 consumable_materials = groupBundle.consumable_materials,
-                reference_inputs = groupBundle.reference_inputs
+
+                /*
+                 * FIX:
+                 * Không trả reference_inputs cũ có actual_qty_prev_stage = 7674.
+                 */
+                reference_inputs = groupPolicy.ReferenceInputs
             });
         }
 
@@ -328,9 +331,17 @@ public class TasksController : ControllerBase
 
         if (!dep.can_start)
         {
+            var currentTaskMeta = await _db.tasks
+                .AsNoTracking()
+                .Include(x => x.process)
+                .FirstOrDefaultAsync(x => x.task_id == req.task_id, ct);
+
             return BadRequest(new
             {
                 message = "Chưa thể tạo QR vì công đoạn trước đó chưa hoàn thành.",
+                task_id = req.task_id,
+                prod_id = currentTaskMeta?.prod_id,
+                process_code = currentTaskMeta?.process?.process_code,
                 detail = dep.message,
                 issues = dep.issues
             });
@@ -386,13 +397,24 @@ public class TasksController : ControllerBase
          */
         if (isGroupTask)
         {
-            var maxAllowed = taskMeta.prod?.group_total_qty ?? 0;
+            var preparedBundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
+                req.task_id,
+                ct);
+
+            var groupPolicy = await ResolveGroupQrQtyPolicyAsync(
+                taskMeta,
+                preparedReferenceInputs: preparedBundle.reference_inputs,
+                submittedReferenceInputs: qrReferenceInputs,
+                ct: ct);
+
+            var maxAllowed = groupPolicy.MaxAllowed;
+            var suggestedQty = groupPolicy.SuggestedQty;
 
             if (maxAllowed <= 0)
             {
                 return BadRequest(new
                 {
-                    message = "Production ghép chưa có group_total_qty hợp lệ.",
+                    message = "Production ghép chưa có số lượng hợp lệ.",
                     task_id = req.task_id,
                     prod_id = taskMeta.prod_id
                 });
@@ -401,7 +423,7 @@ public class TasksController : ControllerBase
             var isAuto = !req.qty_good.HasValue || req.qty_good.Value <= 0;
 
             var qtyGood = isAuto
-                ? maxAllowed
+                ? suggestedQty
                 : req.qty_good!.Value;
 
             if (qtyGood <= 0)
@@ -418,14 +440,26 @@ public class TasksController : ControllerBase
             {
                 return BadRequest(new
                 {
-                    message = "Số lượng báo cáo group vượt tổng số lượng production ghép.",
+                    message =
+                        $"Số lượng báo cáo group không hợp lệ. " +
+                        $"Công đoạn [{taskMeta.process?.process_code} - {taskMeta.process?.process_name}] " +
+                        $"chỉ cho phép tối đa {maxAllowed} {groupPolicy.QtyUnit}.",
+
                     task_id = req.task_id,
                     input_qty_good = qtyGood,
                     max_allowed = maxAllowed,
-                    suggested_qty = maxAllowed
+                    suggested_qty = suggestedQty,
+                    qty_unit = groupPolicy.QtyUnit,
+                    hint = groupPolicy.Hint
                 });
             }
 
+            /*
+             * GROUP + SUB:
+             * Nếu FE gửi reference_inputs_json cũ theo actual 7674,
+             * không dùng số đó để validate nữa.
+             * Token vẫn giữ input FE gửi, nhưng max đã được kiểm soát bởi policy mới.
+             */
             var token = _tokenSvc.CreateToken(
                 req.task_id,
                 qtyGood,
@@ -434,7 +468,7 @@ public class TasksController : ControllerBase
                 useManualInput: true,
                 reason: reason,
                 reportImageUrl: reportImageUrl,
-                referenceInputs: qrReferenceInputs, 
+                referenceInputs: qrReferenceInputs,
                 outputs: formOutputs);
 
             return Ok(new TaskQrResponse
@@ -446,10 +480,10 @@ public class TasksController : ControllerBase
                 qty_good_used = qtyGood,
                 is_auto_filled = isAuto,
 
-                min_allowed = 1,
-                max_allowed = maxAllowed,
-                suggested_qty = maxAllowed,
-                qty_unit = "sp",
+                min_allowed = groupPolicy.MinAllowed,
+                max_allowed = groupPolicy.MaxAllowed,
+                suggested_qty = groupPolicy.SuggestedQty,
+                qty_unit = groupPolicy.QtyUnit,
 
                 process_code = taskMeta.process?.process_code,
                 process_name = taskMeta.process?.process_name,
@@ -457,7 +491,7 @@ public class TasksController : ControllerBase
                 embedded_material_count = req.materials.Count,
 
                 consumable_materials = new List<TaskConsumableMaterialDto>(),
-                reference_inputs = new List<TaskReferenceInputDto>()
+                reference_inputs = groupPolicy.ReferenceInputs
             });
         }
 
@@ -1067,26 +1101,21 @@ public class TasksController : ControllerBase
 
         public int MinAllowed { get; set; } = 1;
 
-        /*
-         * Với GROUP + SUB:
-         * - SuggestedQty = group_total_qty, ví dụ 6000.
-         * - MaxAllowed = actual_qty_prev_stage, ví dụ 7674.
-         */
         public int MaxAllowed { get; set; }
         public int SuggestedQty { get; set; }
         public int HappyCaseQty { get; set; }
 
         public string QtyUnit { get; set; } = "sp";
         public string Hint { get; set; } = "";
+
+        public List<TaskReferenceInputDto> ReferenceInputs { get; set; } = new();
     }
 
-    private static string NormQrCode(string? value)
+    private static int CeilPositive(decimal value)
     {
-        return (value ?? "")
-            .Trim()
-            .ToUpperInvariant()
-            .Replace(" ", "_")
-            .Replace("-", "_");
+        return value <= 0
+            ? 0
+            : (int)Math.Ceiling(value);
     }
 
     private static bool IsGroupSubTask(task taskMeta)
@@ -1096,11 +1125,72 @@ public class TasksController : ControllerBase
                && string.Equals(taskMeta.prod.prod_method, "SUB", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static int CeilPositive(decimal value)
+    private static decimal ResolveGroupSubPlannedInputQty(
+        IReadOnlyList<TaskReferenceInputDto>? referenceInputs)
     {
-        return value <= 0
-            ? 0
-            : (int)Math.Ceiling(value);
+        if (referenceInputs == null || referenceInputs.Count == 0)
+            return 0m;
+
+        /*
+         * GROUP + SUB:
+         * Số chuẩn là estimated_qty, ví dụ 6290.
+         * Không lấy actual_qty_prev_stage nếu actual đang bị kéo từ log IN cũ.
+         */
+        var estimated = referenceInputs
+            .Where(x => x != null)
+            .Sum(x => x.estimated_qty);
+
+        if (estimated > 0)
+            return estimated;
+
+        var actual = referenceInputs
+            .Where(x => x != null)
+            .Sum(x => x.actual_qty_prev_stage);
+
+        return actual > 0 ? actual : 0m;
+    }
+
+    private static List<TaskReferenceInputDto> NormalizeGroupSubReferenceInputs(
+        IReadOnlyList<TaskReferenceInputDto>? referenceInputs,
+        int plannedInputQty)
+    {
+        var result = (referenceInputs ?? Array.Empty<TaskReferenceInputDto>())
+            .Select(x => new TaskReferenceInputDto
+            {
+                input_code = x.input_code,
+                input_name = x.input_name,
+                unit = string.IsNullOrWhiteSpace(x.unit) ? "sp" : x.unit,
+
+                /*
+                 * Đồng bộ cả estimated và actual về plannedInputQty.
+                 */
+                estimated_qty = plannedInputQty,
+                actual_qty_prev_stage = plannedInputQty
+            })
+            .ToList();
+
+        if (result.Count == 0)
+        {
+            result.Add(new TaskReferenceInputDto
+            {
+                input_code = "SUB_BTP_INPUT",
+                input_name = "Bán thành phẩm đầu vào từ SUB",
+                unit = "sp",
+                estimated_qty = plannedInputQty,
+                actual_qty_prev_stage = plannedInputQty
+            });
+        }
+
+        return result;
+    }
+
+    private static string NormQrCode(string? value)
+    {
+        return (value ?? "")
+            .Trim()
+            .ToUpperInvariant()
+            .Replace(" ", "_")
+            .Replace("-", "_");
     }
 
     private static decimal ResolveActualQtyFromPreparedReferenceInputs(
@@ -1135,10 +1225,10 @@ public class TasksController : ControllerBase
     }
 
     private async Task<GroupQrQtyPolicy> ResolveGroupQrQtyPolicyAsync(
-        task taskMeta,
-        IReadOnlyList<TaskReferenceInputDto>? preparedReferenceInputs,
-        List<TaskReferenceUsageInputDto>? submittedReferenceInputs,
-        CancellationToken ct)
+    task taskMeta,
+    IReadOnlyList<TaskReferenceInputDto>? preparedReferenceInputs,
+    List<TaskReferenceUsageInputDto>? submittedReferenceInputs,
+    CancellationToken ct)
     {
         if (taskMeta?.prod == null)
         {
@@ -1149,7 +1239,8 @@ public class TasksController : ControllerBase
                 SuggestedQty = 1,
                 HappyCaseQty = 1,
                 QtyUnit = "sp",
-                Hint = "Không tìm thấy production của task."
+                Hint = "Không tìm thấy production của task.",
+                ReferenceInputs = new List<TaskReferenceInputDto>()
             };
         }
 
@@ -1157,10 +1248,6 @@ public class TasksController : ControllerBase
             ? taskMeta.prod.group_total_qty
             : 1;
 
-        /*
-         * Default cho GROUP thường / GROUP + NVL:
-         * Giữ logic cũ: validate theo group_total_qty.
-         */
         var policy = new GroupQrQtyPolicy
         {
             IsGroupSub = false,
@@ -1169,65 +1256,57 @@ public class TasksController : ControllerBase
             SuggestedQty = groupTotalQty,
             HappyCaseQty = groupTotalQty,
             QtyUnit = "sp",
-            Hint = "Task group cho phép nhập tay NVL, BTP input và output khi finish."
+            Hint = "Task group cho phép nhập tay NVL, BTP input và output khi finish.",
+            ReferenceInputs = preparedReferenceInputs?.ToList() ?? new List<TaskReferenceInputDto>()
         };
 
+        if (!IsGroupSubTask(taskMeta))
+            return policy;
+
         /*
-         * FIX RIÊNG GROUP + SUB:
-         * Không dùng group_total_qty làm max.
-         * max_allowed phải lấy theo actual_qty_prev_stage của BTP đầu vào.
+         * FIX GROUP + SUB:
+         * Dùng planned input BTP, ví dụ 6290.
+         * Không dùng actual_qty_prev_stage 7674 lấy từ log IN.
          */
-        if (IsGroupSubTask(taskMeta))
+        var plannedInputQtyDecimal = ResolveGroupSubPlannedInputQty(
+            preparedReferenceInputs);
+
+        if (plannedInputQtyDecimal <= 0)
         {
-            var actualFromSubmitted = ResolveActualQtyFromSubmittedReferenceInputs(
-                submittedReferenceInputs);
+            var bundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
+                taskMeta.task_id,
+                ct);
 
-            var actualFromPrepared = ResolveActualQtyFromPreparedReferenceInputs(
-                preparedReferenceInputs);
+            plannedInputQtyDecimal = ResolveGroupSubPlannedInputQty(
+                bundle.reference_inputs);
 
-            decimal actualInputQty = 0m;
-
-            if (actualFromSubmitted > 0)
-                actualInputQty = actualFromSubmitted;
-            else if (actualFromPrepared > 0)
-                actualInputQty = actualFromPrepared;
-            else
-            {
-                /*
-                 * Fallback nếu caller chưa truyền preparedReferenceInputs.
-                 */
-                var bundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
-                    taskMeta.task_id,
-                    ct);
-
-                actualInputQty = ResolveActualQtyFromPreparedReferenceInputs(
-                    bundle.reference_inputs);
-            }
-
-            var actualInputInt = CeilPositive(actualInputQty);
-
-            /*
-             * Nếu không có actual thì fallback group_total_qty để không vỡ API.
-             * Nếu có actual, dùng actual làm max.
-             */
-            var maxByActualInput = actualInputInt > 0
-                ? actualInputInt
-                : groupTotalQty;
-
-            policy.IsGroupSub = true;
-            policy.MaxAllowed = maxByActualInput;
-
-            /*
-             * Suggested vẫn giữ số lượng sản phẩm đơn ghép.
-             * Ví dụ suggested = 6000, max = 7674.
-             */
-            policy.SuggestedQty = groupTotalQty;
-            policy.HappyCaseQty = groupTotalQty;
-
-            policy.Hint =
-                $"GROUP + SUB: suggested_qty lấy theo tổng SL đơn ghép = {groupTotalQty} sp; " +
-                $"max_allowed lấy theo BTP thực tế đầu vào actual_qty_prev_stage = {maxByActualInput} sp.";
+            preparedReferenceInputs = bundle.reference_inputs;
         }
+
+        var plannedInputQty = CeilPositive(plannedInputQtyDecimal);
+
+        if (plannedInputQty <= 0)
+            plannedInputQty = groupTotalQty;
+
+        policy.IsGroupSub = true;
+
+        /*
+         * Với task 102:
+         * groupTotalQty = 6000
+         * plannedInputQty = 6290
+         */
+        policy.MaxAllowed = plannedInputQty;
+        policy.SuggestedQty = plannedInputQty;
+        policy.HappyCaseQty = plannedInputQty;
+
+        policy.ReferenceInputs = NormalizeGroupSubReferenceInputs(
+            preparedReferenceInputs,
+            plannedInputQty);
+
+        policy.Hint =
+            $"GROUP + SUB: order_qty/group_total_qty = {groupTotalQty} sp; " +
+            $"BTP đầu vào dự kiến đã cộng hao phí sau SUB = {plannedInputQty} sp. " +
+            $"Hệ thống validate theo BTP đầu vào dự kiến, không dùng log actual IN cũ.";
 
         return policy;
     }

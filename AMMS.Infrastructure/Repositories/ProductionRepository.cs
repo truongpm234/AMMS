@@ -1458,34 +1458,17 @@ namespace AMMS.Infrastructure.Repositories
                     is_taken_sub_product = task?.is_taken_sub_product ?? false
                 };
 
-                /*
-                 * FIX CHÍNH:
-                 * Lấy lại actual/estimated từ material_usage_json,
-                 * reference_input_json, output_json nếu log đã có data.
-                 */
-                /*
- * 1. Map actual từ JSON nếu có:
- * - material_usage_json
- * - reference_input_json
- * - output_json
- */
                 ApplyTaskLogJsonToProductionStage(stage, stageLogs);
 
-                /*
-                 * 2. Nếu output_json không có nhưng task_log.qty_good có,
-                 * vẫn phải set actual output để công đoạn sau lấy được.
-                 */
                 ApplyOutputActualFallbackFromQtyGood(stage);
 
-                /*
-                 * 3. Nếu input là BTP từ công đoạn trước,
-                 * lấy actual từ output thực tế của công đoạn trước.
-                 */
-                ApplyPreviousStageActualToInputMaterials(stage, prevOutput);
+                await ApplySubFirstDownstreamActualEstimateAsync(
+                    header.pr,
+                    stage,
+                    steps,
+                    ct);
 
-                /*
-                 * 4. Cuối cùng không để input_material.actual_quantity = null.
-                 */
+
                 NormalizeNullActualInputMaterials(stage);
 
                 stages.Add(stage);
@@ -1497,16 +1480,16 @@ namespace AMMS.Infrastructure.Repositories
                     Unit = stage.output_product?.unit ?? io.nextOutput.Unit,
 
                     EstimatedQuantity =
-                        stage.output_product?.estimated_quantity > 0
-                            ? stage.output_product.estimated_quantity
-                            : io.nextOutput.EstimatedQuantity,
+        stage.output_product != null && stage.output_product.estimated_quantity > 0
+            ? stage.output_product.estimated_quantity
+            : io.nextOutput.EstimatedQuantity,
 
                     ActualQuantity =
-                        stage.output_product?.actual_quantity > 0
-                            ? stage.output_product.actual_quantity.Value
-                            : stage.qty_good > 0
-                                ? stage.qty_good
-                                : io.nextOutput.ActualQuantity
+        stage.output_product != null && stage.output_product.actual_quantity > 0
+            ? stage.output_product.actual_quantity
+            : stage.qty_good > 0
+                ? stage.qty_good
+                : io.nextOutput.ActualQuantity
                 };
             }
 
@@ -2226,7 +2209,13 @@ namespace AMMS.Infrastructure.Repositories
 
                 ApplyTaskLogJsonToProductionStage(stage, stageLogs);
                 ApplyOutputActualFallbackFromQtyGood(stage);
-                ApplyPreviousStageActualToInputMaterials(stage, prevOutput);
+
+                await ApplySubFirstDownstreamActualEstimateAsync(
+                    header.pr,
+                    stage,
+                    steps,
+                    ct);
+
                 NormalizeNullActualInputMaterials(stage);
 
                 stages.Add(stage);
@@ -2243,11 +2232,11 @@ namespace AMMS.Infrastructure.Repositories
                             : io.nextOutput.EstimatedQuantity,
 
                     ActualQuantity =
-                        stage.output_product?.actual_quantity > 0
-                            ? stage.output_product.actual_quantity.Value
-                            : stage.qty_good > 0
-                                ? stage.qty_good
-                                : io.nextOutput.ActualQuantity
+        stage.output_product != null && stage.output_product.actual_quantity > 0
+            ? stage.output_product.actual_quantity
+            : stage.qty_good > 0
+                ? stage.qty_good
+                : io.nextOutput.ActualQuantity
                 };
             }
 
@@ -4035,7 +4024,7 @@ namespace AMMS.Infrastructure.Repositories
             public decimal RequiredQty { get; init; }
         }
 
-        
+
         private static bool IsPlateReserveMaterial(string? materialCode, string? materialName)
         {
             var code = NormalizeReserveMaterialCode(materialCode);
@@ -5929,22 +5918,26 @@ namespace AMMS.Infrastructure.Repositories
             if (!currentTask.prod_id.HasValue || !currentTask.seq_num.HasValue)
                 return (false, $"Task {currentTask.task_id} thiếu prod_id hoặc seq_num.");
 
+            var currentProdId = currentTask.prod_id.Value;
             var currentSeq = currentTask.seq_num.Value;
 
             /*
-             * Giữ logic cũ: RALO/CAT/IN có thể là initial parallel nếu helper của bạn đang quy định vậy.
-             * Các công đoạn sau thì bắt buộc check previous trong cùng production.
+             * RALO/CAT/IN có thể là initial parallel.
              */
             var isInitialParallel = ProductionFlowHelper.IsInitialParallel(currentCode);
 
             if (isInitialParallel)
                 return (true, "OK");
 
+            /*
+             * FIX rõ ràng:
+             * Chỉ check các task đứng trước trong cùng prod_id.
+             */
             var previousUnfinished = await _db.tasks
                 .AsNoTracking()
                 .Include(x => x.process)
                 .Where(x =>
-                    x.prod_id == currentTask.prod_id.Value &&
+                    x.prod_id == currentProdId &&
                     x.task_id != currentTask.task_id &&
                     x.seq_num.HasValue &&
                     x.seq_num.Value < currentSeq &&
@@ -5965,7 +5958,7 @@ namespace AMMS.Infrastructure.Repositories
             return (
                 false,
                 $"Công đoạn {currentCode} chưa được start vì công đoạn trước đó {prevCode} trong cùng production chưa Finished. " +
-                $"previous_task_id={previousUnfinished.task_id}, status={prevStatus}.");
+                $"current_prod_id={currentProdId}, previous_task_id={previousUnfinished.task_id}, status={prevStatus}.");
         }
 
         private async Task<(bool can_start, string message)> CheckOrderRouteDependencyForCanStartAsync(
@@ -6002,10 +5995,11 @@ namespace AMMS.Infrastructure.Repositories
                     continue;
 
                 var previous = await FindPreviousStageForOrderForCanStartAsync(
-                    orderId,
-                    previousCode,
-                    currentTask.task_id,
-                    ct);
+    orderId: orderId,
+    previousCode: previousCode,
+    currentTaskId: currentTask.task_id,
+    currentProdId: currentProd.prod_id,
+    ct: ct);
 
                 if (previous == null)
                 {
@@ -6133,15 +6127,22 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         private async Task<PreviousStageForCanStart?> FindPreviousStageForOrderForCanStartAsync(
-            int orderId,
-            string previousCode,
-            int currentTaskId,
-            CancellationToken ct)
+    int orderId,
+    string previousCode,
+    int currentTaskId,
+    int currentProdId,
+    CancellationToken ct)
         {
             previousCode = NormCanStartCode(previousCode);
 
+            if (orderId <= 0 || string.IsNullOrWhiteSpace(previousCode))
+                return null;
+
             /*
-             * Ưu tiên tìm GROUP task trước vì các công đoạn PHU/CAN/BOI có thể đã được ghép.
+             * 1. Nếu công đoạn trước cũng là GROUP task,
+             * tìm theo task_links của chính order đó.
+             *
+             * Ví dụ CAN group phải đợi PHU group.
              */
             var groupPrevious = await (
                 from tl in _db.task_links.AsNoTracking()
@@ -6182,8 +6183,44 @@ namespace AMMS.Infrastructure.Repositories
                 return groupPrevious;
 
             /*
-             * Nếu không nằm trong GROUP, tìm task trực tiếp theo order_id.
-             * Bao gồm SINGLE hoặc SPLIT production.
+             * 2. FIX CHÍNH:
+             * Nếu current task là GROUP task, phải ưu tiên tìm previous task
+             * trong đúng single_prod_id đã link với order đó.
+             *
+             * Ví dụ:
+             * current group PHU task_id=102.
+             * Order A có single_prod_id=4.
+             * previousCode=IN.
+             * => phải tìm IN trong production 4, không tìm lung tung theo order_id.
+             */
+            var linkedSingleProdId = await _db.task_links
+                .AsNoTracking()
+                .Where(x =>
+                    x.group_task_id == currentTaskId &&
+                    x.order_id == orderId &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
+                .Select(x => (int?)x.single_prod_id)
+                .FirstOrDefaultAsync(ct);
+
+            if (linkedSingleProdId.HasValue && linkedSingleProdId.Value > 0)
+            {
+                var linkedPrevious = await FindDirectPreviousStageByProdIdForCanStartAsync(
+                    prodId: linkedSingleProdId.Value,
+                    previousCode: previousCode,
+                    currentTaskId: currentTaskId,
+                    ct: ct);
+
+                if (linkedPrevious != null)
+                    return linkedPrevious;
+            }
+
+            /*
+             * 3. Fallback:
+             * Tìm theo order_id như logic cũ,
+             * nhưng không lấy chính current production nếu current production cũng có order_id.
              */
             var directPrevious = await (
                 from t in _db.tasks.AsNoTracking()
@@ -6196,6 +6233,7 @@ namespace AMMS.Infrastructure.Repositories
                 from pp in ppj.DefaultIfEmpty()
 
                 where p.order_id == orderId
+                      && p.prod_id != currentProdId
                       && t.task_id != currentTaskId
                       && pp != null
                       && pp.process_code != null
@@ -6221,7 +6259,51 @@ namespace AMMS.Infrastructure.Repositories
             return directPrevious;
         }
 
-        
+        private async Task<PreviousStageForCanStart?> FindDirectPreviousStageByProdIdForCanStartAsync(
+    int prodId,
+    string previousCode,
+    int currentTaskId,
+    CancellationToken ct)
+        {
+            previousCode = NormCanStartCode(previousCode);
+
+            if (prodId <= 0 || string.IsNullOrWhiteSpace(previousCode))
+                return null;
+
+            return await (
+                from t in _db.tasks.AsNoTracking()
+
+                join p in _db.productions.AsNoTracking()
+                    on t.prod_id equals p.prod_id
+
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                where p.prod_id == prodId
+                      && t.task_id != currentTaskId
+                      && pp != null
+                      && pp.process_code != null
+                      && pp.process_code.Trim().ToUpper() == previousCode
+                      && (
+                            p.status == null ||
+                            p.status.ToUpper() != "CANCELLED"
+                         )
+
+                orderby t.seq_num descending, t.task_id descending
+
+                select new PreviousStageForCanStart
+                {
+                    task_id = t.task_id,
+                    prod_id = t.prod_id,
+                    prod_kind = p.prod_kind,
+                    status = t.status,
+                    end_time = t.end_time,
+                    is_group_task = false
+                }
+            ).FirstOrDefaultAsync(ct);
+        }
+
         private static bool StatusEquals(string? status, string expected)
         {
             return string.Equals(
@@ -6901,23 +6983,6 @@ namespace AMMS.Infrastructure.Repositories
                    || inputName.Contains("CONG_DOAN_TRUOC");
         }
 
-        private static void ApplyOutputActualFallbackFromQtyGood(
-            ProductionStageDto stage)
-        {
-            if (stage?.output_product == null)
-                return;
-
-            if (stage.output_product.actual_quantity.HasValue &&
-                stage.output_product.actual_quantity.Value > 0)
-                return;
-
-            if (stage.qty_good <= 0)
-                return;
-
-            stage.output_product.actual_quantity = stage.qty_good;
-            stage.actual_output_quantity = stage.qty_good;
-        }
-
         private static void ApplyPreviousStageActualToInputMaterials(
             ProductionStageDto stage,
             StageOutputRef? prevOutput)
@@ -6947,20 +7012,785 @@ namespace AMMS.Infrastructure.Repositories
             }
         }
 
+        private static string NormDetailProcessCode(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+        }
+
+        private static bool IsSubProduction(production prod)
+        {
+            return string.Equals(
+                prod.prod_method,
+                "SUB",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static List<string> ParseDetailRoute(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormDetailProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private async Task<List<string>> ResolveSubProductProcessCodesForDetailAsync(
+            production prod,
+            CancellationToken ct)
+        {
+            /*
+             * Ưu tiên lấy path của sub_product.
+             * Ví dụ: RALO,CAT,IN.
+             */
+            if (prod.sub_product_id.HasValue && prod.sub_product_id.Value > 0)
+            {
+                var csv = await _db.sub_products
+                    .AsNoTracking()
+                    .Where(x => x.id == prod.sub_product_id.Value)
+                    .Select(x => x.product_process)
+                    .FirstOrDefaultAsync(ct);
+
+                var codes = ParseDetailRoute(csv);
+
+                if (codes.Count > 0)
+                    return codes;
+            }
+
+            /*
+             * Fallback:
+             * Nếu DB không có sub_product.product_process,
+             * suy ra từ các task đã lấy từ bán thành phẩm.
+             */
+            var taskCodes = await (
+                from t in _db.tasks.AsNoTracking()
+
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                where t.prod_id == prod.prod_id
+                      && t.is_taken_sub_product == true
+
+                orderby t.seq_num, t.task_id
+
+                select pp != null ? pp.process_code : t.name
+            )
+            .ToListAsync(ct);
+
+            return taskCodes
+                .Select(NormDetailProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static bool IsFirstStageAfterSubProductForDetail(
+            string? currentCode,
+            IReadOnlyList<string> routeCodes,
+            IReadOnlyList<string> subCodes)
+        {
+            var current = NormDetailProcessCode(currentCode);
+
+            if (string.IsNullOrWhiteSpace(current))
+                return false;
+
+            if (routeCodes == null || routeCodes.Count == 0)
+                return false;
+
+            if (subCodes == null || subCodes.Count == 0)
+                return false;
+
+            var currentIndex = routeCodes
+                .Select(NormDetailProcessCode)
+                .ToList()
+                .FindIndex(x => string.Equals(x, current, StringComparison.OrdinalIgnoreCase));
+
+            if (currentIndex < 0)
+                return false;
+
+            var subIndexes = subCodes
+                .Select(NormDetailProcessCode)
+                .Select(code => routeCodes
+                    .Select(NormDetailProcessCode)
+                    .ToList()
+                    .FindIndex(x => string.Equals(x, code, StringComparison.OrdinalIgnoreCase)))
+                .Where(x => x >= 0)
+                .ToList();
+
+            if (subIndexes.Count == 0)
+                return false;
+
+            var subLastIndex = subIndexes.Max();
+
+            /*
+             * Công đoạn đầu tiên sau sub_product.
+             * Ví dụ:
+             * route = RALO,CAT,IN,PHU,CAN
+             * sub = RALO,CAT,IN
+             * => PHU là currentIndex = subLastIndex + 1
+             */
+            return currentIndex == subLastIndex + 1;
+        }
+
+        private static string? ResolvePreviousProcessCodeForDetail(
+            string? currentCode,
+            IReadOnlyList<string> routeCodes)
+        {
+            var current = NormDetailProcessCode(currentCode);
+
+            if (string.IsNullOrWhiteSpace(current))
+                return null;
+
+            var normalizedRoute = routeCodes
+                .Select(NormDetailProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            var idx = normalizedRoute.FindIndex(x =>
+                string.Equals(x, current, StringComparison.OrdinalIgnoreCase));
+
+            if (idx <= 0)
+                return null;
+
+            return normalizedRoute[idx - 1];
+        }
+
+        private async Task<decimal> ResolveActualFinishedQtyByProdAndProcessAsync(
+            int prodId,
+            string? processCode,
+            CancellationToken ct)
+        {
+            var code = NormDetailProcessCode(processCode);
+
+            if (prodId <= 0 || string.IsNullOrWhiteSpace(code))
+                return 0m;
+
+            var qty = await (
+                from t in _db.tasks.AsNoTracking()
+
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                join l0 in _db.task_logs.AsNoTracking()
+                    on t.task_id equals l0.task_id into lj
+                from l in lj.DefaultIfEmpty()
+
+                where t.prod_id == prodId
+                      && pp != null
+                      && pp.process_code != null
+                      && pp.process_code.Trim().ToUpper() == code
+                      && l != null
+                      && (
+                            l.action_type == "Finished" ||
+                            l.action_type == "FinishedByGroup"
+                         )
+
+                select (decimal?)(l.qty_good ?? 0)
+            )
+            .SumAsync(ct);
+
+            return qty ?? 0m;
+        }
+
+        private static bool IsMainBtpInputForDetail(
+            StageMaterialDto input,
+            string? previousCode)
+        {
+            if (input == null)
+                return false;
+
+            var inputCode = NormDetailProcessCode(input.code);
+            var inputName = NormDetailProcessCode(input.name);
+            var prevCode = NormDetailProcessCode(previousCode);
+
+            if (!string.IsNullOrWhiteSpace(prevCode) &&
+                string.Equals(inputCode, prevCode, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return inputCode is "PREV" or "INPUT" or "BTP" or "REFERENCE"
+                   || inputName.Contains("BAN_THANH_PHAM")
+                   || inputName.Contains("BTP")
+                   || inputName.Contains("CONG_DOAN")
+                   || inputName.Contains("GIAY_DA_CAT");
+        }
+
+        private async Task ApplySubFirstDownstreamActualEstimateAsync(
+    production prod,
+    ProductionStageDto stage,
+    IReadOnlyList<ProductTypeProcessStepDto> routeSteps,
+    CancellationToken ct)
+        {
+            if (!IsSubProduction(prod))
+                return;
+
+            if (stage == null)
+                return;
+
+            if (stage.input_materials == null)
+                stage.input_materials = new List<StageMaterialDto>();
+
+            var currentCode = NormDetailProcessCode(stage.process_code);
+
+            if (string.IsNullOrWhiteSpace(currentCode))
+                return;
+
+            var isGroupSub =
+                string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(prod.prod_method, "SUB", StringComparison.OrdinalIgnoreCase);
+
+            /*
+             * CASE 1: GROUP + SUB
+             *
+             * Đây là case prod_id = 17.
+             * Không dùng prod.sub_product_id vì group production không có sub_product_id.
+             * Phải tính lại planned input từ task_links của group task.
+             */
+            if (isGroupSub)
+            {
+                var plan = await ResolveGroupSubStagePlanForDetailAsync(
+                    groupProd: prod,
+                    stage: stage,
+                    currentProcessCode: currentCode,
+                    ct: ct);
+
+                if (plan == null || plan.PlannedInputQty <= 0)
+                    return;
+
+                var plannedInputQty = Math.Round(plan.PlannedInputQty, 4);
+                var previousCode = plan.PreviousProcessCode;
+
+                var mainInputs = stage.input_materials
+                    .Where(x =>
+                        IsMainBtpInputForDetail(x, previousCode) ||
+                        IsLikelyBtpInputForDetail(x))
+                    .ToList();
+
+                /*
+                 * Nếu BuildStageIO không tạo input BTP chính thì tự thêm.
+                 */
+                if (mainInputs.Count == 0)
+                {
+                    var newInput = new StageMaterialDto
+                    {
+                        name = $"Bán thành phẩm từ công đoạn {previousCode}",
+                        code = previousCode,
+                        quantity = plannedInputQty,
+                        estimated_quantity = plannedInputQty,
+                        actual_quantity = plannedInputQty,
+                        quantity_source = "PlannedSubInputWithWaste",
+                        unit = "tờ"
+                    };
+
+                    stage.input_materials.Insert(0, newInput);
+                    mainInputs.Add(newInput);
+                }
+
+                foreach (var input in mainInputs)
+                {
+                    input.quantity = plannedInputQty;
+                    input.estimated_quantity = plannedInputQty;
+                    input.actual_quantity = plannedInputQty;
+                    input.quantity_source = "PlannedSubInputWithWaste";
+
+                    if (string.IsNullOrWhiteSpace(input.code))
+                        input.code = previousCode;
+
+                    if (string.IsNullOrWhiteSpace(input.name))
+                        input.name = $"Bán thành phẩm từ công đoạn {previousCode}";
+
+                    if (string.IsNullOrWhiteSpace(input.unit))
+                        input.unit = "tờ";
+                }
+
+                /*
+                 * Đồng bộ output estimate của stage với QR prepare.
+                 * Vì QR prepare đang validate theo planned BTP input = 6290,
+                 * detail cũng phải hiển thị PHU output estimate = 6290.
+                 */
+                if (stage.output_product != null)
+                {
+                    stage.output_product.quantity = plannedInputQty;
+                    stage.output_product.estimated_quantity = plannedInputQty;
+
+                    if (stage.output_product.actual_quantity <= 0)
+                        stage.output_product.quantity_source = "PlannedSubInputWithWaste";
+                }
+
+                stage.estimated_output_quantity = plannedInputQty;
+
+                return;
+            }
+
+            /*
+             * CASE 2: SINGLE + SUB
+             *
+             * Với single SUB thì giữ logic lấy actual output của công đoạn trước.
+             */
+            var routeCodes = routeSteps == null
+                ? new List<string>()
+                : routeSteps
+                    .Select(x => x.process_code)
+                    .Select(NormDetailProcessCode)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+            if (routeCodes.Count == 0)
+                return;
+
+            var subCodes = await ResolveSubProductProcessCodesForDetailAsync(
+                prod,
+                ct);
+
+            if (subCodes.Count == 0)
+                return;
+
+            if (!IsCurrentAfterSubBoundaryForDetail(currentCode, routeCodes, subCodes))
+                return;
+
+            var singlePreviousCode = ResolvePreviousProcessCodeForDetail(
+                currentCode,
+                routeCodes);
+
+            if (string.IsNullOrWhiteSpace(singlePreviousCode))
+                return;
+
+            var actualPrevQty = await ResolveActualFinishedQtyByProdAndProcessAsync(
+                prod.prod_id,
+                singlePreviousCode,
+                ct);
+
+            if (actualPrevQty <= 0)
+                return;
+
+            actualPrevQty = Math.Round(actualPrevQty, 4);
+
+            foreach (var input in stage.input_materials)
+            {
+                if (!IsMainBtpInputForDetail(input, singlePreviousCode))
+                    continue;
+
+                input.quantity = actualPrevQty;
+                input.estimated_quantity = actualPrevQty;
+                input.actual_quantity = actualPrevQty;
+                input.quantity_source = "ActualPreviousStage";
+            }
+
+            if (stage.output_product != null &&
+                stage.output_product.estimated_quantity < actualPrevQty)
+            {
+                stage.output_product.quantity = actualPrevQty;
+                stage.output_product.estimated_quantity = actualPrevQty;
+
+                if (stage.output_product.actual_quantity <= 0)
+                    stage.output_product.quantity_source = "EstimatedFromActualPreviousStage";
+            }
+
+            if (stage.estimated_output_quantity < actualPrevQty)
+                stage.estimated_output_quantity = actualPrevQty;
+        }
+
+        private sealed class GroupSubStagePlanForDetail
+        {
+            public decimal PlannedInputQty { get; set; }
+
+            public string PreviousProcessCode { get; set; } = "PREV";
+        }
+
+        private sealed class DetailOrderEstimateContext
+        {
+            public int order_id { get; set; }
+
+            public int order_qty { get; set; }
+
+            public int n_up { get; set; } = 1;
+
+            public int sheets_required { get; set; }
+
+            public string? coating_type { get; set; }
+
+            public List<string> route_codes { get; set; } = new();
+        }
+
+        private async Task<GroupSubStagePlanForDetail?> ResolveGroupSubStagePlanForDetailAsync(
+    production groupProd,
+    ProductionStageDto stage,
+    string currentProcessCode,
+    CancellationToken ct)
+        {
+            if (groupProd == null)
+                return null;
+
+            if (stage == null || !stage.task_id.HasValue)
+                return null;
+
+            var groupTaskId = stage.task_id.Value;
+            var currentCode = NormDetailProcessCode(currentProcessCode);
+
+            if (string.IsNullOrWhiteSpace(currentCode))
+                return null;
+
+            var links = await _db.task_links
+                .AsNoTracking()
+                .Where(x =>
+                    x.group_task_id == groupTaskId &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
+                .OrderBy(x => x.id)
+                .ToListAsync(ct);
+
+            if (links.Count == 0)
+                return null;
+
+            decimal totalPlannedInput = 0m;
+            string? previousCodeForDisplay = null;
+
+            foreach (var link in links)
+            {
+                var ctx = await LoadDetailOrderEstimateContextAsync(
+                    link.order_id,
+                    ct);
+
+                if (ctx == null || ctx.route_codes.Count == 0)
+                {
+                    if (link.qty_plan > 0)
+                        totalPlannedInput += link.qty_plan;
+
+                    continue;
+                }
+
+                var currentIndex = ctx.route_codes.FindIndex(x =>
+                    string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase));
+
+                if (currentIndex <= 0)
+                    continue;
+
+                var previousCode = ctx.route_codes[currentIndex - 1];
+
+                previousCodeForDisplay ??= previousCode;
+
+                /*
+                 * Với GROUP + SUB, sub path lấy từ single production đang link,
+                 * không lấy từ group production vì group production.sub_product_id = null.
+                 */
+                var subCodes = await ResolveLinkedSingleSubProductProcessCodesForDetailAsync(
+                    singleProdId: link.single_prod_id,
+                    routeCodes: ctx.route_codes,
+                    ct: ct);
+
+                if (subCodes.Count == 0)
+                    continue;
+
+                var subLastIndex = subCodes
+                    .Select(code => ctx.route_codes.FindIndex(x =>
+                        string.Equals(x, code, StringComparison.OrdinalIgnoreCase)))
+                    .Where(x => x >= 0)
+                    .DefaultIfEmpty(-1)
+                    .Max();
+
+                /*
+                 * Chỉ tính những công đoạn nằm sau sub boundary.
+                 * Ví dụ sub = RALO,CAT,IN thì PHU/CAN hợp lệ.
+                 */
+                if (subLastIndex < 0 || currentIndex <= subLastIndex)
+                    continue;
+
+                var productQty = link.qty_plan > 0
+                    ? link.qty_plan
+                    : ctx.order_qty;
+
+                if (productQty <= 0)
+                    productQty = 1;
+
+                var nUp = ctx.n_up > 0 ? ctx.n_up : 1;
+
+                /*
+                 * Không dùng thẳng estimate.sheets_required của cả order nếu link chỉ là một phần.
+                 * Tính lại sheets base theo qty_plan của từng link.
+                 */
+                var sheetsBase = (int)Math.Ceiling(productQty / (decimal)nUp);
+
+                if (sheetsBase <= 0)
+                    sheetsBase = 1;
+
+                var stageQty = SubProductionQuantityHelper.ResolveStageQty(
+                    currentProcessCode: currentCode,
+                    routeProcessCodes: ctx.route_codes,
+                    productQty: productQty,
+                    nUp: nUp,
+                    explicitSheetsBase: sheetsBase,
+                    coatingType: ctx.coating_type);
+
+                /*
+                 * Với detail và qr-prepare, số cần đồng bộ là planned BTP input.
+                 * Ví dụ PHU group SUB: tổng 2 order = 6000, planned input = 6290.
+                 */
+                if (stageQty.input_qty > 0)
+                    totalPlannedInput += stageQty.input_qty;
+                else
+                    totalPlannedInput += productQty;
+            }
+
+            totalPlannedInput = Math.Round(totalPlannedInput, 4);
+
+            if (totalPlannedInput <= 0)
+                return null;
+
+            return new GroupSubStagePlanForDetail
+            {
+                PlannedInputQty = totalPlannedInput,
+                PreviousProcessCode = string.IsNullOrWhiteSpace(previousCodeForDisplay)
+                    ? "PREV"
+                    : previousCodeForDisplay
+            };
+        }
+
+        private async Task<List<string>> ResolveLinkedSingleSubProductProcessCodesForDetailAsync(
+    int? singleProdId,
+    IReadOnlyList<string> routeCodes,
+    CancellationToken ct)
+        {
+            if (singleProdId.HasValue && singleProdId.Value > 0)
+            {
+                var singleProd = await _db.productions
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.prod_id == singleProdId.Value, ct);
+
+                if (singleProd != null)
+                {
+                    if (singleProd.sub_product_id.HasValue && singleProd.sub_product_id.Value > 0)
+                    {
+                        var subCsv = await _db.sub_products
+                            .AsNoTracking()
+                            .Where(x => x.id == singleProd.sub_product_id.Value)
+                            .Select(x => x.product_process)
+                            .FirstOrDefaultAsync(ct);
+
+                        var fromSub = ParseDetailRoute(subCsv);
+
+                        if (fromSub.Count > 0)
+                            return fromSub;
+                    }
+
+                    /*
+                     * Fallback: lấy các task đã được auto Finished do lấy SUB.
+                     */
+                    var fromTakenTasks = await (
+                        from t in _db.tasks.AsNoTracking()
+
+                        join pp0 in _db.product_type_processes.AsNoTracking()
+                            on t.process_id equals pp0.process_id into ppj
+                        from pp in ppj.DefaultIfEmpty()
+
+                        where t.prod_id == singleProd.prod_id
+                              && t.is_taken_sub_product == true
+
+                        orderby t.seq_num, t.task_id
+
+                        select pp != null ? pp.process_code : t.name
+                    )
+                    .ToListAsync(ct);
+
+                    var takenCodes = fromTakenTasks
+                        .Select(NormDetailProcessCode)
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+
+                    if (takenCodes.Count > 0)
+                        return takenCodes;
+                }
+            }
+
+            /*
+             * Fallback cuối:
+             * Với nghiệp vụ hiện tại, SUB đang cover RALO,CAT,IN.
+             * Chỉ trả các code này nếu route thật có chúng.
+             */
+            var defaultSub = new[] { "RALO", "CAT", "IN" }
+                .Where(x => routeCodes.Contains(x, StringComparer.OrdinalIgnoreCase))
+                .ToList();
+
+            return defaultSub;
+        }
+
+        private static bool IsLikelyBtpInputForDetail(StageMaterialDto input)
+        {
+            if (input == null)
+                return false;
+
+            var inputCode = NormDetailProcessCode(input.code);
+            var inputName = NormDetailProcessCode(input.name);
+
+            if (inputCode is "RALO" or "CAT" or "IN" or "PHU" or "CAN" or "CAN_MANG" or "BOI" or "BE" or "DUT" or "DAN")
+                return true;
+
+            return inputName.Contains("BAN_THANH_PHAM")
+                   || inputName.Contains("BTP")
+                   || inputName.Contains("CONG_DOAN")
+                   || inputName.Contains("GIAY_DA_CAT");
+        }
+
+        private static bool IsCurrentAfterSubBoundaryForDetail(
+    string? currentProcessCode,
+    IReadOnlyList<string> routeCodes,
+    IReadOnlyList<string> subCodes)
+        {
+            var route = routeCodes
+                .Select(NormDetailProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            var current = NormDetailProcessCode(currentProcessCode);
+
+            if (route.Count == 0 || string.IsNullOrWhiteSpace(current))
+                return false;
+
+            var currentIndex = route.FindIndex(x =>
+                string.Equals(x, current, StringComparison.OrdinalIgnoreCase));
+
+            if (currentIndex < 0)
+                return false;
+
+            var subLastIndex = subCodes
+                .Select(NormDetailProcessCode)
+                .Select(code => route.FindIndex(x =>
+                    string.Equals(x, code, StringComparison.OrdinalIgnoreCase)))
+                .Where(x => x >= 0)
+                .DefaultIfEmpty(-1)
+                .Max();
+
+            return subLastIndex >= 0 && currentIndex > subLastIndex;
+        }
+        private async Task<DetailOrderEstimateContext?> LoadDetailOrderEstimateContextAsync(
+    int orderId,
+    CancellationToken ct)
+        {
+            if (orderId <= 0)
+                return null;
+
+            var item = await _db.order_items
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderBy(x => x.item_id)
+                .Select(x => new
+                {
+                    x.order_id,
+                    x.quantity,
+                    x.production_process
+                })
+                .FirstOrDefaultAsync(ct);
+
+            var req = await _db.order_requests
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderByDescending(x => x.order_request_id)
+                .FirstOrDefaultAsync(ct);
+
+            cost_estimate? est = null;
+
+            if (req != null)
+            {
+                if (req.accepted_estimate_id.HasValue &&
+                    req.accepted_estimate_id.Value > 0)
+                {
+                    est = await _db.cost_estimates
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(x =>
+                            x.estimate_id == req.accepted_estimate_id.Value &&
+                            x.order_request_id == req.order_request_id,
+                            ct);
+                }
+
+                est ??= await _db.cost_estimates
+                    .AsNoTracking()
+                    .Where(x => x.order_request_id == req.order_request_id)
+                    .OrderByDescending(x => x.is_active)
+                    .ThenByDescending(x => x.estimate_id)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            var orderQty = item?.quantity ?? 0;
+
+            if (orderQty <= 0 && req?.quantity.HasValue == true)
+                orderQty = req.quantity.Value;
+
+            if (orderQty <= 0)
+                orderQty = 1;
+
+            var routeCsv = !string.IsNullOrWhiteSpace(item?.production_process)
+                ? item!.production_process
+                : est?.production_processes;
+
+            var routeCodes = ParseDetailRoute(routeCsv);
+
+            var nUp = 1;
+
+            if (est != null && est.n_up > 0)
+                nUp = est.n_up;
+
+            var sheetsRequired = 0;
+
+            if (est != null && est.sheets_required > 0)
+                sheetsRequired = est.sheets_required;
+
+            return new DetailOrderEstimateContext
+            {
+                order_id = orderId,
+                order_qty = orderQty,
+                n_up = nUp,
+                sheets_required = sheetsRequired,
+                coating_type = est?.coating_type,
+                route_codes = routeCodes
+            };
+        }
+
+        private static void ApplyOutputActualFallbackFromQtyGood(
+    ProductionStageDto stage)
+        {
+            if (stage?.output_product == null)
+                return;
+
+            if (stage.output_product.actual_quantity > 0)
+                return;
+
+            if (stage.qty_good <= 0)
+                return;
+
+            stage.output_product.actual_quantity = stage.qty_good;
+            stage.output_product.quantity_source = "Actual";
+            stage.actual_output_quantity = stage.qty_good;
+        }
+
         private static void NormalizeNullActualInputMaterials(
-            ProductionStageDto stage)
+    ProductionStageDto stage)
         {
             if (stage?.input_materials == null || stage.input_materials.Count == 0)
                 return;
 
             foreach (var input in stage.input_materials)
             {
-                /*
-                 * Không để API trả null.
-                 * Nếu chưa có log thực tế thì trả 0 để FE hiển thị ổn định.
-                 */
-                if (!input.actual_quantity.HasValue)
+                if (input.actual_quantity < 0)
                     input.actual_quantity = 0m;
+
+                if (input.actual_quantity <= 0 &&
+                    string.IsNullOrWhiteSpace(input.quantity_source))
+                {
+                    input.quantity_source = "NotReported";
+                }
             }
         }
     }
