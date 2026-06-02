@@ -1,4 +1,5 @@
-﻿using AMMS.Shared.DTOs.Common;
+﻿using AMMS.Infrastructure.Entities;
+using AMMS.Shared.DTOs.Common;
 using AMMS.Shared.DTOs.Productions;
 using System;
 using System.Collections.Generic;
@@ -27,6 +28,7 @@ namespace AMMS.Application.Interfaces
         Task<bool> SetProductionReadyAsync(int orderId, bool isProductionReady, string? gmNote = null, string? proposedProductionMethod = null, CancellationToken ct = default);
         Task<ProductionDetailDto?> GetProductionDetailByProdIdAsync(int prodId, CancellationToken ct = default);
         Task<ForceProductionImportingResponseDto?> ForceSetProductionImportingByProdIdAsync(int prodId, CancellationToken ct = default);
+        Task<List<production>> GetProductionsByTaskIdAsync(int taskId, CancellationToken ct = default);
         Task<ConfirmProductionScheduleResponse> ConfirmScheduleAsync(int prodId, int? confirmedByUserId, CancellationToken ct = default);
         Task<AutoCreatePendingProductionResultDto> AutoCreatePendingProductionAfterLayoutIfSingleMethodAsync(
             int orderId,

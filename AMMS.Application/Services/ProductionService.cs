@@ -3895,7 +3895,17 @@ namespace AMMS.Application.Services
                     orderQty);
             }
         }
+        public async Task<List<production>> GetProductionsByTaskIdAsync(int taskId, CancellationToken ct = default)
+        {
+            if (taskId <= 0)
+                throw new InvalidOperationException("task_id không hợp lệ.");
 
+            var productions = await _repo.GetProductionsByTaskIdAsync(
+                taskId,
+                ct);
+
+            return productions;
+        }
         private async Task<production> EnsurePendingProductionShellAsync(
     order ord,
     order_request req,

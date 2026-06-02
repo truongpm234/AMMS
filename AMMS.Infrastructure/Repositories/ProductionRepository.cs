@@ -7935,5 +7935,64 @@ namespace AMMS.Infrastructure.Repositories
                 }
             }
         }
+
+        public async Task<List<production>> GetProductionsByTaskIdAsync(
+    int taskId,
+    CancellationToken ct = default)
+        {
+            if (taskId <= 0)
+                return new List<production>();
+
+            // 1. Production trực tiếp của task
+            var directProdIds = await _db.tasks
+                .AsNoTracking()
+                .Where(x =>
+                    x.task_id == taskId &&
+                    x.prod_id != null)
+                .Select(x => x.prod_id!.Value)
+                .ToListAsync(ct);
+
+            // 2. Production liên quan qua task_links
+            // Trường hợp task_id là single_task_id hoặc group_task_id
+            var linkRows = await _db.task_links
+                .AsNoTracking()
+                .Where(x =>
+                    x.single_task_id == taskId ||
+                    x.group_task_id == taskId)
+                .Select(x => new
+                {
+                    SingleProdId = (int?)x.single_prod_id,
+                    GroupProdId = (int?)x.group_prod_id
+                })
+                .ToListAsync(ct);
+
+            var linkedProdIds = new List<int>();
+
+            foreach (var link in linkRows)
+            {
+                if (link.SingleProdId.HasValue && link.SingleProdId.Value > 0)
+                    linkedProdIds.Add(link.SingleProdId.Value);
+
+                if (link.GroupProdId.HasValue && link.GroupProdId.Value > 0)
+                    linkedProdIds.Add(link.GroupProdId.Value);
+            }
+
+            var prodIds = directProdIds
+                .Concat(linkedProdIds)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            if (prodIds.Count == 0)
+                return new List<production>();
+
+            var productions = await _db.productions
+                .AsNoTracking()
+                .Where(x => prodIds.Contains(x.prod_id))
+                .OrderByDescending(x => x.prod_id)
+                .ToListAsync(ct);
+
+            return productions;
+        }
     }
 }
