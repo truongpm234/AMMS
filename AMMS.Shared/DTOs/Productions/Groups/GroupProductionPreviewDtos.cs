@@ -33,6 +33,26 @@ namespace AMMS.Shared.DTOs.Productions.Groups
 
     public class GroupProductionConfirmPreviewResponse
     {
+        public string? suggestion_type { get; set; }
+
+        public bool can_group { get; set; }
+
+        public bool create_group_allowed { get; set; }
+
+        public int? product_type_id { get; set; }
+
+        public string? product_type_name { get; set; }
+
+        public string? production_method { get; set; }
+
+        public int order_count { get; set; }
+
+        public List<string?> order_codes { get; set; } = new();
+
+        public List<SuggestionOrderPreviewDto> orders { get; set; } = new();
+
+        public List<SuggestionBatchPreviewDto> batches { get; set; } = new();
+
         public List<int> order_ids { get; set; } = new();
 
         public List<string> process_codes { get; set; } = new();
@@ -64,5 +84,9 @@ namespace AMMS.Shared.DTOs.Productions.Groups
         public List<GroupProductionPlanWarningDto> warnings { get; set; } = new();
 
         public List<string> notes { get; set; } = new();
+
+        public string? reason { get; set; }
+
+        public string? note { get; set; }
     }
 }
