@@ -931,5 +931,49 @@ namespace AMMS.API.Controllers
                 orderId,
                 "Scheduled");
         }
+
+        [HttpGet("by-task/{taskId:int}")]
+        public async Task<IActionResult> GetProductionsByTaskId(int taskId, CancellationToken ct = default)
+        {
+            if (taskId <= 0)
+            {
+                return BadRequest(new
+                {
+                    message = "task_id không hợp lệ.",
+                    task_id = taskId
+                });
+            }
+
+            try
+            {
+                var productions = await _service.GetProductionsByTaskIdAsync(
+                    taskId,
+                    ct);
+
+                if (productions == null || productions.Count == 0)
+                {
+                    return NotFound(new
+                    {
+                        message = "Không tìm thấy production nào theo task_id này.",
+                        task_id = taskId
+                    });
+                }
+
+                return Ok(new
+                {
+                    task_id = taskId,
+                    total_productions = productions.Count,
+                    productions = productions
+                });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message,
+                    task_id = taskId
+                });
+            }
+        }
     }
 }
