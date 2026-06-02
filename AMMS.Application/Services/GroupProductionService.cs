@@ -2660,7 +2660,7 @@ namespace AMMS.Application.Services
 
             /*
              * 1. Private stages: lấy từ single production của từng order.
-             * Đây chính là batch RALO,CAT,IN riêng từng order.
+             * Đây là các batch riêng trước group, ví dụ RALO,CAT,IN.
              */
             var privateStages = await BuildPrivateStagesForExistingGroupDetailAsync(
                 orderRows,
@@ -2668,7 +2668,7 @@ namespace AMMS.Application.Services
 
             /*
              * 2. Group stage: lấy từ chính group production hiện tại.
-             * Đây là batch GROUP chung PHU/CAN/BOI.
+             * Đây là batch GROUP chung, ví dụ PHU,CAN,BOI.
              */
             var groupStages = await BuildGroupStagesForExistingGroupDetailAsync(
                 groupProd,
@@ -2677,7 +2677,7 @@ namespace AMMS.Application.Services
 
             /*
              * 3. Split stages: lấy từ các SPLIT production của từng order.
-             * Đây là batch BE,DUT,DAN riêng từng order.
+             * Đây là các batch riêng sau group, ví dụ BE,DUT,DAN.
              */
             var splitStages = await BuildSplitStagesForExistingGroupDetailAsync(
                 groupProd,
@@ -2692,9 +2692,10 @@ namespace AMMS.Application.Services
             timeline = timeline
                 .OrderBy(x => x.planned_start_date)
                 .ThenBy(x => StageOrder(x.stage_type))
-                .ThenBy(x => x.order_ids == null || x.order_ids.Count == 0
-                    ? int.MaxValue
-                    : x.order_ids.Min())
+                .ThenBy(x =>
+                    x.order_ids == null || x.order_ids.Count == 0
+                        ? int.MaxValue
+                        : x.order_ids.Min())
                 .ToList();
 
             var start = timeline.Count > 0
@@ -2705,14 +2706,36 @@ namespace AMMS.Application.Services
                 ? timeline.Max(x => x.planned_end_date)
                 : groupProd.planned_end_date ?? start;
 
-            var commonDeadline = await _db.orders
-                .AsNoTracking()
-                .Where(x => orderIds.Contains(x.order_id) && x.delivery_date != null)
-                .Select(x => x.delivery_date!.Value)
-                .DefaultIfEmpty(end)
-                .MinAsync(ct);
+            /*
+             * FIX LỖI LINQ:
+             * Không dùng:
+             * .Select(x => x.delivery_date!.Value)
+             * .DefaultIfEmpty(end)
+             * .MinAsync(ct)
+             *
+             * Vì EF Core/Npgsql không translate được DefaultIfEmpty(end).
+             *
+             * Cách an toàn:
+             * - Query delivery_date ra list trước.
+             * - Nếu không có ngày giao thì fallback = end.
+             */
+            var deliveryDates = orderIds.Count == 0
+                ? new List<DateTime>()
+                : await _db.orders
+                    .AsNoTracking()
+                    .Where(x =>
+                        orderIds.Contains(x.order_id) &&
+                        x.delivery_date != null)
+                    .Select(x => x.delivery_date!.Value)
+                    .ToListAsync(ct);
 
-            var daysLate = Math.Max(0, (end.Date - commonDeadline.Date).Days);
+            var commonDeadline = deliveryDates.Count > 0
+                ? deliveryDates.Min()
+                : end;
+
+            var daysLate = Math.Max(
+                0,
+                (end.Date - commonDeadline.Date).Days);
 
             var batches = productTypeId > 0
                 ? await BuildBatchesFromGroupPreviewAsync(
@@ -2725,10 +2748,16 @@ namespace AMMS.Application.Services
                     ct)
                 : new List<SuggestionBatchPreviewDto>();
 
+            var groupProcessCodes = ParseProcessCodes(groupProd.group_process_codes);
+
             return new GroupProductionConfirmPreviewResponse
             {
                 suggestion_type = "GROUP_WITH_AUTO_SPLIT",
-                can_group = string.Equals(groupProd.status, "Pending", StringComparison.OrdinalIgnoreCase),
+
+                /*
+                 * Đây là detail của group đã tạo rồi, không phải suggestion để create tiếp.
+                 */
+                can_group = false,
                 create_group_allowed = false,
 
                 product_type_id = groupProd.product_type_id,
@@ -2736,27 +2765,32 @@ namespace AMMS.Application.Services
                 production_method = groupProd.prod_method,
 
                 order_count = orderRows.Count,
-                order_codes = orders.Select(x => x.order_code).ToList(),
+                order_codes = orders
+                    .Select(x => x.order_code)
+                    .ToList(),
+
                 orders = orders,
                 batches = batches,
 
                 order_ids = orderIds,
-                process_codes = ParseProcessCodes(groupProd.group_process_codes),
-                selected_process_codes = ParseProcessCodes(groupProd.group_process_codes),
+                process_codes = groupProcessCodes,
+                selected_process_codes = groupProcessCodes,
 
                 common_delivery_deadline = commonDeadline,
                 suggested_planned_start_date = start,
                 estimated_finish_date = end,
-                total_duration_days = Math.Max(1, (end.Date - start.Date).Days),
+                total_duration_days = Math.Max(
+                    1,
+                    (end.Date - start.Date).Days),
 
                 dept1_private_stage = privateStages.Count == 0
                     ? null
                     : BuildAggregateStageForDetail(
-                        "PRIVATE_BEFORE_GROUP",
-                        "Công đoạn riêng trước ghép nhóm",
-                        "SINGLE_PRIVATE",
-                        privateStages,
-                        NotePrivateBeforeGroup),
+                        deptCode: "PRIVATE_BEFORE_GROUP",
+                        deptName: "Công đoạn riêng trước ghép nhóm",
+                        stageType: "SINGLE_PRIVATE",
+                        stages: privateStages,
+                        note: NotePrivateBeforeGroup),
 
                 private_stages = privateStages,
                 group_stages = groupStages,
