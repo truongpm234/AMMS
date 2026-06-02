@@ -1531,25 +1531,42 @@ namespace AMMS.Application.Services
                     $"Có NVL chưa map sang materials: {unmapped}. Không thể finish task.");
             }
 
+            inputMaterials ??= new List<TaskMaterialUsageInputDto>();
+
             if (expectedMaterials.Count == 0)
             {
-                if (inputMaterials != null && inputMaterials.Count > 0)
-                    throw new InvalidOperationException("Task này không yêu cầu nhập NVL.");
+                /*
+                 * Không throw nếu FE gửi dư input manual.
+                 * Chỉ validate số âm.
+                 */
+                foreach (var input in inputMaterials)
+                {
+                    if (input.quantity_used < 0 || input.quantity_left < 0)
+                        throw new InvalidOperationException("quantity_used/quantity_left không được âm.");
+                }
+
                 return;
             }
 
-            if (inputMaterials == null || inputMaterials.Count == 0)
-                throw new InvalidOperationException("Bắt buộc nhập danh sách NVL dư khi báo cáo công đoạn.");
-
-            if (inputMaterials.Count != expectedMaterials.Count)
-                throw new InvalidOperationException("Số lượng NVL nhập vào không khớp với số NVL ước tính.");
-
             var duplicated = inputMaterials
+                .Where(x => x.material_id > 0)
                 .GroupBy(x => x.material_id)
                 .Any(g => g.Count() > 1);
 
             if (duplicated)
                 throw new InvalidOperationException("Danh sách NVL bị trùng material_id.");
+
+            foreach (var input in inputMaterials)
+            {
+                if (input.quantity_used < 0)
+                    throw new InvalidOperationException("quantity_used không được nhỏ hơn 0.");
+
+                if (input.quantity_left < 0)
+                    throw new InvalidOperationException("quantity_left không được nhỏ hơn 0.");
+
+                if (input.quantity_left > 0 && !input.is_stock)
+                    throw new InvalidOperationException("NVL có số lượng dư thì is_stock phải = true.");
+            }
 
             foreach (var expected in expectedMaterials)
             {
@@ -1557,26 +1574,22 @@ namespace AMMS.Application.Services
                     throw new InvalidOperationException($"NVL {expected.material_code} chưa có material_id hợp lệ.");
 
                 var input = inputMaterials.FirstOrDefault(x => x.material_id == expected.material_id.Value);
+
+                /*
+                 * Không bắt buộc mọi expected material đều phải nhập.
+                 * Nếu FE không gửi nghĩa là dùng hết theo estimate, không có leftover.
+                 */
                 if (input == null)
-                    throw new InvalidOperationException($"Thiếu dữ liệu NVL material_id={expected.material_id.Value}.");
+                    continue;
 
-                if (input.quantity_used < 0)
-                    throw new InvalidOperationException(
-                        $"quantity_used của {expected.material_code} không được nhỏ hơn 0.");
+                var total = input.quantity_used + input.quantity_left;
 
-                if (input.quantity_left < 0)
-                    throw new InvalidOperationException(
-                        $"quantity_left của {expected.material_code} không được nhỏ hơn 0.");
-
-                if (input.quantity_used + input.quantity_left > expected.estimated_input_qty)
+                if (total > expected.estimated_input_qty)
+                {
                     throw new InvalidOperationException(
                         $"NVL {expected.material_code} vượt số lượng input ước tính. " +
-                        $"Used + Left = {input.quantity_used + input.quantity_left}, " +
-                        $"Estimated = {expected.estimated_input_qty}");
-
-                if (input.quantity_left > 0 && !input.is_stock)
-                    throw new InvalidOperationException(
-                        $"NVL {expected.material_code} có dư thì is_stock phải = true.");
+                        $"Used + Left = {total}, Estimated = {expected.estimated_input_qty}");
+                }
             }
         }
 

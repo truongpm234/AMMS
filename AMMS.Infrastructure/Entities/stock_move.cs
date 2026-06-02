@@ -22,6 +22,8 @@ public partial class stock_move
 
     public string? note { get; set; }
 
+    public int? sub_product_id { get; set; }
+
     public virtual material? material { get; set; }
 
     public virtual user? user { get; set; }

@@ -51,15 +51,15 @@ namespace AMMS.API.Controllers
             _deliveryHandoverEmailJob = deliveryHandoverEmailJob;
         }
 
-        private int? GetRoleId()
+        private int? GetUserId()
         {
-            var roleIdValue =
-                User.FindFirst("roleid")?.Value ??
-                User.FindFirst("role_id")?.Value ??
-                User.FindFirst(ClaimTypes.Role)?.Value;
+            var userIdValue =
+                User.FindFirst("userid")?.Value ??
+                User.FindFirst("user_id")?.Value ??
+                User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
-            if (int.TryParse(roleIdValue, out var roleId))
-                return roleId;
+            if (int.TryParse(userIdValue, out var userId))
+                return userId;
 
             return null;
         }
@@ -75,6 +75,41 @@ namespace AMMS.API.Controllers
             );
 
             return Ok(new { prod_id = prodId });
+        }
+
+        [HttpPost("confirm-schedule/{prodId:int}")]
+        public async Task<IActionResult> ConfirmSchedule(
+    int prodId,
+    CancellationToken ct)
+        {
+            try
+            {
+                var userId = GetUserId();
+
+                var result = await _service.ConfirmScheduleAsync(
+                    prodId,
+                    userId,
+                    ct);
+
+                return Ok(result);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message,
+                    prod_id = prodId
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    message = "Confirm schedule failed",
+                    detail = ex.Message,
+                    prod_id = prodId
+                });
+            }
         }
 
         [HttpGet("nearest-delivery")]
@@ -354,9 +389,7 @@ namespace AMMS.API.Controllers
                     });
                 }
 
-                var prodId = await _service.ScheduleTasksAfterMethodAsync(
-                    req.order_id,
-                    ct);
+                var prodId = result.prod_id;
 
                 /*
                  * Case 3:
@@ -373,15 +406,15 @@ namespace AMMS.API.Controllers
                     result.success,
                     result.order_id,
                     result.prod_id,
-                    scheduled_prod_id = prodId,
 
-                    event_type = "MANAGER_APPROVED",
+                    scheduled_prod_id = (int?)null,
+
+                    event_type = "MANAGER_APPROVED_METHOD",
                     approval_flow = "MANUAL_MULTI_OPTION",
 
                     production_approval_flow = result.production_approval_flow,
                     is_auto_production_approval = result.is_auto_production_approval,
                     production_approval_label = result.production_approval_label,
-                    result.sub_product_issue_file,
 
                     result.is_full_process,
                     result.production_method,
@@ -391,7 +424,8 @@ namespace AMMS.API.Controllers
                     result.order_quantity,
                     result.gm_note,
                     result.mgr_note,
-                    result.message
+
+                    message = "Manager approved production method. Waiting for GM to confirm scheduling."
                 });
             }
             catch (InvalidOperationException ex)

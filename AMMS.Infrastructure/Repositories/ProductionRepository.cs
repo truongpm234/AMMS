@@ -92,7 +92,7 @@ namespace AMMS.Infrastructure.Repositories
                     order_status = o != null ? o.status : null,
 
                     customer_name = o == null ? "Production ghép" : "",
-
+                    planned_end_date = pr.planned_end_date,
                     production_method = pr.prod_method,
                     is_full_process = pr.is_full_process,
                     sub_product_id = pr.sub_product_id,
@@ -111,7 +111,6 @@ namespace AMMS.Infrastructure.Repositories
                     planned_start_date = pr.planned_start_date,
                     actual_start_date = pr.actual_start_date,
                     end_date = pr.end_date,
-
                     first_item_product_name =
                         o == null
                             ? "Lệnh sản xuất ghép"
@@ -159,8 +158,6 @@ namespace AMMS.Infrastructure.Repositories
                     Data = new List<ProducingOrderCardDto>()
                 };
             }
-
-            var canGroupProdIds = await ResolveCanGroupProductionIdsForGetAllProductionAsync(ct);
 
             var prodIds = baseRows
                 .Select(x => x.prod_id)
@@ -708,12 +705,31 @@ namespace AMMS.Infrastructure.Repositories
 
                 var canStart = canStartResult.can_start;
                 var canStartMessage = canStartResult.message;
+                List<int>? listOrderId = null;
 
+                if (isGroupRow)
+                {
+                    groupMembersByGroupProdId.TryGetValue(
+                        r.prod_id,
+                        out var membersForListOrderId);
+
+                    membersForListOrderId ??= new List<ProdOrderInfoDto>();
+
+                    listOrderId = membersForListOrderId
+                        .Where(x => x.order_id > 0)
+                        .Where(x =>
+                            string.IsNullOrWhiteSpace(x.status) ||
+                            !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                        .Select(x => x.order_id)
+                        .Distinct()
+                        .OrderBy(x => x)
+                        .ToList();
+                }
                 result.Add(new ProducingOrderCardDto
                 {
                     prod_id = r.prod_id,
                     production_id = r.prod_id,
-
+                    list_order_id = listOrderId,
                     order_id = r.order_id,
                     code = r.code,
 
@@ -725,17 +741,17 @@ namespace AMMS.Infrastructure.Repositories
 
                     progress_percent = progress,
                     current_stage = currentStage,
-
+                    planned_start_date = r.planned_start_date,
+                    planned_end_date = r.planned_end_date,
+                    actual_start_date = r.actual_start_date,
+                    end_date = r.end_date,
                     status = displayStatus,
                     production_status = r.production_status,
                     order_status = r.order_status,
                     stage_status = currentStageStatus,
 
                     created_at = r.created_at,
-                    planned_start_date = r.planned_start_date,
-                    actual_start_date = r.actual_start_date,
                     start_date = r.actual_start_date,
-                    end_date = r.end_date,
 
                     prod_kind = r.prod_kind,
                     production_code = r.production_code,
@@ -767,7 +783,6 @@ namespace AMMS.Infrastructure.Repositories
                     group_total_qty = isGroupRow || isSplitRow
                         ? quantity
                         : activeGroup?.group_total_qty,
-                    can_group = !isGroupRow && !isSplitRow && canGroupProdIds.Contains(r.prod_id),
                     can_start = canStart,
                     can_start_message = canStartMessage,
 
@@ -1062,13 +1077,11 @@ namespace AMMS.Infrastructure.Repositories
                 actual_start_date = header.pr.actual_start_date,
                 start_date = header.pr.actual_start_date,
                 end_date = header.pr.end_date,
-
+                planned_end_date = header.pr.planned_end_date,
                 order_id = header.o?.order_id,
                 order_code = header.o?.code,
                 delivery_date = header.o?.delivery_date,
-
                 customer_name = header.customer_name ?? "Khách ẩn tên",
-
                 product_name = isGroupProduction
         ? "Lệnh sản xuất ghép"
         : header.first_item?.product_name,
@@ -2023,7 +2036,7 @@ namespace AMMS.Infrastructure.Repositories
                 nvl_qty = header.pr.nvl_qty,
                 sub_product_process = header.sp != null ? header.sp.product_process : null,
                 is_full_process = header.pr.is_full_process,
-
+                planned_end_date = header.pr.planned_end_date,
                 production_approval_flow = header.pr.production_approval_flow,
                 is_auto_production_approval = ProductionApprovalFlowHelper.IsAuto(header.pr.production_approval_flow),
                 production_approval_label = ProductionApprovalFlowHelper.Label(header.pr.production_approval_flow)
@@ -4029,12 +4042,6 @@ namespace AMMS.Infrastructure.Repositories
                             $"tồn={selectedSubProduct.quantity}, cần={orderQty}.");
                     }
 
-                    /*
-                     * Giữ logic core cũ: duyệt SUB thì trừ tồn BTP đúng orderQty.
-                     */
-                    selectedSubProduct.quantity -= orderQty;
-                    selectedSubProduct.updated_at = AppTime.NowVnUnspecified();
-
                     prod.prod_method = "SUB";
                     prod.is_full_process = false;
                     prod.sub_product_id = selectedSubProduct.id;
@@ -4095,9 +4102,6 @@ namespace AMMS.Infrastructure.Repositories
                     if (nvlQty <= 0)
                         throw new InvalidOperationException("Số lượng bán thành phẩm đã đủ. Vui lòng chọn SUB thay vì BOTH.");
 
-                    selectedSubProduct.quantity -= subUseQty;
-                    selectedSubProduct.updated_at = AppTime.NowVnUnspecified();
-
                     prod.prod_method = "BOTH";
                     prod.is_full_process = null;
                     prod.sub_product_id = selectedSubProduct.id;
@@ -4117,7 +4121,6 @@ namespace AMMS.Infrastructure.Repositories
                         order_quantity = orderQty,
                         gm_note = prod.gm_note,
                         mgr_note = prod.mgr_note,
-
                         production_approval_flow = prod.production_approval_flow,
                         is_auto_production_approval = ProductionApprovalFlowHelper.IsAuto(prod.production_approval_flow),
                         production_approval_label = ProductionApprovalFlowHelper.Label(prod.production_approval_flow),
@@ -4132,14 +4135,6 @@ namespace AMMS.Infrastructure.Repositories
 
                 var confirmedEstimate = await LoadAcceptedEstimateOrThrowAsync(
                     orderReq,
-                    ct);
-
-                await ReserveMaterialsForConfirmedProductionMethodAsync(
-                    prod,
-                    orderReq,
-                    confirmedEstimate,
-                    prod.prod_method!,
-                    orderQty,
                     ct);
 
                 await _db.SaveChangesAsync(ct);
@@ -5954,7 +5949,12 @@ namespace AMMS.Infrastructure.Repositories
     CancellationToken ct)
         {
             if (currentTask == null)
-                return (null, null);
+            {
+                if (string.Equals(row.production_status, "Pending", StringComparison.OrdinalIgnoreCase))
+                    return (false, "Production chưa được GM xác nhận lập lịch nên chưa có task để bắt đầu.");
+
+                return (false, "Production chưa có task.");
+            }
 
             if (IsFinishedStatus(currentTask.Status, currentTask.EndTime))
                 return (false, "Công đoạn hiện tại đã Finished.");

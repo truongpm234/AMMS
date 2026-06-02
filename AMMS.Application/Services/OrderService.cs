@@ -184,7 +184,7 @@ namespace AMMS.Application.Services
                         group_process_codes = p.group_process_codes,
                         group_total_qty = p.group_total_qty,
                         gm_proposed_method = p.gm_proposed_method,
-
+                        planned_end_date = p.planned_end_date,
                         tasks = raw.Tasks
                             .Where(t => t.prod_id == p.prod_id)
                             .OrderBy(t => t.seq_num)
@@ -491,7 +491,7 @@ namespace AMMS.Application.Services
                         group_process_codes = p.group_process_codes,
                         group_total_qty = p.group_total_qty,
                         gm_proposed_method = p.gm_proposed_method,
-
+                        planned_end_date = p.planned_end_date,
                         tasks = raw.Tasks
                             .Where(t => t.prod_id == p.prod_id)
                             .OrderBy(t => t.seq_num ?? int.MaxValue)

@@ -1049,28 +1049,21 @@ namespace AMMS.API.Controllers
                         throw new InvalidOperationException("Order not found");
 
                     ord.layout_confirmed = true;
+                    ord.status = "Pending";
+                    ord.is_production_ready = false;
 
-                    if (string.IsNullOrWhiteSpace(ord.status) ||
-                        string.Equals(ord.status, "LayoutPending", StringComparison.OrdinalIgnoreCase))
-                    {
-                        ord.status = "Scheduled";
-                    }
                     await _hub.Clients.Group(RealtimeGroups.ByRole("general manager")).SendAsync("confirm-layout", new { message = $"Có đơn {orderId} cần được kiểm duyệt sản xuất" });
                     await _notiService.CreateNotfi(18, $"Có đơn {orderId} cần được kiểm duyệt sản xuất", null, req.order_request_id, "Scheduled");
                     await _db.SaveChangesAsync(ct);
                     await tx.CommitAsync(ct);
                 });
 
-                _service.QueueRelease(
-    orderId,
-    autoApproveSingleMethod: true);
-
                 return Accepted(new
                 {
                     ok = true,
                     request_id = dto.request_id,
                     order_id = orderId,
-                    message = "Designer confirmed layout. Production release started. Auto method approval will run after production scheduling."
+                    message = "Designer confirmed layout. Auto method approval will run after production scheduling."
                 });
             }
             catch (Exception ex)

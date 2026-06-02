@@ -40,6 +40,7 @@
         public DateTime? created_at { get; set; }
         public DateTime? planned_start_date { get; set; }
         public DateTime? actual_start_date { get; set; }
+        public DateTime? planned_end_date { get; set; }
         public int? lamination_material_id { get; set; }
         public string? lamination_material_code { get; set; }
         public string? lamination_material_name { get; set; }
@@ -50,7 +51,6 @@
         public string? sub_product_process { get; set; }
         public string? production_approval_flow { get; set; }
         public bool all_tasks_finished { get; set; }
-
         public bool waiting_manual_importing { get; set; }
         public bool is_auto_production_approval { get; set; }
         public string? sub_product_issue_file { get; set; }
