@@ -30,6 +30,8 @@ namespace AMMS.Shared.DTOs.Productions
 
         public string? task_name { get; set; }
 
+        public int? prod_id { get; set; }
+
         public int qty_good { get; set; }
 
         public long exp_unix { get; set; }

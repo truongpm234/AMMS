@@ -14,6 +14,8 @@ namespace AMMS.Shared.DTOs.Productions
 
         public int qty_good { get; set; }
 
+        public int? prod_id { get; set; }
+
         public long exp_unix { get; set; }
 
         public bool use_manual_input { get; set; } = false;

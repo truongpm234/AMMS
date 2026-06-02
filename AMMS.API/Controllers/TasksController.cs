@@ -1231,6 +1231,11 @@ public class TasksController : ControllerBase
         var exists = await _db.tasks
             .AsNoTracking()
             .AnyAsync(x => x.task_id == payload.task_id, ct);
+        var prodId = await _db.tasks
+            .AsNoTracking()
+            .Where(x => x.task_id == payload.task_id)
+            .Select(x => x.prod_id)
+            .FirstOrDefaultAsync(ct);
 
         var taskName = await _db.tasks
             .AsNoTracking()
@@ -1260,7 +1265,7 @@ public class TasksController : ControllerBase
             use_manual_input = payload.use_manual_input,
             reason = payload.reason,
             report_image_url = payload.report_image_url,
-
+            prod_id = prodId,
             materials = payload.materials ?? new List<TaskMaterialUsageInputDto>(),
             qr_reference_inputs = payload.reference_inputs ?? new List<TaskReferenceUsageInputDto>(),
             outputs = payload.outputs ?? new List<TaskOutputReportDto>(),

@@ -13,19 +13,17 @@ namespace AMMS.Shared.DTOs.Productions.Groups
 
     public class SuggestedGroupProductionDto
     {
-        public string suggestion_type { get; set; } = "GROUP";
+        public string? suggestion_key { get; set; }
+
+        public string? suggestion_type { get; set; }
+
+        public bool can_group { get; set; }
+
+        public bool create_group_allowed { get; set; }
 
         public List<int> suggest_order { get; set; } = new();
 
         public List<string> suggest_process { get; set; } = new();
-
-        public string? department_code { get; set; }
-
-        public string? department_name { get; set; }
-
-        public string? material_key { get; set; }
-
-        public string? reason { get; set; }
 
         public int? product_type_id { get; set; }
 
@@ -33,21 +31,11 @@ namespace AMMS.Shared.DTOs.Productions.Groups
 
         public string? production_method { get; set; }
 
-        public string? note { get; set; }
+        public string? department_code { get; set; }
 
-        public DateTime? suggested_planned_start_date { get; set; }
+        public string? department_name { get; set; }
 
-        public DateTime? common_delivery_deadline { get; set; }
-
-        public DateTime? estimated_finish_date { get; set; }
-
-        public int estimated_total_days { get; set; } = 7;
-
-        public string? suggestion_key { get; set; }
-
-        public bool can_group { get; set; }
-
-        public bool create_group_allowed { get; set; }
+        public string? material_key { get; set; }
 
         public int order_count { get; set; }
 
@@ -57,15 +45,29 @@ namespace AMMS.Shared.DTOs.Productions.Groups
 
         public List<SuggestionBatchPreviewDto> batches { get; set; } = new();
 
+        public DateTime? suggested_planned_start_date { get; set; }
+
         public DateTime? schedule_planned_start_date { get; set; }
+
+        public DateTime? common_delivery_deadline { get; set; }
+
+        public DateTime? estimated_finish_date { get; set; }
 
         public DateTime? schedule_planned_end_date { get; set; }
 
+        public int? estimated_total_days { get; set; }
+
         public GroupProductionConfirmPreviewResponse? preview { get; set; }
+
+        public string? preview_error { get; set; }
 
         public List<SuggestedSplitProductionDto> auto_split_productions { get; set; } = new();
 
         public List<GroupProductionPlanWarningDto> warnings { get; set; } = new();
+
+        public string? reason { get; set; }
+
+        public string? note { get; set; }
     }
 
     public class SuggestedSplitProductionDto
