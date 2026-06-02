@@ -4141,12 +4141,12 @@ namespace AMMS.Application.Services
                     ?? prod;
 
                 scheduledProd.status = "Scheduled";
-
                 scheduledProd.planned_start_date ??= await ResolveProductionPlannedStartFromTasksAsync(scheduledProd.prod_id, ct);
 
                 scheduledProd.planned_end_date = await ResolveProductionPlannedEndFromTasksAsync(
                     scheduledProd.prod_id,
                     ct);
+                order.status = "Scheduled";
 
                 await _db.SaveChangesAsync(ct);
 

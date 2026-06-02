@@ -28,8 +28,11 @@ namespace AMMS.Shared.DTOs.Productions.Groups
         public string? reason { get; set; }
 
         public int? product_type_id { get; set; }
+
         public string? product_type_name { get; set; }
+
         public string? production_method { get; set; }
+
         public string? note { get; set; }
 
         public DateTime? suggested_planned_start_date { get; set; }
@@ -39,6 +42,24 @@ namespace AMMS.Shared.DTOs.Productions.Groups
         public DateTime? estimated_finish_date { get; set; }
 
         public int estimated_total_days { get; set; } = 7;
+
+        public string? suggestion_key { get; set; }
+
+        public bool can_group { get; set; }
+
+        public bool create_group_allowed { get; set; }
+
+        public int order_count { get; set; }
+
+        public List<string?> order_codes { get; set; } = new();
+
+        public List<SuggestionOrderPreviewDto> orders { get; set; } = new();
+
+        public List<SuggestionBatchPreviewDto> batches { get; set; } = new();
+
+        public DateTime? schedule_planned_start_date { get; set; }
+
+        public DateTime? schedule_planned_end_date { get; set; }
 
         public GroupProductionConfirmPreviewResponse? preview { get; set; }
 

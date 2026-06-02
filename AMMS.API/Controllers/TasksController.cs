@@ -1232,6 +1232,12 @@ public class TasksController : ControllerBase
             .AsNoTracking()
             .AnyAsync(x => x.task_id == payload.task_id, ct);
 
+        var taskName = await _db.tasks
+            .AsNoTracking()
+            .Where(x => x.task_id == payload.task_id)
+            .Select(x => x.name)
+            .FirstOrDefaultAsync(ct);
+
         if (!exists)
         {
             return NotFound(new
@@ -1247,8 +1253,8 @@ public class TasksController : ControllerBase
             valid = true,
             token = token,
             link = BuildProductionManagerTaskDetailLink(payload.task_id),
-
             task_id = payload.task_id,
+            task_name = taskName,
             qty_good = payload.qty_good,
             exp_unix = payload.exp_unix,
             use_manual_input = payload.use_manual_input,
