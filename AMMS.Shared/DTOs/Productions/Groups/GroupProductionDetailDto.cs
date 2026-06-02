@@ -25,7 +25,7 @@ namespace AMMS.Shared.DTOs.Productions.Groups
         public GroupProductionTaskContextDto? task_context { get; set; }
         public List<GroupProductionOrderDto> orders { get; set; } = new();
         public List<GroupProductionStageDto> stages { get; set; } = new();
-
+        public GroupProductionConfirmPreviewResponse? preview { get; set; }
         public GroupProductionPreviousStageContextDto? previous_stage_context { get; set; }
 
     }

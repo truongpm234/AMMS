@@ -494,18 +494,10 @@ namespace AMMS.Application.Services
                     }
                 }
 
-                foreach (var row in rows)
-                {
-                    row.Order.status = "Scheduled";
-                    row.SingleProd.status = "Scheduled";
-
-                    /*
-                     * Nếu EnsureSinglePrivateTasksBeforeGroupAsync đã set planned_start_date theo private stage,
-                     * không overwrite nữa.
-                     */
-                    row.SingleProd.planned_start_date ??= preview.suggested_planned_start_date;
-                    row.SingleProd.planned_end_date = preview.estimated_finish_date;
-                }
+                await MarkGroupedOrdersAndSingleProductionsScheduledAsync(
+                    rows,
+                    preview,
+                    ct);
 
                 await _db.SaveChangesAsync(ct);
                 await tx.CommitAsync(ct);
@@ -536,6 +528,69 @@ namespace AMMS.Application.Services
                     message = "Đã tạo lệnh sản xuất ghép theo đúng kế hoạch preview."
                 };
             });
+        }
+
+        private async Task MarkGroupedOrdersAndSingleProductionsScheduledAsync(
+    List<GroupOrderRow> rows,
+    GroupProductionConfirmPreviewResponse preview,
+    CancellationToken ct)
+        {
+            var orderIds = rows
+                .Select(x => x.Order.order_id)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            var singleProdIds = rows
+                .Select(x => x.SingleProd.prod_id)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            if (orderIds.Count == 0 || singleProdIds.Count == 0)
+                return;
+
+            var orders = await _db.orders
+                .Where(x => orderIds.Contains(x.order_id))
+                .ToListAsync(ct);
+
+            foreach (var ord in orders)
+            {
+                /*
+                 * Create group chỉ là lập lịch, chưa start.
+                 */
+                ord.status = "Scheduled";
+            }
+
+            var singleProds = await _db.productions
+                .Where(x => singleProdIds.Contains(x.prod_id))
+                .ToListAsync(ct);
+
+            foreach (var prod in singleProds)
+            {
+                /*
+                 * Lệnh RALO,CAT,IN riêng từng order chỉ được Scheduled sau khi tạo group.
+                 * Không được tự chuyển InProcessing ở bước create group.
+                 */
+                prod.status = "Scheduled";
+                prod.actual_start_date = null;
+
+                var privateStage = preview.private_stages
+                    .FirstOrDefault(x =>
+                        prod.order_id.HasValue &&
+                        x.order_ids.Contains(prod.order_id.Value));
+
+                if (privateStage != null)
+                {
+                    prod.planned_start_date = privateStage.planned_start_date;
+                    prod.planned_end_date = preview.estimated_finish_date;
+                }
+                else
+                {
+                    prod.planned_start_date ??= preview.suggested_planned_start_date;
+                    prod.planned_end_date = preview.estimated_finish_date;
+                }
+            }
         }
 
         private async Task EnsureSinglePrivateTasksBeforeGroupAsync(
@@ -1747,6 +1802,12 @@ namespace AMMS.Application.Services
                 .OrderBy(FullRouteIndex)
                 .ToList();
 
+            if (routeCodes.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    $"Order {row.Order.order_id} chưa có production_process hợp lệ.");
+            }
+
             var commonDeadline = ResolveCommonDeadline(new List<GroupOrderRow> { row });
             var suggestedStart = ResolveSuggestedStart(commonDeadline);
             var plannedEnd = suggestedStart.AddDays(MinProductionDays);
@@ -1778,17 +1839,78 @@ namespace AMMS.Application.Services
                 prod_kind = "SINGLE",
                 department_code = "FULL_PATH",
                 department_name = "Full production path",
+
                 order_ids = new List<int> { row.Order.order_id },
                 order_codes = new List<string?> { row.Order.code },
+
                 process_codes = routeCodes,
+
                 planned_start_date = suggestedStart,
                 planned_end_date = plannedEnd,
                 duration_days = MinProductionDays,
+
                 tasks = tasks,
-                note = "Order không đủ điều kiện ghép với order khác nên đề xuất sản xuất đơn full công đoạn."
+                note = NoteSinglePreview
             };
 
-            var note = NoteSinglePreview;
+            var timelineStage = BuildStageDto(
+                deptCode: "FULL_PATH",
+                deptName: "Full production path",
+                stageType: "SINGLE",
+                processCodes: routeCodes,
+                orderIds: new List<int> { row.Order.order_id },
+                start: suggestedStart,
+                durationDays: MinProductionDays,
+                note: NoteSinglePreview);
+
+            var daysLate = Math.Max(
+                0,
+                (plannedEnd.Date - commonDeadline.Date).Days);
+
+            /*
+             * FIX CHÍNH:
+             * Trước đây SINGLE_PREVIEW không set preview nên response trả preview = null.
+             * Bây giờ tạo preview đầy đủ giống cấu trúc API preview.
+             */
+            var preview = new GroupProductionConfirmPreviewResponse
+            {
+                suggestion_type = "SINGLE_PREVIEW",
+                can_group = false,
+                create_group_allowed = false,
+
+                product_type_id = productTypeId,
+                product_type_name = productTypeName,
+                production_method = productionMethod,
+
+                order_count = 1,
+                order_codes = new List<string?> { row.Order.code },
+                orders = new List<SuggestionOrderPreviewDto> { orderDto },
+                batches = new List<SuggestionBatchPreviewDto> { batch },
+
+                order_ids = new List<int> { row.Order.order_id },
+                process_codes = routeCodes,
+                selected_process_codes = routeCodes,
+
+                common_delivery_deadline = commonDeadline,
+                suggested_planned_start_date = suggestedStart,
+                estimated_finish_date = plannedEnd,
+                total_duration_days = MinProductionDays,
+
+                dept1_private_stage = null,
+                private_stages = new List<GroupProductionScheduleStageDto>(),
+                group_stages = new List<GroupProductionScheduleStageDto>(),
+                split_stages = new List<GroupProductionScheduleStageDto>(),
+                timeline = new List<GroupProductionScheduleStageDto> { timelineStage },
+
+                can_meet_common_deadline = daysLate == 0,
+                days_late_if_any = daysLate,
+
+                warnings = new List<GroupProductionPlanWarningDto>(),
+                notes = new List<string>(),
+
+                reason = NoteSinglePreview,
+                note = NoteSinglePreview
+            };
 
             return new SuggestedGroupProductionDto
             {
@@ -1813,17 +1935,22 @@ namespace AMMS.Application.Services
                 order_codes = new List<string?> { row.Order.code },
                 orders = new List<SuggestionOrderPreviewDto> { orderDto },
 
+                batches = new List<SuggestionBatchPreviewDto> { batch },
+
                 suggested_planned_start_date = suggestedStart,
                 schedule_planned_start_date = suggestedStart,
                 common_delivery_deadline = commonDeadline,
                 estimated_finish_date = plannedEnd,
                 schedule_planned_end_date = plannedEnd,
                 estimated_total_days = MinProductionDays,
+                preview = preview,
+                preview_error = null,
 
-                batches = new List<SuggestionBatchPreviewDto> { batch },
+                auto_split_productions = new List<SuggestedSplitProductionDto>(),
+                warnings = new List<GroupProductionPlanWarningDto>(),
 
+                reason = NoteSinglePreview,
                 note = NoteSinglePreview
-
             };
         }
 
@@ -2475,6 +2602,12 @@ namespace AMMS.Application.Services
     orderRows,
     stages);
 
+            var preview = await BuildProductionGroupPreviewForDetailAsync(
+                prod,
+                orderRows,
+                productTypeName,
+                ct);
+
             return new GroupProductionDetailDto
             {
                 prod_id = prod.prod_id,
@@ -2482,20 +2615,345 @@ namespace AMMS.Application.Services
                 status = prod.status,
                 can_start = canStart,
                 can_start_message = canStartMessage,
+
                 product_type_id = prod.product_type_id,
                 product_type_name = productTypeName,
+
                 planned_start_date = prod.planned_start_date,
                 planned_end_date = prod.planned_end_date,
                 actual_start_date = prod.actual_start_date,
                 end_date = prod.end_date,
+
                 issue_file = prod.sub_product_issue_file,
                 total_qty = displayTotalQty,
                 process_codes = prod.group_process_codes,
+
                 orders = orderRows,
                 stages = stages,
-                previous_stage_context = previousStageContext
+                previous_stage_context = previousStageContext,
+
+                preview = preview
             };
         }
+
+        private async Task<GroupProductionConfirmPreviewResponse> BuildProductionGroupPreviewForDetailAsync(
+    production groupProd,
+    List<GroupProductionOrderDto> orderRows,
+    string? productTypeName,
+    CancellationToken ct)
+        {
+            orderRows ??= new List<GroupProductionOrderDto>();
+
+            var orderIds = orderRows
+                .Select(x => x.order_id)
+                .Where(x => x > 0)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToList();
+
+            var productTypeId = groupProd.product_type_id ?? 0;
+
+            var orders = await BuildSuggestionOrdersForDetailAsync(
+                orderRows,
+                productTypeName,
+                ct);
+
+            /*
+             * 1. Private stages: lấy từ single production của từng order.
+             * Đây chính là batch RALO,CAT,IN riêng từng order.
+             */
+            var privateStages = await BuildPrivateStagesForExistingGroupDetailAsync(
+                orderRows,
+                ct);
+
+            /*
+             * 2. Group stage: lấy từ chính group production hiện tại.
+             * Đây là batch GROUP chung PHU/CAN/BOI.
+             */
+            var groupStages = await BuildGroupStagesForExistingGroupDetailAsync(
+                groupProd,
+                orderRows,
+                ct);
+
+            /*
+             * 3. Split stages: lấy từ các SPLIT production của từng order.
+             * Đây là batch BE,DUT,DAN riêng từng order.
+             */
+            var splitStages = await BuildSplitStagesForExistingGroupDetailAsync(
+                groupProd,
+                orderRows,
+                ct);
+
+            var timeline = new List<GroupProductionScheduleStageDto>();
+            timeline.AddRange(privateStages);
+            timeline.AddRange(groupStages);
+            timeline.AddRange(splitStages);
+
+            timeline = timeline
+                .OrderBy(x => x.planned_start_date)
+                .ThenBy(x => StageOrder(x.stage_type))
+                .ThenBy(x => x.order_ids == null || x.order_ids.Count == 0
+                    ? int.MaxValue
+                    : x.order_ids.Min())
+                .ToList();
+
+            var start = timeline.Count > 0
+                ? timeline.Min(x => x.planned_start_date)
+                : groupProd.planned_start_date ?? AppTime.NowVnUnspecified();
+
+            var end = timeline.Count > 0
+                ? timeline.Max(x => x.planned_end_date)
+                : groupProd.planned_end_date ?? start;
+
+            var commonDeadline = await _db.orders
+                .AsNoTracking()
+                .Where(x => orderIds.Contains(x.order_id) && x.delivery_date != null)
+                .Select(x => x.delivery_date!.Value)
+                .DefaultIfEmpty(end)
+                .MinAsync(ct);
+
+            var daysLate = Math.Max(0, (end.Date - commonDeadline.Date).Days);
+
+            var batches = productTypeId > 0
+                ? await BuildBatchesFromGroupPreviewAsync(
+                    new GroupProductionConfirmPreviewResponse
+                    {
+                        timeline = timeline
+                    },
+                    orders,
+                    productTypeId,
+                    ct)
+                : new List<SuggestionBatchPreviewDto>();
+
+            return new GroupProductionConfirmPreviewResponse
+            {
+                suggestion_type = "GROUP_WITH_AUTO_SPLIT",
+                can_group = string.Equals(groupProd.status, "Pending", StringComparison.OrdinalIgnoreCase),
+                create_group_allowed = false,
+
+                product_type_id = groupProd.product_type_id,
+                product_type_name = productTypeName,
+                production_method = groupProd.prod_method,
+
+                order_count = orderRows.Count,
+                order_codes = orders.Select(x => x.order_code).ToList(),
+                orders = orders,
+                batches = batches,
+
+                order_ids = orderIds,
+                process_codes = ParseProcessCodes(groupProd.group_process_codes),
+                selected_process_codes = ParseProcessCodes(groupProd.group_process_codes),
+
+                common_delivery_deadline = commonDeadline,
+                suggested_planned_start_date = start,
+                estimated_finish_date = end,
+                total_duration_days = Math.Max(1, (end.Date - start.Date).Days),
+
+                dept1_private_stage = privateStages.Count == 0
+                    ? null
+                    : BuildAggregateStageForDetail(
+                        "PRIVATE_BEFORE_GROUP",
+                        "Công đoạn riêng trước ghép nhóm",
+                        "SINGLE_PRIVATE",
+                        privateStages,
+                        NotePrivateBeforeGroup),
+
+                private_stages = privateStages,
+                group_stages = groupStages,
+                split_stages = splitStages,
+                timeline = timeline,
+
+                can_meet_common_deadline = daysLate == 0,
+                days_late_if_any = daysLate,
+
+                warnings = new List<GroupProductionPlanWarningDto>(),
+                notes = new List<string>(),
+
+                reason = NoteGroupSuggestion,
+                note = NoteGroupSuggestion
+            };
+        }
+
+        private async Task<List<SuggestionOrderPreviewDto>> BuildSuggestionOrdersForDetailAsync(
+    List<GroupProductionOrderDto> orderRows,
+    string? productTypeName,
+    CancellationToken ct)
+        {
+            var orderIds = orderRows
+                .Select(x => x.order_id)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            if (orderIds.Count == 0)
+                return new List<SuggestionOrderPreviewDto>();
+
+            var rows = await (
+                from o in _db.orders.AsNoTracking()
+                join pr in _db.productions.AsNoTracking()
+                    on o.order_id equals pr.order_id
+                join oi0 in _db.order_items.AsNoTracking()
+                    on o.order_id equals oi0.order_id into oij
+                from oi in oij
+                    .OrderBy(x => x.item_id)
+                    .Take(1)
+                    .DefaultIfEmpty()
+                where orderIds.Contains(o.order_id)
+                      && pr.prod_kind == "SINGLE"
+                select new
+                {
+                    Order = o,
+                    SingleProd = pr,
+                    Item = oi
+                }
+            ).ToListAsync(ct);
+
+            return rows
+                .OrderBy(x => x.Order.delivery_date)
+                .ThenBy(x => x.Order.order_id)
+                .Select(x => new SuggestionOrderPreviewDto
+                {
+                    order_id = x.Order.order_id,
+                    order_code = x.Order.code,
+                    single_prod_id = x.SingleProd.prod_id,
+
+                    product_type_id = x.Item != null ? x.Item.product_type_id : x.SingleProd.product_type_id,
+                    product_type_name = productTypeName,
+
+                    product_name = x.Item?.product_name,
+                    quantity = x.Item?.quantity ?? 0,
+                    production_process = x.Item?.production_process,
+
+                    production_method = x.SingleProd.prod_method,
+                    delivery_date = x.Order.delivery_date
+                })
+                .ToList();
+        }
+
+        private static GroupProductionScheduleStageDto BuildStageFromExistingTasks(
+    string deptCode,
+    string deptName,
+    string stageType,
+    List<int> orderIds,
+    List<task> tasks,
+    DateTime fallbackStart,
+    DateTime fallbackEnd,
+    string note)
+        {
+            tasks ??= new List<task>();
+
+            var processCodes = tasks
+                .Select(x => NormProcessCode(x.process?.process_code))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+
+            var start = tasks
+                .Where(x => x.planned_start_time.HasValue)
+                .Select(x => x.planned_start_time!.Value)
+                .DefaultIfEmpty(fallbackStart)
+                .Min();
+
+            var end = tasks
+                .Where(x => x.planned_end_time.HasValue)
+                .Select(x => x.planned_end_time!.Value)
+                .DefaultIfEmpty(fallbackEnd)
+                .Max();
+
+            if (end < start)
+                end = start;
+
+            return new GroupProductionScheduleStageDto
+            {
+                dept_code = deptCode,
+                dept_name = deptName,
+                stage_type = stageType,
+
+                process_codes = processCodes,
+                order_ids = orderIds,
+
+                planned_start_date = start,
+                planned_end_date = end,
+                duration_days = Math.Max(1, (end.Date - start.Date).Days),
+
+                note = note
+            };
+        }
+
+        private async Task<List<GroupProductionScheduleStageDto>> BuildPrivateStagesForExistingGroupDetailAsync(
+    List<GroupProductionOrderDto> orderRows,
+    CancellationToken ct)
+        {
+            var result = new List<GroupProductionScheduleStageDto>();
+
+            var singleProdIds = orderRows
+                .Select(x => x.single_prod_id)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            if (singleProdIds.Count == 0)
+                return result;
+
+            var singleProds = await _db.productions
+                .AsNoTracking()
+                .Where(x => singleProdIds.Contains(x.prod_id))
+                .ToDictionaryAsync(x => x.prod_id, ct);
+
+            var tasks = await _db.tasks
+                .AsNoTracking()
+                .Include(x => x.process)
+                .Where(x => x.prod_id.HasValue && singleProdIds.Contains(x.prod_id.Value))
+                .ToListAsync(ct);
+
+            var privateCodeSet = Dept1Codes
+                .Select(NormProcessCode)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var order in orderRows.OrderBy(x => x.order_id))
+            {
+                if (order.single_prod_id <= 0)
+                    continue;
+
+                var prodTasks = tasks
+                    .Where(x => x.prod_id == order.single_prod_id)
+                    .Where(x => privateCodeSet.Contains(NormProcessCode(x.process?.process_code)))
+                    .OrderBy(x => x.seq_num)
+                    .ThenBy(x => x.task_id)
+                    .ToList();
+
+                if (prodTasks.Count == 0)
+                    continue;
+
+                singleProds.TryGetValue(order.single_prod_id, out var singleProd);
+
+                var fallbackStart =
+                    singleProd?.planned_start_date ??
+                    prodTasks.FirstOrDefault()?.planned_start_time ??
+                    AppTime.NowVnUnspecified();
+
+                var fallbackEnd =
+                    singleProd?.planned_end_date ??
+                    prodTasks.LastOrDefault()?.planned_end_time ??
+                    fallbackStart;
+
+                var stage = BuildStageFromExistingTasks(
+                    deptCode: "PRIVATE_BEFORE_GROUP",
+                    deptName: "Công đoạn riêng trước ghép nhóm",
+                    stageType: "SINGLE_PRIVATE",
+                    orderIds: new List<int> { order.order_id },
+                    tasks: prodTasks,
+                    fallbackStart: fallbackStart,
+                    fallbackEnd: fallbackEnd,
+                    note: NotePrivateBeforeGroup);
+
+                result.Add(stage);
+            }
+
+            return result;
+        }
+
 
         private static bool IsGroupSubProductionForDetail(production prod)
         {
@@ -2607,6 +3065,201 @@ namespace AMMS.Application.Services
                 .Where(x => x > 0)
                 .DefaultIfEmpty(0m)
                 .Max();
+        }
+
+        private async Task<List<GroupProductionScheduleStageDto>> BuildGroupStagesForExistingGroupDetailAsync(
+    production groupProd,
+    List<GroupProductionOrderDto> orderRows,
+    CancellationToken ct)
+        {
+            var tasks = await _db.tasks
+                .AsNoTracking()
+                .Include(x => x.process)
+                .Where(x => x.prod_id == groupProd.prod_id)
+                .OrderBy(x => x.seq_num)
+                .ThenBy(x => x.task_id)
+                .ToListAsync(ct);
+
+            if (tasks.Count == 0)
+                return new List<GroupProductionScheduleStageDto>();
+
+            var orderIds = orderRows
+                .Select(x => x.order_id)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToList();
+
+            var fallbackStart =
+                groupProd.planned_start_date ??
+                tasks.FirstOrDefault()?.planned_start_time ??
+                AppTime.NowVnUnspecified();
+
+            var fallbackEnd =
+                groupProd.planned_end_date ??
+                tasks.LastOrDefault()?.planned_end_time ??
+                fallbackStart;
+
+            return new List<GroupProductionScheduleStageDto>
+    {
+        BuildStageFromExistingTasks(
+            deptCode: "DEPT_2",
+            deptName: "Phủ - Cán - Bồi",
+            stageType: "GROUP",
+            orderIds: orderIds,
+            tasks: tasks,
+            fallbackStart: fallbackStart,
+            fallbackEnd: fallbackEnd,
+            note: NoteGroupDept2)
+    };
+        }
+
+        private async Task<List<GroupProductionScheduleStageDto>> BuildSplitStagesForExistingGroupDetailAsync(
+    production groupProd,
+    List<GroupProductionOrderDto> orderRows,
+    CancellationToken ct)
+        {
+            var result = new List<GroupProductionScheduleStageDto>();
+
+            var orderIds = orderRows
+                .Select(x => x.order_id)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            if (orderIds.Count == 0)
+                return result;
+
+            /*
+             * Vì schema hiện chưa có field parent_group_prod_id,
+             * tạm xác định SPLIT theo:
+             * - cùng order_id
+             * - prod_kind = SPLIT
+             * - không Cancelled
+             * - planned_start_date >= group.planned_end_date hoặc trong vùng kế hoạch của group.
+             */
+            var groupEnd = groupProd.planned_end_date ?? groupProd.planned_start_date;
+
+            var splitProds = await _db.productions
+                .AsNoTracking()
+                .Where(x =>
+                    x.order_id.HasValue &&
+                    orderIds.Contains(x.order_id.Value) &&
+                    x.prod_kind == "SPLIT" &&
+                    x.status != "Cancelled")
+                .Where(x =>
+                    groupEnd == null ||
+                    x.planned_start_date == null ||
+                    x.planned_start_date >= groupEnd)
+                .OrderBy(x => x.order_id)
+                .ThenBy(x => x.planned_start_date)
+                .ThenBy(x => x.prod_id)
+                .ToListAsync(ct);
+
+            if (splitProds.Count == 0)
+                return result;
+
+            var splitProdIds = splitProds
+                .Select(x => x.prod_id)
+                .Distinct()
+                .ToList();
+
+            var tasks = await _db.tasks
+                .AsNoTracking()
+                .Include(x => x.process)
+                .Where(x => x.prod_id.HasValue && splitProdIds.Contains(x.prod_id.Value))
+                .OrderBy(x => x.seq_num)
+                .ThenBy(x => x.task_id)
+                .ToListAsync(ct);
+
+            foreach (var splitProd in splitProds)
+            {
+                if (!splitProd.order_id.HasValue)
+                    continue;
+
+                var splitTasks = tasks
+                    .Where(x => x.prod_id == splitProd.prod_id)
+                    .OrderBy(x => x.seq_num)
+                    .ThenBy(x => x.task_id)
+                    .ToList();
+
+                if (splitTasks.Count == 0)
+                    continue;
+
+                var fallbackStart =
+                    splitProd.planned_start_date ??
+                    splitTasks.FirstOrDefault()?.planned_start_time ??
+                    groupProd.planned_end_date ??
+                    AppTime.NowVnUnspecified();
+
+                var fallbackEnd =
+                    splitProd.planned_end_date ??
+                    splitTasks.LastOrDefault()?.planned_end_time ??
+                    fallbackStart;
+
+                var stage = BuildStageFromExistingTasks(
+                    deptCode: "SPLIT",
+                    deptName: "Công đoạn riêng sau ghép nhóm",
+                    stageType: "SPLIT",
+                    orderIds: new List<int> { splitProd.order_id.Value },
+                    tasks: splitTasks,
+                    fallbackStart: fallbackStart,
+                    fallbackEnd: fallbackEnd,
+                    note: NoteSplitAfterGroup);
+
+                stage.split_prod_id = splitProd.prod_id;
+
+                result.Add(stage);
+            }
+
+            return result;
+        }
+
+        private static GroupProductionScheduleStageDto BuildAggregateStageForDetail(
+    string deptCode,
+    string deptName,
+    string stageType,
+    List<GroupProductionScheduleStageDto> stages,
+    string note)
+        {
+            stages ??= new List<GroupProductionScheduleStageDto>();
+
+            var processCodes = stages
+                .SelectMany(x => x.process_codes ?? new List<string>())
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+
+            var orderIds = stages
+                .SelectMany(x => x.order_ids ?? new List<int>())
+                .Distinct()
+                .OrderBy(x => x)
+                .ToList();
+
+            var start = stages.Count == 0
+                ? AppTime.NowVnUnspecified()
+                : stages.Min(x => x.planned_start_date);
+
+            var end = stages.Count == 0
+                ? start
+                : stages.Max(x => x.planned_end_date);
+
+            return new GroupProductionScheduleStageDto
+            {
+                dept_code = deptCode,
+                dept_name = deptName,
+                stage_type = stageType,
+
+                process_codes = processCodes,
+                order_ids = orderIds,
+
+                planned_start_date = start,
+                planned_end_date = end,
+                duration_days = Math.Max(1, (end.Date - start.Date).Days),
+
+                note = note
+            };
         }
 
         private static int ResolveGroupProductionDetailTotalQty(
