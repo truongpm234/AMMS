@@ -61,11 +61,11 @@ namespace AMMS.Shared.DTOs.Productions.Groups
 
         public string? preview_error { get; set; }
 
+        public string? reason { get; set; }
+
         public List<SuggestedSplitProductionDto> auto_split_productions { get; set; } = new();
 
         public List<GroupProductionPlanWarningDto> warnings { get; set; } = new();
-
-        public string? reason { get; set; }
 
         public string? note { get; set; }
     }

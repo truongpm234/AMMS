@@ -19,13 +19,28 @@ namespace AMMS.Application.Services
         private readonly IHubContext<RealtimeHub> _hub;
         private readonly ITaskScanService _scanSvc;
         private static readonly string[] Dept1Codes = { "RALO", "CAT", "IN" };
-        private static readonly string[] Dept2Codes = { "PHU", "CAN", "CAN_MANG", "BOI" };
+        private static readonly string[] Dept2Codes = { "PHU", "CAN", "BOI" };
         private static readonly string[] Dept3Codes = { "BE", "DUT", "DAN" };
+        private static readonly string[] GroupableDept2Codes = { "PHU", "CAN", "BOI" };
         private static readonly string[] FullRouteOrder = { "RALO", "CAT", "IN", "PHU", "CAN", "CAN_MANG", "BOI", "BE", "DUT", "DAN" };
         private const int MinProductionDays = 7;
         private const int Dept1Days = 3;
         private const int Dept2Days = 2;
         private const int Dept3Days = 2;
+        private const string NotePrivateBeforeGroup =
+    "Các công đoạn đầu được tách thành lệnh sản xuất riêng cho từng đơn hàng.";
+
+        private const string NoteGroupDept2 =
+            "Các công đoạn phòng ban 2 đủ điều kiện sẽ được ghép chung vào một lệnh sản xuất.";
+
+        private const string NoteSplitAfterGroup =
+            "Các công đoạn sau ghép nhóm được tách thành lệnh sản xuất riêng cho từng đơn hàng.";
+
+        private const string NoteSinglePreview =
+            "Đơn hàng không đủ điều kiện ghép nhóm nên được đề xuất sản xuất riêng.";
+
+        private const string NoteGroupSuggestion =
+            "Các đơn hàng đủ điều kiện ghép nhóm ở công đoạn phòng ban 2. Các công đoạn còn lại sẽ được tách riêng theo từng đơn hàng.";
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
@@ -118,7 +133,14 @@ namespace AMMS.Application.Services
     CancellationToken ct)
         {
             var today = AppTime.NowVnUnspecified().Date;
+
+            /*
+             * Nếu muốn chỉ hiện đơn giao >= 7 ngày thì giữ minDeliveryDate.
+             * Nếu muốn single preview hiện cả đơn gấp thì chỉ check delivery_date != null.
+             */
             var minDeliveryDate = today.AddDays(MinProductionDays);
+
+            selectedCodes = NormalizeSelectedCodesForGroup(selectedCodes);
 
             var orderIds = await (
                 from o in _db.orders.AsNoTracking()
@@ -133,6 +155,11 @@ namespace AMMS.Application.Services
                       && o.is_production_ready
 
                       && o.delivery_date != null
+
+                      /*
+                       * không hiện single preview thì bỏ comment dòng dưới.
+                       */
+                      //&& o.delivery_date >= minDeliveryDate
 
                       && !_db.tasks.Any(t => t.prod_id == pr.prod_id)
 
@@ -179,6 +206,12 @@ namespace AMMS.Application.Services
 
             selectedCodes = NormalizeSelectedCodesForGroup(selectedCodes);
 
+            /*
+             * Nếu FE truyền processCodes thì process đó bắt buộc phải là PHU/CAN/BOI.
+             */
+            if (selectedCodes.Count > 0)
+                EnsureOnlyGroupableDept2Codes(selectedCodes);
+
             var orderIds = rows
                 .Select(x => x.Order.order_id)
                 .Distinct()
@@ -193,11 +226,6 @@ namespace AMMS.Application.Services
                 orderIds,
                 ct);
 
-            /*
-             * FIX CHÍNH:
-             * NVL: check toàn bộ task như cũ.
-             * SUB: chỉ check task công đoạn group đang chọn / Dept2.
-             */
             var startedSingleProdIds = await LoadSingleProdIdsHavingStartedTaskAsync(
                 singleProdIds,
                 selectedCodes,
@@ -209,7 +237,7 @@ namespace AMMS.Application.Services
                 .Where(x => x.Item != null)
 
                 /*
-                 * Chỉ hiển thị suggestion cho order/production chưa lập lịch.
+                 * chỉ Pending mới được suggestion/group.
                  */
                 .Where(x => string.Equals(
                     x.Order.status,
@@ -230,12 +258,16 @@ namespace AMMS.Application.Services
                     !productTypeId.HasValue ||
                     x.Item.product_type_id == productTypeId.Value)
 
-                .Where(x => ResolveRowProductionMethodOrNull(x) != null)
+                /*
+                 * - NVL/SUB được phép ghép chung.
+                 * - BOTH không được ghép.
+                 */
                 .Where(x =>
                 {
                     var method = ResolveRowProductionMethodOrNull(x);
                     return method == "NVL" || method == "SUB";
                 })
+
                 .Where(x =>
                     selectedCodes.Count == 0 ||
                     selectedCodes.All(code =>
@@ -335,18 +367,17 @@ namespace AMMS.Application.Services
                     throw new InvalidOperationException("Một số order chưa có order_item.");
 
                 var invalidStatusOrders = rows
-                    .Where(x =>
-                        !string.Equals(x.Order.status, "Pending", StringComparison.OrdinalIgnoreCase) ||
-                        !string.Equals(x.SingleProd.status, "Pending", StringComparison.OrdinalIgnoreCase))
-                    .Select(x =>
-                        $"{x.Order.order_id}(order={x.Order.status}, production={x.SingleProd.status})")
-                    .ToList();
+    .Where(x =>
+        !string.Equals(x.Order.status, "Pending", StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(x.SingleProd.status, "Pending", StringComparison.OrdinalIgnoreCase))
+    .Select(x =>
+        $"{x.Order.order_id}(order={x.Order.status}, production={x.SingleProd.status})")
+    .ToList();
 
                 if (invalidStatusOrders.Count > 0)
                 {
                     throw new InvalidOperationException(
                         "Chỉ order/production Pending mới được tạo lệnh ghép. " +
-                        "Order/production đã Scheduled nghĩa là đã lập lịch, không được ghép nữa. " +
                         $"Không hợp lệ: {string.Join(", ", invalidStatusOrders)}");
                 }
 
@@ -362,7 +393,7 @@ namespace AMMS.Application.Services
                     throw new InvalidOperationException("Các order phải cùng product_type.");
 
                 var productTypeId = productTypeIds[0]!.Value;
-                ValidateRowsHaveSameProductionMethodOrThrow(
+                ValidateRowsHaveGroupableProductionMethodOrThrow(
     rows,
     "tạo lệnh ghép");
 
@@ -400,9 +431,9 @@ namespace AMMS.Application.Services
                     .OrderBy(x => x.seq_num)
                     .ToListAsync(ct);
 
-                await EnsureSingleHeadTasksBeforeGroupAsync(
+                await EnsureSinglePrivateTasksBeforeGroupAsync(
                     rows,
-                    selectedCodes,
+                    plan,
                     allSteps,
                     preview,
                     ct);
@@ -492,6 +523,156 @@ namespace AMMS.Application.Services
                     message = "Đã tạo production theo phòng ban, path công đoạn và điều kiện NVL."
                 };
             });
+        }
+
+        private async Task EnsureSinglePrivateTasksBeforeGroupAsync(
+    List<GroupOrderRow> rows,
+    List<ProductionPlanSegment> plan,
+    List<product_type_process> allSteps,
+    GroupProductionConfirmPreviewResponse preview,
+    CancellationToken ct)
+        {
+            var groupSegments = plan
+                .Where(x => x.IsGroup)
+                .ToList();
+
+            if (groupSegments.Count == 0)
+                return;
+
+            var groupedCodeByOrderId = groupSegments
+                .SelectMany(segment => segment.Members.Select(member => new
+                {
+                    order_id = member.Order.order_id,
+                    codes = segment.ProcessCodes
+                }))
+                .GroupBy(x => x.order_id)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.SelectMany(x => x.codes)
+                        .Select(NormProcessCode)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList());
+
+            var now = AppTime.NowVnUnspecified();
+
+            foreach (var row in rows)
+            {
+                if (!groupedCodeByOrderId.TryGetValue(row.Order.order_id, out var groupedCodes) ||
+                    groupedCodes.Count == 0)
+                {
+                    continue;
+                }
+
+                var privateCodesBeforeGroup = BuildPrivateCodesBeforeGroupForOrder(
+                    row,
+                    groupedCodes);
+
+                if (privateCodesBeforeGroup.Count == 0)
+                    continue;
+
+                var stage = preview.private_stages.FirstOrDefault(x =>
+                    x.order_ids.Contains(row.Order.order_id) &&
+                    SameProcessCodes(x.process_codes, privateCodesBeforeGroup));
+
+                if (stage == null)
+                {
+                    stage = BuildStageDto(
+                        deptCode: "PRIVATE_BEFORE_GROUP",
+                        deptName: "Công đoạn riêng trước ghép nhóm",
+                        stageType: "SINGLE_PRIVATE",
+                        processCodes: privateCodesBeforeGroup,
+                        orderIds: new List<int> { row.Order.order_id },
+                        start: preview.suggested_planned_start_date,
+                        durationDays: Dept1Days,
+                        note: NotePrivateBeforeGroup);
+                }
+
+                var existingCodes = await _db.tasks
+                    .AsNoTracking()
+                    .Include(x => x.process)
+                    .Where(x => x.prod_id == row.SingleProd.prod_id)
+                    .Select(x => x.process != null ? x.process.process_code : null)
+                    .ToListAsync(ct);
+
+                var existingSet = existingCodes
+                    .Select(NormProcessCode)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                var method = ResolveRowProductionMethodOrNull(row);
+
+                var subCoveredCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                if (method == "SUB" && row.SingleProd.sub_product_id.HasValue)
+                {
+                    var subPath = await _db.sub_products
+                        .AsNoTracking()
+                        .Where(x => x.id == row.SingleProd.sub_product_id.Value)
+                        .Select(x => x.product_process)
+                        .FirstOrDefaultAsync(ct);
+
+                    subCoveredCodes = ParseProcessCodes(subPath)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                }
+
+                var steps = allSteps
+                    .Where(x => privateCodesBeforeGroup.Contains(
+                        NormProcessCode(x.process_code),
+                        StringComparer.OrdinalIgnoreCase))
+                    .OrderBy(x => x.seq_num)
+                    .ToList();
+
+                var totalMinutes = Math.Max(1, (int)(stage.planned_end_date - stage.planned_start_date).TotalMinutes);
+                var minutesPerTask = Math.Max(1, totalMinutes / Math.Max(1, steps.Count));
+
+                for (var i = 0; i < steps.Count; i++)
+                {
+                    var step = steps[i];
+                    var code = NormProcessCode(step.process_code);
+
+                    if (existingSet.Contains(code))
+                        continue;
+
+                    var isFinishedBySub =
+                        method == "SUB" &&
+                        subCoveredCodes.Contains(code);
+
+                    var taskStart = stage.planned_start_date.AddMinutes(minutesPerTask * i);
+                    var taskEnd = i == steps.Count - 1
+                        ? stage.planned_end_date
+                        : stage.planned_start_date.AddMinutes(minutesPerTask * (i + 1));
+
+                    await _db.tasks.AddAsync(new task
+                    {
+                        prod_id = row.SingleProd.prod_id,
+                        process_id = step.process_id,
+                        seq_num = step.seq_num,
+                        name = step.process_name ?? step.process_code ?? code,
+
+                        status = isFinishedBySub ? "Finished" : "Unassigned",
+
+                        machine = ResolveTaskMachineFromProcess(step),
+                        input_mode = "MANUAL",
+
+                        start_time = isFinishedBySub ? now : null,
+                        end_time = isFinishedBySub ? now : null,
+
+                        planned_start_time = taskStart,
+                        planned_end_time = taskEnd,
+
+                        reason = isFinishedBySub
+                            ? "Bán thành phẩm đã đáp ứng công đoạn riêng trước ghép nhóm."
+                            : "Công đoạn riêng trước ghép nhóm.",
+
+                        is_taken_sub_product = isFinishedBySub
+                    }, ct);
+                }
+
+                row.SingleProd.status = "Scheduled";
+                row.SingleProd.planned_start_date ??= stage.planned_start_date;
+                row.SingleProd.planned_end_date = preview.estimated_finish_date;
+            }
+
+            await _db.SaveChangesAsync(ct);
         }
 
         private async Task ValidateCreateSelectionBelongsToGroupSuggestionAsync(
@@ -717,7 +898,8 @@ namespace AMMS.Application.Services
                 segment.DepartmentCode,
                 ct);
 
-            var inheritedProdMethod = ResolveSegmentProductionMethodOrThrow(segment);
+            var inheritedProdMethod = ResolveGroupProductionMethodLabel(segment.Members);
+            var methodSummary = ResolveMethodSummary(segment.Members);
 
             var groupProd = new production
             {
@@ -729,11 +911,14 @@ namespace AMMS.Application.Services
                 status = "Scheduled",
                 product_type_id = productTypeId,
                 planned_end_date = plannedEnd,
-                note = string.IsNullOrWhiteSpace(note)
-                    ? $"Group {segment.DepartmentName}: {codesCsv}"
-                    : $"{note} | Group {segment.DepartmentName}: {codesCsv}",
                 prod_kind = "GROUP",
                 prod_method = inheritedProdMethod,
+                is_full_process = inheritedProdMethod == "NVL"
+                    ? true
+                    : inheritedProdMethod == "SUB"
+                        ? false
+                        : null,
+                note = NoteGroupDept2,
                 group_process_codes = codesCsv,
                 group_total_qty = segment.Members.Sum(x => x.Item.quantity)
             };
@@ -871,9 +1056,7 @@ namespace AMMS.Application.Services
                     planned_start_time = taskStart,
                     planned_end_time = taskEnd,
 
-                    reason =
-                        $"Task thuộc production ghép phòng ban {segment.DepartmentName}. " +
-                        $"Order={string.Join(",", segment.Members.Select(x => x.Order.code ?? x.Order.order_id.ToString()))}."
+                    reason = NoteGroupDept2
                 };
 
                 await _db.tasks.AddAsync(groupTask, ct);
@@ -1077,9 +1260,7 @@ namespace AMMS.Application.Services
                 status = "Scheduled",
                 product_type_id = productTypeId,
                 planned_end_date = plannedEnd,
-                note = string.IsNullOrWhiteSpace(note)
-                    ? $"Split {segment.DepartmentName}: {codesCsv}"
-                    : $"{note} | Split {segment.DepartmentName}: {codesCsv}",
+                note = NoteSplitAfterGroup,
 
                 prod_kind = "SPLIT",
                 prod_method = inheritedProdMethod,
@@ -1162,7 +1343,7 @@ namespace AMMS.Application.Services
                 task.status = "Unassigned";
                 task.start_time = null;
                 task.end_time = null;
-                task.reason = $"Task được tách sang production {splitProd.code} theo phòng ban {segment.DepartmentName}.";
+                task.reason = NoteSplitAfterGroup;
 
                 splitTasks.Add(task);
             }
@@ -1239,11 +1420,13 @@ namespace AMMS.Application.Services
     string? orderIds,
     CancellationToken ct = default)
         {
-            var selectedCodes = GroupProductionHelper.ParseCodes(processCodes);
+            var selectedCodes = NormalizeSelectedCodesForGroup(
+                GroupProductionHelper.ParseCodes(processCodes));
+
             var selectedOrderIds = ParseOrderIdsCsv(orderIds);
 
             if (selectedCodes.Count > 0)
-                GroupProductionHelper.EnsureShareableCodes(selectedCodes);
+                EnsureOnlyGroupableDept2Codes(selectedCodes);
 
             List<GroupOrderRow> allRows;
 
@@ -1268,11 +1451,6 @@ namespace AMMS.Application.Services
                     ct);
             }
 
-            /*
-             * Chỉ trả [] khi thật sự không có order nào đủ điều kiện cơ bản.
-             * Không được return [] khi allRows.Count == 1,
-             * vì order lẻ vẫn phải hiển thị SINGLE_PREVIEW.
-             */
             if (allRows.Count == 0)
                 return new List<SuggestedGroupProductionDto>();
 
@@ -1295,29 +1473,22 @@ namespace AMMS.Application.Services
             var finalSuggestions = new List<SuggestedGroupProductionDto>();
 
             /*
-             * Vẫn group theo product_type + method để không ghép lẫn loại sản phẩm/method.
-             * Nhưng KHÔNG lọc g.Count() >= 2 ở đây.
-             * Nếu group chỉ có 1 order thì build SINGLE_PREVIEW.
+             * Rule mới:
+             * Group theo product_type_id.
+             * Không group theo prod_method nữa.
              */
-            foreach (var productMethodGroup in allRows
+            foreach (var productTypeGroup in allRows
                 .Where(x => x.Item != null)
                 .Where(x => x.Item.product_type_id.HasValue)
-                .Where(x => ResolveRowProductionMethodOrNull(x) != null)
-                .GroupBy(x => new
-                {
-                    product_type_id = x.Item.product_type_id!.Value,
-                    prod_method = ResolveRowProductionMethodOrNull(x)!
-                })
-                .OrderBy(g => g.Key.product_type_id)
-                .ThenBy(g => g.Key.prod_method))
+                .GroupBy(x => x.Item.product_type_id!.Value)
+                .OrderBy(g => g.Key))
             {
-                var rowsOfOneProductTypeAndMethod = productMethodGroup
+                var rowsOfOneProductType = productTypeGroup
                     .OrderBy(x => x.Order.delivery_date)
                     .ThenBy(x => x.Order.order_id)
                     .ToList();
 
-                var currentProductTypeId = productMethodGroup.Key.product_type_id;
-                var currentProdMethod = productMethodGroup.Key.prod_method;
+                var currentProductTypeId = productTypeGroup.Key;
 
                 productTypeNameMap.TryGetValue(
                     currentProductTypeId,
@@ -1325,17 +1496,14 @@ namespace AMMS.Application.Services
 
                 var groupedOrderIds = new HashSet<int>();
 
-                /*
-                 * Chỉ build GROUP khi nhóm hiện tại có >= 2 order.
-                 */
-                if (rowsOfOneProductTypeAndMethod.Count >= 2)
+                if (rowsOfOneProductType.Count >= 2)
                 {
                     var groupSuggestions = selectedCodes.Count > 0
                         ? BuildSuggestionPreviewFromSelectedCodes(
-                            rowsOfOneProductTypeAndMethod,
+                            rowsOfOneProductType,
                             selectedCodes)
                         : BuildAutoDept2Suggestions(
-                            rowsOfOneProductTypeAndMethod);
+                            rowsOfOneProductType);
 
                     groupSuggestions = groupSuggestions
                         .Where(x => x.suggest_order != null && x.suggest_order.Count >= 2)
@@ -1348,23 +1516,27 @@ namespace AMMS.Application.Services
 
                     foreach (var suggestion in groupSuggestions)
                     {
+                        var memberRows = rowsOfOneProductType
+                            .Where(x => suggestion.suggest_order.Contains(x.Order.order_id))
+                            .ToList();
+
                         suggestion.product_type_id = currentProductTypeId;
                         suggestion.product_type_name = currentProductTypeName;
-                        suggestion.production_method = currentProdMethod;
+                        suggestion.production_method = ResolveGroupProductionMethodLabel(memberRows);
 
                         suggestion.can_group = true;
                         suggestion.create_group_allowed = true;
                         suggestion.order_count = suggestion.suggest_order.Count;
                         suggestion.suggestion_key = BuildSuggestionKey(suggestion);
 
-                        foreach (var orderId in suggestion.suggest_order)
-                            groupedOrderIds.Add(orderId);
+                        foreach (var id in suggestion.suggest_order)
+                            groupedOrderIds.Add(id);
 
                         await EnrichSuggestionWithPreviewAsync(
                             suggestion,
                             currentProductTypeId,
                             currentProductTypeName,
-                            rowsOfOneProductTypeAndMethod,
+                            rowsOfOneProductType,
                             ct);
 
                         finalSuggestions.Add(suggestion);
@@ -1372,10 +1544,9 @@ namespace AMMS.Application.Services
                 }
 
                 /*
-                 * Order nào không nằm trong group suggestion thì vẫn trả SINGLE_PREVIEW.
-                 * Đây là phần sửa chính để FE thấy cả đơn lẻ.
+                 * Order không nằm trong group hợp lệ vẫn hiện SINGLE_PREVIEW.
                  */
-                var singleRows = rowsOfOneProductTypeAndMethod
+                var singleRows = rowsOfOneProductType
                     .Where(x => !groupedOrderIds.Contains(x.Order.order_id))
                     .OrderBy(x => x.Order.delivery_date)
                     .ThenBy(x => x.Order.order_id)
@@ -1383,11 +1554,20 @@ namespace AMMS.Application.Services
 
                 foreach (var row in singleRows)
                 {
+                    var method = ResolveRowProductionMethodOrNull(row);
+
+                    /*
+                     * BOTH không đưa vào suggestion group.
+                     * BOTH sẽ đi flow single riêng.
+                     */
+                    if (method == "BOTH")
+                        continue;
+
                     var singleSuggestion = await BuildSinglePreviewSuggestionAsync(
                         row,
                         currentProductTypeId,
                         currentProductTypeName,
-                        currentProdMethod,
+                        method ?? "",
                         ct);
 
                     finalSuggestions.Add(singleSuggestion);
@@ -1401,7 +1581,6 @@ namespace AMMS.Application.Services
                 .ThenByDescending(x =>
                     string.Equals(x.suggestion_type, "GROUP", StringComparison.OrdinalIgnoreCase))
                 .ThenBy(x => x.product_type_id)
-                .ThenBy(x => x.production_method)
                 .ThenBy(x => x.common_delivery_deadline)
                 .ThenBy(x =>
                     x.suggest_order == null || x.suggest_order.Count == 0
@@ -1428,6 +1607,8 @@ namespace AMMS.Application.Services
             suggestion.orders = BuildSuggestionOrders(
                 sourceRows
                     .Where(x => suggestion.suggest_order.Contains(x.Order.order_id))
+                    .OrderBy(x => x.Order.delivery_date)
+                    .ThenBy(x => x.Order.order_id)
                     .ToList(),
                 productTypeName);
 
@@ -1441,8 +1622,11 @@ namespace AMMS.Application.Services
             {
                 suggestion.can_group = false;
                 suggestion.create_group_allowed = false;
+                suggestion.preview = null;
+                suggestion.batches = new List<SuggestionBatchPreviewDto>();
                 suggestion.preview_error = "Không đủ 2 order để tạo gợi ý ghép.";
-                suggestion.note = suggestion.preview_error;
+                suggestion.reason = NoteSinglePreview;
+                suggestion.note = NoteSinglePreview;
                 return;
             }
 
@@ -1450,20 +1634,31 @@ namespace AMMS.Application.Services
             {
                 suggestion.can_group = false;
                 suggestion.create_group_allowed = false;
+                suggestion.preview = null;
+                suggestion.batches = new List<SuggestionBatchPreviewDto>();
                 suggestion.preview_error = "Không có công đoạn hợp lệ để tạo gợi ý ghép.";
-                suggestion.note = suggestion.preview_error;
+                suggestion.reason = NoteSinglePreview;
+                suggestion.note = NoteSinglePreview;
                 return;
             }
 
             try
             {
-                var preview = await PreviewAsync(new CreateGroupProductionRequest
-                {
-                    order_ids = suggestion.suggest_order,
-                    process_codes = suggestion.suggest_process,
-                    planned_start_date = null,
-                    note = null
-                }, ct);
+                /*
+                 * QUAN TRỌNG:
+                 * Đây là preview nội bộ khi SuggestAsync đang build suggestion.
+                 * Không gọi validate-against-current-suggestion nữa, vì chính suggestion này đang được build.
+                 */
+                var preview = await PreviewCoreAsync(
+                    new CreateGroupProductionRequest
+                    {
+                        order_ids = suggestion.suggest_order,
+                        process_codes = suggestion.suggest_process,
+                        planned_start_date = null,
+                        note = null
+                    },
+                    validateAgainstSuggestion: false,
+                    ct);
 
                 suggestion.suggested_planned_start_date = preview.suggested_planned_start_date;
                 suggestion.schedule_planned_start_date = preview.suggested_planned_start_date;
@@ -1482,35 +1677,31 @@ namespace AMMS.Application.Services
                     productTypeId,
                     ct);
 
-                var processText = string.Join(",", suggestion.suggest_process);
-                var orderText = string.Join(",", suggestion.orders.Select(x => x.order_code ?? x.order_id.ToString()));
-
-                var baseReason = string.IsNullOrWhiteSpace(suggestion.reason)
-                    ? $"Các order {orderText} có thể ghép công đoạn {processText}."
-                    : suggestion.reason.Trim();
-
                 suggestion.can_group = true;
                 suggestion.create_group_allowed = true;
                 suggestion.suggestion_key = BuildSuggestionKey(suggestion);
 
-                suggestion.note =
-                    $"{baseReason} " +
-                    $"ProductType={productTypeId}" +
-                    $"{(string.IsNullOrWhiteSpace(productTypeName) ? "" : $" - {productTypeName}")}. " +
-                    $"Mốc giao chung: {preview.common_delivery_deadline:yyyy-MM-dd}. " +
-                    $"Ngày bắt đầu kế hoạch: {preview.suggested_planned_start_date:yyyy-MM-dd HH:mm}. " +
-                    $"Dự kiến hoàn tất: {preview.estimated_finish_date:yyyy-MM-dd HH:mm}.";
+                suggestion.reason = NoteGroupSuggestion;
+                suggestion.note = NoteGroupSuggestion;
+
+                if (preview.warnings != null && preview.warnings.Count > 0)
+                {
+                    suggestion.warnings = preview.warnings;
+                }
             }
             catch (Exception ex)
             {
+                /*
+                 * Không để null list.
+                 * Nếu còn lỗi, FE vẫn nhận được order/suggest_process, nhưng biết rõ lỗi ở preview_error.
+                 */
                 suggestion.can_group = false;
                 suggestion.create_group_allowed = false;
                 suggestion.preview = null;
                 suggestion.batches = new List<SuggestionBatchPreviewDto>();
                 suggestion.preview_error = ex.Message;
-
-                suggestion.note =
-                    $"Gợi ý được tạo nhưng chưa build được preview lịch. Lý do: {ex.Message}";
+                suggestion.reason = NoteGroupSuggestion;
+                suggestion.note = "Gợi ý ghép nhóm chưa thể tạo kế hoạch sản xuất.";
             }
         }
 
@@ -1584,12 +1775,7 @@ namespace AMMS.Application.Services
                 note = "Order không đủ điều kiện ghép với order khác nên đề xuất sản xuất đơn full công đoạn."
             };
 
-            var isUrgent = row.Order.delivery_date.HasValue &&
-               row.Order.delivery_date.Value.Date < AppTime.NowVnUnspecified().Date.AddDays(MinProductionDays);
-
-            var note = isUrgent
-                ? $"Đơn cần lên lịch sản xuất gấp vì sắp đến ngày giao hàng {row.Order.delivery_date.Value:yyyy-MM-dd}."
-                : "Order không đủ điều kiện ghép với order khác nên đề xuất sản xuất đơn full công đoạn.";
+            var note = NoteSinglePreview;
 
             return new SuggestedGroupProductionDto
             {
@@ -1623,8 +1809,7 @@ namespace AMMS.Application.Services
 
                 batches = new List<SuggestionBatchPreviewDto> { batch },
 
-                reason = "Không tìm thấy order khác đủ điều kiện ghép theo product_type, method, công đoạn và vật tư.",
-                note = note
+                note = NoteSinglePreview
 
             };
         }
@@ -1660,10 +1845,21 @@ namespace AMMS.Application.Services
         {
             var result = new List<SuggestionBatchPreviewDto>();
 
-            foreach (var stage in preview.timeline.OrderBy(x => x.planned_start_date))
+            var timeline = preview.timeline ?? new List<GroupProductionScheduleStageDto>();
+
+            foreach (var stage in timeline
+                .OrderBy(x => x.planned_start_date)
+                .ThenBy(x => StageOrder(x.stage_type))
+                .ThenBy(x => x.order_ids == null || x.order_ids.Count == 0
+                    ? int.MaxValue
+                    : x.order_ids.Min()))
             {
+                stage.order_ids ??= new List<int>();
+                stage.process_codes ??= new List<string>();
+
                 var stageOrderCodes = orders
                     .Where(x => stage.order_ids.Contains(x.order_id))
+                    .OrderBy(x => stage.order_ids.IndexOf(x.order_id))
                     .Select(x => x.order_code)
                     .ToList();
 
@@ -1687,18 +1883,38 @@ namespace AMMS.Application.Services
                     prod_kind = prodKind,
                     department_code = stage.dept_code,
                     department_name = stage.dept_name,
+
                     order_ids = stage.order_ids,
                     order_codes = stageOrderCodes,
-                    process_codes = stage.process_codes,
+
+                    process_codes = stage.process_codes
+                        .Select(NormProcessCode)
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(FullRouteIndex)
+                        .ToList(),
+
                     planned_start_date = stage.planned_start_date,
                     planned_end_date = stage.planned_end_date,
                     duration_days = stage.duration_days,
+
                     tasks = tasks,
-                    note = stage.note
+                    note = ResolveFixedBatchNote(stage.stage_type)
                 });
             }
 
             return result;
+        }
+
+        private static string ResolveFixedBatchNote(string? stageType)
+        {
+            return NormProcessCode(stageType) switch
+            {
+                "SINGLE_PRIVATE" => NotePrivateBeforeGroup,
+                "GROUP" => NoteGroupDept2,
+                "SPLIT" => NoteSplitAfterGroup,
+                _ => "Lệnh sản xuất được tạo theo kế hoạch hệ thống."
+            };
         }
 
         private async Task<List<SuggestionTaskPreviewDto>> BuildTaskPreviewDtosAsync(
@@ -1837,114 +2053,72 @@ namespace AMMS.Application.Services
     List<GroupOrderRow> rows,
     List<string> selectedCodes)
         {
-            var normalizedSelectedCodes = selectedCodes
-                .Select(NormProcessCode)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(FullRouteIndex)
+            selectedCodes = NormalizeSelectedCodesForGroup(selectedCodes);
+
+            EnsureOnlyGroupableDept2Codes(selectedCodes);
+
+            rows = rows
+                .Where(x => IsGroupableProductionMethod(x.SingleProd.prod_method))
                 .ToList();
 
-            if (normalizedSelectedCodes.Any(IsDept1))
-            {
-                var invalid = normalizedSelectedCodes
-                    .Where(IsDept1)
-                    .ToList();
+            if (selectedCodes.Count == 0 || rows.Count < 2)
+                return new List<SuggestedGroupProductionDto>();
 
-                throw new InvalidOperationException(
-                    $"Không được ghép/tách các công đoạn Dept1: {string.Join(",", invalid)}");
-            }
-
-            var plan = BuildDepartmentProductionPlan(
-                rows,
-                normalizedSelectedCodes,
-                out var warnings);
-
-            var groupSegments = plan
-                .Where(x => x.IsGroup)
+            /*
+             * Chỉ lấy order có đủ toàn bộ selectedCodes.
+             */
+            var rowsHavingAllCodes = rows
+                .Where(row => selectedCodes.All(code =>
+                    row.RouteCodes.Contains(code, StringComparer.OrdinalIgnoreCase)))
                 .ToList();
 
-            var splitSegments = plan
-                .Where(x =>
-                    !x.IsGroup &&
-                    string.Equals(x.DepartmentCode, "DEPT_3", StringComparison.OrdinalIgnoreCase))
-                .ToList();
+            if (rowsHavingAllCodes.Count < 2)
+                return new List<SuggestedGroupProductionDto>();
 
             var result = new List<SuggestedGroupProductionDto>();
 
-            foreach (var group in groupSegments)
+            /*
+             * Nhóm theo material key tổng hợp của toàn bộ selected codes.
+             * Không nhóm theo prod_method.
+             */
+            var materialGroups = rowsHavingAllCodes
+                .GroupBy(row => BuildCompositeGroupMaterialKey(selectedCodes, row))
+                .Where(g => g.Count() >= 2)
+                .ToList();
+
+            foreach (var mg in materialGroups)
             {
-                var groupOrderIds = group.Members
-                    .Select(x => x.Order.order_id)
-                    .Distinct()
-                    .OrderBy(x => x)
+                var memberRows = mg
+                    .OrderBy(x => x.Order.delivery_date)
+                    .ThenBy(x => x.Order.order_id)
                     .ToList();
-
-                var autoSplits = splitSegments
-                    .Where(x =>
-                        x.Members.Count == 1 &&
-                        groupOrderIds.Contains(x.Members[0].Order.order_id))
-                    .Select(ToSplitSuggestionDto)
-                    .ToList();
-
-                var method = ResolveSegmentProductionMethodOrThrow(group);
 
                 result.Add(new SuggestedGroupProductionDto
                 {
-                    suggestion_type = autoSplits.Count > 0
-                        ? "GROUP_WITH_AUTO_SPLIT"
-                        : "GROUP",
+                    suggestion_type = "GROUP_WITH_AUTO_SPLIT",
 
-                    suggest_order = groupOrderIds,
-
-                    suggest_process = group.ProcessCodes
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .OrderBy(FullRouteIndex)
-                        .ToList(),
-
-                    department_code = group.DepartmentCode,
-                    department_name = group.DepartmentName,
-                    material_key = group.MaterialKey,
-                    production_method = method,
-
-                    auto_split_productions = autoSplits,
-                    warnings = warnings,
-
-                    reason = autoSplits.Count > 0
-                        ? $"Có thể tạo nhóm {string.Join(",", group.ProcessCodes)} với prod_method={method}. Hệ thống sẽ tự tách BE/DUT/DAN riêng theo từng order."
-                        : $"Có thể tạo nhóm {string.Join(",", group.ProcessCodes)} với prod_method={method}."
-                });
-            }
-
-            if (result.Count == 0 && splitSegments.Count > 0)
-            {
-                result.Add(new SuggestedGroupProductionDto
-                {
-                    suggestion_type = "SPLIT_ONLY",
-
-                    suggest_order = splitSegments
-                        .SelectMany(x => x.Members)
+                    suggest_order = memberRows
                         .Select(x => x.Order.order_id)
                         .Distinct()
                         .OrderBy(x => x)
                         .ToList(),
 
-                    suggest_process = splitSegments
-                        .SelectMany(x => x.ProcessCodes)
+                    suggest_process = selectedCodes
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .OrderBy(FullRouteIndex)
                         .ToList(),
 
-                    department_code = "DEPT_3",
-                    department_name = ResolveDepartmentName("DEPT_3"),
-                    material_key = null,
+                    department_code = "DEPT_2",
+                    department_name = "Phủ - Cán - Bồi",
 
-                    auto_split_productions = splitSegments
-                        .Select(ToSplitSuggestionDto)
-                        .ToList(),
+                    material_key = mg.Key,
+                    production_method = ResolveGroupProductionMethodLabel(memberRows),
 
-                    warnings = warnings,
+                    can_group = true,
+                    create_group_allowed = true,
 
-                    reason = "BE/DUT/DAN không được nhóm nhiều order do các công đoạn gia công cuối tùy thuộc từng yêu cầu kĩ thuật từng loại sản phẩm."
+                    reason = NoteGroupSuggestion,
+                    note = NoteGroupSuggestion
                 });
             }
 
@@ -1954,160 +2128,29 @@ namespace AMMS.Application.Services
         private List<SuggestedGroupProductionDto> BuildAutoDept2Suggestions(
     List<GroupOrderRow> rows)
         {
-            var raw = new List<SuggestedGroupProductionDto>();
+            rows = rows
+                .Where(x => IsGroupableProductionMethod(x.SingleProd.prod_method))
+                .ToList();
 
-            var possibleDept2Codes = rows
-                .SelectMany(x => x.RouteCodes)
-                .Where(IsDept2)
+            if (rows.Count < 2)
+                return new List<SuggestedGroupProductionDto>();
+
+            var possibleGroupCodes = GroupableDept2Codes
+                .Where(code =>
+                    rows.Count(row =>
+                        row.RouteCodes.Contains(code, StringComparer.OrdinalIgnoreCase)) >= 2)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(x => GetGlobalRouteIndex(rows, x))
+                .OrderBy(FullRouteIndex)
                 .ToList();
 
-            foreach (var processCode in possibleDept2Codes)
-            {
-                var membersWithProcess = rows
-                    .Where(x => x.RouteCodes.Contains(
-                        processCode,
-                        StringComparer.OrdinalIgnoreCase))
-                    .Where(x => ResolveRowProductionMethodOrNull(x) != null)
-                    .ToList();
+            if (possibleGroupCodes.Count == 0)
+                return new List<SuggestedGroupProductionDto>();
 
-                if (membersWithProcess.Count < 2)
-                    continue;
-
-                if (RequiresSameMaterialKey(processCode))
-                {
-                    var materialGroups = membersWithProcess
-                        .GroupBy(x => BuildGroupPlanKey(processCode, x))
-                        .Where(g => g.Count() >= 2)
-                        .ToList();
-
-                    foreach (var mg in materialGroups)
-                    {
-                        var method = ResolveRowProductionMethodOrThrow(mg.First());
-
-                        raw.Add(new SuggestedGroupProductionDto
-                        {
-                            suggestion_type = "GROUP",
-
-                            suggest_order = mg
-                                .Select(x => x.Order.order_id)
-                                .Distinct()
-                                .OrderBy(x => x)
-                                .ToList(),
-
-                            suggest_process = new List<string> { processCode },
-
-                            department_code = ResolveDepartmentCode(processCode),
-                            department_name = ResolveDepartmentName(ResolveDepartmentCode(processCode)),
-
-                            material_key = mg.Key,
-                            production_method = method,
-
-                            reason =
-                                $"Các order cùng công đoạn {processCode}, cùng prod_method={method} và cùng điều kiện vật tư."
-                        });
-                    }
-                }
-                else
-                {
-                    var methodGroups = membersWithProcess
-                        .GroupBy(x => ResolveRowProductionMethodOrThrow(x))
-                        .Where(g => g.Count() >= 2)
-                        .ToList();
-
-                    foreach (var mg in methodGroups)
-                    {
-                        raw.Add(new SuggestedGroupProductionDto
-                        {
-                            suggestion_type = "GROUP",
-
-                            suggest_order = mg
-                                .Select(x => x.Order.order_id)
-                                .Distinct()
-                                .OrderBy(x => x)
-                                .ToList(),
-
-                            suggest_process = new List<string> { processCode },
-
-                            department_code = ResolveDepartmentCode(processCode),
-                            department_name = ResolveDepartmentName(ResolveDepartmentCode(processCode)),
-
-                            material_key = $"METHOD={mg.Key}",
-                            production_method = mg.Key,
-
-                            reason =
-                                $"Các order cùng công đoạn {processCode} và cùng prod_method={mg.Key}."
-                        });
-                    }
-                }
-            }
-
-            var merged = MergeDept2Suggestions(raw);
-
-            foreach (var item in merged)
-            {
-                var memberRows = rows
-                    .Where(x => item.suggest_order.Contains(x.Order.order_id))
-                    .ToList();
-
-                item.auto_split_productions = BuildAutoSplitSuggestionsForDept2(
-                    memberRows,
-                    item.suggest_process);
-
-                if (item.auto_split_productions.Count > 0)
-                {
-                    item.suggestion_type = "GROUP_WITH_AUTO_SPLIT";
-                    item.reason =
-                        $"{item.reason} Nếu tạo nhóm này, hệ thống sẽ tự tách BE/DUT/DAN riêng từng order.";
-                }
-            }
-
-            return merged
-                .Where(x => x.suggest_order.Count >= 2)
-                .ToList();
+            return BuildSuggestionPreviewFromSelectedCodes(
+                rows,
+                possibleGroupCodes);
         }
-
-        private static List<SuggestedGroupProductionDto> MergeDept2Suggestions(
-    List<SuggestedGroupProductionDto> suggestions)
-        {
-            var result = new List<SuggestedGroupProductionDto>();
-
-            foreach (var item in suggestions
-                .OrderBy(x => DepartmentOrder(x.department_code ?? ""))
-                .ThenBy(x => x.suggest_process.Count == 0
-                    ? 999
-                    : FullRouteIndex(x.suggest_process[0])))
-            {
-                var last = result.LastOrDefault();
-
-                if (last != null &&
-                    string.Equals(last.department_code, item.department_code, StringComparison.OrdinalIgnoreCase) &&
-                    SameOrderIds(last.suggest_order, item.suggest_order) &&
-                    string.Equals(last.production_method, item.production_method, StringComparison.OrdinalIgnoreCase))
-                {
-                    last.suggest_process = last.suggest_process
-                        .Concat(item.suggest_process)
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .OrderBy(FullRouteIndex)
-                        .ToList();
-
-                    last.material_key = CombineMaterialKeys(
-                        last.material_key,
-                        item.material_key);
-
-                    last.reason =
-                        $"Các order có thể sản xuất chung các công đoạn {string.Join(",", last.suggest_process)} với prod_method={last.production_method}.";
-
-                    continue;
-                }
-
-                result.Add(item);
-            }
-
-            return result;
-        }
-
+       
         private static bool SameOrderIds(
             List<int> a,
             List<int> b)
@@ -2193,7 +2236,7 @@ namespace AMMS.Application.Services
                     department_code = "DEPT_3",
                     department_name = ResolveDepartmentName("DEPT_3"),
                     process_codes = dept3Codes,
-                    reason = $"Sau GROUP {string.Join(",", selectedDept2Codes)}, order {row.Order.order_id} sẽ được tách riêng {string.Join(",", dept3Codes)}."
+                    reason = NoteSplitAfterGroup
                 });
             }
 
@@ -3146,8 +3189,10 @@ namespace AMMS.Application.Services
                 _ => $"BTP sau {processName ?? processCode}"
             };
         }
-        public async Task<GroupProductionConfirmPreviewResponse> PreviewAsync(
+
+        private async Task<GroupProductionConfirmPreviewResponse> PreviewCoreAsync(
     CreateGroupProductionRequest req,
+    bool validateAgainstSuggestion,
     CancellationToken ct = default)
         {
             if (req == null)
@@ -3156,31 +3201,30 @@ namespace AMMS.Application.Services
             var orderIds = req.order_ids
                 .Where(x => x > 0)
                 .Distinct()
+                .OrderBy(x => x)
                 .ToList();
 
             if (orderIds.Count < 2)
                 throw new InvalidOperationException("Cần chọn ít nhất 2 order để preview ghép.");
 
-            var selectedCodes = req.process_codes
-                .SelectMany(x => GroupProductionHelper.ParseCodes(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(FullRouteIndex)
-                .ToList();
+            var selectedCodes = NormalizeSelectedCodesForGroup(req.process_codes);
 
             if (selectedCodes.Count == 0)
-                throw new InvalidOperationException("process_codes is required.");
+                throw new InvalidOperationException("Cần chọn ít nhất 1 công đoạn PHU/CAN/BOI để preview ghép.");
 
-            GroupProductionHelper.EnsureShareableCodes(selectedCodes);
+            EnsureOnlyGroupableDept2Codes(selectedCodes);
 
             /*
-             * FIX:
-             * Preview được phép chọn subset order trong suggestion.
-             * Ví dụ suggestion [1,2,5,6], thì preview [1,5] vẫn hợp lệ.
+             * Public API hoặc Create mới cần validate against current suggestion.
+             * SuggestAsync gọi preview nội bộ thì bỏ qua bước này để không tự chặn chính suggestion đang build.
              */
-            await ValidateManualSelectionMatchesCurrentSuggestionAsync(
-                orderIds,
-                selectedCodes,
-                ct);
+            if (validateAgainstSuggestion)
+            {
+                await ValidateManualSelectionMatchesCurrentSuggestionAsync(
+                    orderIds,
+                    selectedCodes,
+                    ct);
+            }
 
             var rows = await LoadGroupOrderRowsAsync(
                 orderIds,
@@ -3188,19 +3232,7 @@ namespace AMMS.Application.Services
                 ct);
 
             if (rows.Count != orderIds.Count)
-            {
-                var found = rows.Select(x => x.Order.order_id).ToHashSet();
-                var missing = orderIds.Where(x => !found.Contains(x)).ToList();
-
-                throw new InvalidOperationException(
-                    $"Không tìm thấy đủ order hợp lệ để preview. Missing: {string.Join(",", missing)}");
-            }
-
-            if (rows.Any(x => x.Item == null))
-                throw new InvalidOperationException("Một số order chưa có order_item.");
-
-            if (rows.Any(x => !x.Order.layout_confirmed || !x.Order.is_production_ready))
-                throw new InvalidOperationException("Tất cả order phải xác nhận file thiết kế chuẩn và sẵn sàng sản xuất.");
+                throw new InvalidOperationException("Một số order không tồn tại hoặc chưa có production riêng.");
 
             var invalidStatusOrders = rows
                 .Where(x =>
@@ -3214,9 +3246,14 @@ namespace AMMS.Application.Services
             {
                 throw new InvalidOperationException(
                     "Chỉ order/production Pending mới được preview ghép. " +
-                    "Order đã Scheduled nghĩa là đã lập lịch, không được ghép nữa. " +
                     $"Không hợp lệ: {string.Join(", ", invalidStatusOrders)}");
             }
+
+            if (rows.Any(x => x.Item == null))
+                throw new InvalidOperationException("Một số order chưa có order_item.");
+
+            if (rows.Any(x => !x.Order.layout_confirmed || !x.Order.is_production_ready))
+                throw new InvalidOperationException("Tất cả order phải xác nhận layout và sẵn sàng sản xuất.");
 
             var productTypeIds = rows
                 .Select(x => x.Item.product_type_id)
@@ -3224,9 +3261,9 @@ namespace AMMS.Application.Services
                 .ToList();
 
             if (productTypeIds.Count != 1 || productTypeIds[0] == null)
-                throw new InvalidOperationException("Các order phải cùng loại sản phẩm.");
+                throw new InvalidOperationException("Các order phải cùng product_type.");
 
-            ValidateRowsHaveSameProductionMethodOrThrow(
+            ValidateRowsHaveGroupableProductionMethodOrThrow(
                 rows,
                 "preview ghép/tách production");
 
@@ -3239,103 +3276,219 @@ namespace AMMS.Application.Services
                 selectedCodes,
                 out var warnings);
 
-            if (plan.Count == 0)
-                throw new InvalidOperationException("Không có công đoạn hợp lệ để preview.");
+            var groupSegments = plan
+                .Where(x => x.IsGroup)
+                .ToList();
+
+            if (groupSegments.Count == 0)
+                throw new InvalidOperationException("Không có công đoạn PHU/CAN/BOI đủ điều kiện để preview GROUP.");
 
             var commonDeadline = ResolveCommonDeadline(rows);
             var suggestedStart = req.planned_start_date?.Date ?? ResolveSuggestedStart(commonDeadline);
 
-            var dept1Start = suggestedStart;
+            /*
+             * 1. Mỗi order có một private stage riêng: RALO,CAT,IN.
+             */
+            var privateStages = BuildPrivateStagesBeforeGroup(
+                rows,
+                plan,
+                suggestedStart);
 
-            var dept1Stage = BuildStageDto(
-                deptCode: "DEPT_1",
-                deptName: "Dept 1 - RALO,CAT,IN riêng từng đơn",
-                stageType: "SINGLE_PRIVATE",
-                processCodes: Dept1Codes.ToList(),
-                orderIds: orderIds,
-                start: dept1Start,
-                durationDays: Dept1Days,
-                note: "Tất cả order phải hoàn tất Ralo, cắt, in trước khi bước ghép gia công bề mặt bắt đầu.");
+            var allPrivateCodes = privateStages
+                .SelectMany(x => x.process_codes)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
 
+            var aggregatePrivateStage = allPrivateCodes.Count == 0
+                ? null
+                : BuildStageDto(
+                    deptCode: "PRIVATE_BEFORE_GROUP",
+                    deptName: "Công đoạn riêng trước ghép nhóm",
+                    stageType: "SINGLE_PRIVATE",
+                    processCodes: allPrivateCodes,
+                    orderIds: orderIds,
+                    start: suggestedStart,
+                    durationDays: Dept1Days,
+                    note: NotePrivateBeforeGroup);
+
+            var privateEnd = privateStages.Count == 0
+                ? suggestedStart
+                : privateStages.Max(x => x.planned_end_date);
+
+            /*
+             * 2. Một GROUP stage chung cho PHU/CAN/BOI đã chọn.
+             */
             var groupStages = new List<GroupProductionScheduleStageDto>();
+
+            foreach (var segment in groupSegments)
+            {
+                groupStages.Add(BuildStageDto(
+                    deptCode: "DEPT_2",
+                    deptName: "Phủ - Cán - Bồi",
+                    stageType: "GROUP",
+                    processCodes: segment.ProcessCodes
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(FullRouteIndex)
+                        .ToList(),
+                    orderIds: segment.Members
+                        .Select(x => x.Order.order_id)
+                        .Distinct()
+                        .OrderBy(x => x)
+                        .ToList(),
+                    start: privateEnd,
+                    durationDays: Dept2Days,
+                    note: NoteGroupDept2));
+            }
+
+            var groupEnd = groupStages.Count == 0
+                ? privateEnd
+                : groupStages.Max(x => x.planned_end_date);
+
+            /*
+             * 3. Mỗi order có một SPLIT stage riêng sau group: BE,DUT,DAN.
+             */
             var splitStages = new List<GroupProductionScheduleStageDto>();
 
-            var dept2Start = dept1Stage.planned_end_date;
-            var dept2End = dept2Start.AddDays(Dept2Days);
-            var dept3Start = dept2End;
-
-            foreach (var segment in plan)
+            foreach (var segment in plan.Where(x => !x.IsGroup))
             {
-                if (segment.IsGroup)
-                {
-                    groupStages.Add(BuildStageDto(
-                        deptCode: segment.DepartmentCode,
-                        deptName: segment.DepartmentName,
-                        stageType: "GROUP",
-                        processCodes: segment.ProcessCodes,
-                        orderIds: segment.Members
-                            .Select(x => x.Order.order_id)
-                            .Distinct()
-                            .ToList(),
-                        start: dept2Start,
-                        durationDays: Dept2Days,
-                        note: $"Gợi ý ghép vì cùng loại sản phẩm, cùng nhóm vật liệu và cùng mốc giao chung {commonDeadline:yyyy-MM-dd}."));
-                }
-                else if (segment.DepartmentCode == "DEPT_3")
-                {
-                    splitStages.Add(BuildStageDto(
-                        deptCode: segment.DepartmentCode,
-                        deptName: segment.DepartmentName,
-                        stageType: "SPLIT",
-                        processCodes: segment.ProcessCodes,
-                        orderIds: segment.Members
-                            .Select(x => x.Order.order_id)
-                            .Distinct()
-                            .ToList(),
-                        start: dept3Start,
-                        durationDays: Dept3Days,
-                        note: "Phòng ban 3 là công đoạn cuối theo từng lệnh sản xuất, tách riêng để không làm sai luồng sản xuất từng đơn."));
-                }
+                splitStages.Add(BuildStageDto(
+                    deptCode: "SPLIT",
+                    deptName: "Công đoạn riêng sau ghép nhóm",
+                    stageType: "SPLIT",
+                    processCodes: segment.ProcessCodes
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(FullRouteIndex)
+                        .ToList(),
+                    orderIds: segment.Members
+                        .Select(x => x.Order.order_id)
+                        .Distinct()
+                        .OrderBy(x => x)
+                        .ToList(),
+                    start: groupEnd,
+                    durationDays: Dept3Days,
+                    note: NoteSplitAfterGroup));
             }
 
             var timeline = new List<GroupProductionScheduleStageDto>();
-            timeline.Add(dept1Stage);
+            timeline.AddRange(privateStages);
             timeline.AddRange(groupStages);
             timeline.AddRange(splitStages);
 
+            timeline = timeline
+                .OrderBy(x => x.planned_start_date)
+                .ThenBy(x => StageOrder(x.stage_type))
+                .ThenBy(x => x.order_ids == null || x.order_ids.Count == 0
+                    ? int.MaxValue
+                    : x.order_ids.Min())
+                .ToList();
+
             var estimatedFinish = timeline.Count == 0
-                ? suggestedStart.AddDays(MinProductionDays)
+                ? suggestedStart
                 : timeline.Max(x => x.planned_end_date);
 
-            var daysLate = Math.Max(0, (estimatedFinish.Date - commonDeadline.Date).Days);
-
-            var notes = new List<string>
-    {
-        $"Mốc giao chung lấy theo đơn có ngày giao sớm nhất, nhưng không sớm hơn {MinProductionDays} ngày từ hiện tại.",
-        $"Phòng ban 1 tối đa xong sau {Dept1Days} ngày.",
-        $"Phòng ban 2 công đoạn ghép tối đa xong sau {Dept2Days} ngày.",
-        $"Phòng ban 3 công đoạn cuối từng đơn tối đa xong sau {Dept3Days} ngày.",
-        $"Tổng thời gian tối thiểu: {MinProductionDays} ngày."
-    };
-
-            notes.AddRange(warnings.Select(x => $"{x.process_code}: {x.reason}"));
+            var daysLate = Math.Max(
+                0,
+                (estimatedFinish.Date - commonDeadline.Date).Days);
 
             return new GroupProductionConfirmPreviewResponse
             {
                 order_ids = orderIds,
+                process_codes = selectedCodes,
                 selected_process_codes = selectedCodes,
+
                 common_delivery_deadline = commonDeadline,
                 suggested_planned_start_date = suggestedStart,
                 estimated_finish_date = estimatedFinish,
-                total_duration_days = MinProductionDays,
-                dept1_private_stage = dept1Stage,
+                total_duration_days = Math.Max(1, (estimatedFinish.Date - suggestedStart.Date).Days),
+
+                dept1_private_stage = aggregatePrivateStage,
+                private_stages = privateStages,
                 group_stages = groupStages,
                 split_stages = splitStages,
-                timeline = timeline.OrderBy(x => x.planned_start_date).ToList(),
+                timeline = timeline,
+
                 can_meet_common_deadline = daysLate == 0,
                 days_late_if_any = daysLate,
-                notes = notes
+                warnings = warnings ?? new List<GroupProductionPlanWarningDto>(),
+                notes = new List<string>()
             };
+        }
+
+        public async Task<GroupProductionConfirmPreviewResponse> PreviewAsync(
+    CreateGroupProductionRequest req,
+    CancellationToken ct = default)
+        {
+
+            return await PreviewCoreAsync(
+                req,
+                validateAgainstSuggestion: true,
+                ct);
+        }
+
+        private static int StageOrder(string? stageType)
+        {
+            return NormProcessCode(stageType) switch
+            {
+                "SINGLE_PRIVATE" => 1,
+                "GROUP" => 2,
+                "SPLIT" => 3,
+                _ => 99
+            };
+        }
+
+        private static List<string> BuildPrivateBeforeFirstGroupCodes(
+    List<GroupOrderRow> rows,
+    List<ProductionPlanSegment> plan)
+        {
+            var groupedCodeByOrderId = plan
+                .Where(x => x.IsGroup)
+                .SelectMany(segment => segment.Members.Select(member => new
+                {
+                    order_id = member.Order.order_id,
+                    codes = segment.ProcessCodes
+                }))
+                .GroupBy(x => x.order_id)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.SelectMany(x => x.codes)
+                        .Select(NormProcessCode)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList());
+
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var row in rows)
+            {
+                if (!groupedCodeByOrderId.TryGetValue(row.Order.order_id, out var groupedCodes) ||
+                    groupedCodes.Count == 0)
+                    continue;
+
+                var firstGroupedIndex = row.RouteCodes
+                    .Select((code, index) => new
+                    {
+                        code = NormProcessCode(code),
+                        index
+                    })
+                    .Where(x => groupedCodes.Contains(x.code, StringComparer.OrdinalIgnoreCase))
+                    .Select(x => x.index)
+                    .DefaultIfEmpty(-1)
+                    .Min();
+
+                if (firstGroupedIndex <= 0)
+                    continue;
+
+                foreach (var code in row.RouteCodes.Take(firstGroupedIndex))
+                {
+                    var norm = NormProcessCode(code);
+                    if (!string.IsNullOrWhiteSpace(norm))
+                        result.Add(norm);
+                }
+            }
+
+            return result
+                .OrderBy(FullRouteIndex)
+                .ToList();
         }
 
         private async Task ValidateManualSelectionMatchesCurrentSuggestionAsync(
@@ -3352,30 +3505,28 @@ namespace AMMS.Application.Services
             selectedCodes = NormalizeSelectedCodesForGroup(selectedCodes);
 
             if (selectedOrderIds.Count < 2)
-                return;
+                throw new InvalidOperationException("Cần chọn ít nhất 2 order để preview/tạo lệnh ghép.");
 
             if (selectedCodes.Count == 0)
-                throw new InvalidOperationException("Cần chọn process_codes để preview/tạo lệnh ghép.");
+                throw new InvalidOperationException("Cần chọn ít nhất 1 công đoạn để preview/tạo lệnh ghép.");
 
-            /*
-             * FIX:
-             * Không còn bắt buộc selectedOrderIds phải bằng đúng toàn bộ suggestion.
-             * Chỉ cần selectedOrderIds là tập con của một suggestion hợp lệ hiện tại.
-             *
-             * Ví dụ suggestion = [1,2,5,6]
-             * thì [1,2], [1,5], [2,6], [1,2,5] đều hợp lệ.
-             */
+            EnsureOnlyGroupableDept2Codes(selectedCodes);
+
             var currentSuggestions = await BuildCurrentSuggestionsForManualSelectionAsync(
                 selectedCodes,
                 ct);
 
-            if (currentSuggestions.Count == 0)
-            {
-                throw new InvalidOperationException(
-                    "Hiện không có suggestion ghép hợp lệ nào với process đã chọn. Không thể preview/tạo lệnh ghép.");
-            }
+            var groupSuggestions = currentSuggestions
+                .Where(x => x.can_group || x.create_group_allowed)
+                .Where(x => !string.Equals(
+                    x.suggestion_type,
+                    "SINGLE_PREVIEW",
+                    StringComparison.OrdinalIgnoreCase))
+                .Where(x => x.suggest_order != null && x.suggest_order.Count >= 2)
+                .Where(x => x.suggest_process != null && x.suggest_process.Count > 0)
+                .ToList();
 
-            var matchedSuggestion = currentSuggestions.FirstOrDefault(s =>
+            var matchedSuggestion = groupSuggestions.FirstOrDefault(s =>
                 IsSelectedOrderSubsetOfSuggestion(
                     suggestionOrderIds: s.suggest_order,
                     selectedOrderIds: selectedOrderIds)
@@ -3387,8 +3538,9 @@ namespace AMMS.Application.Services
             if (matchedSuggestion != null)
                 return;
 
-            var validSuggestionText = string.Join(" | ",
-                currentSuggestions.Select(FormatSuggestionForManualSelectionError));
+            var validSuggestionText = groupSuggestions.Count == 0
+                ? "Không có suggestion ghép hợp lệ."
+                : string.Join(" | ", groupSuggestions.Select(FormatSuggestionForManualSelectionError));
 
             var selectedText =
                 $"Order chọn=[{string.Join(",", selectedOrderIds)}], " +
@@ -3410,15 +3562,11 @@ namespace AMMS.Application.Services
             if (selectedCodes.Count == 0)
                 return new List<SuggestedGroupProductionDto>();
 
+            EnsureOnlyGroupableDept2Codes(selectedCodes);
+
             /*
-             * - order Pending
-             * - production SINGLE + Pending
-             * - layout_confirmed
-             * - is_production_ready
-             * - chưa nằm trong GROUP active
-             * - chưa có task
-             * - planned_start_date/planned_end_date null
-             * - route có đủ selectedCodes
+             * Load các order Pending đủ điều kiện.
+             * Hàm này đã loại BOTH và giữ NVL/SUB.
              */
             var allCleanRows = await LoadCleanRowsForSuggestionAsync(
                 productTypeId: null,
@@ -3431,28 +3579,25 @@ namespace AMMS.Application.Services
             var result = new List<SuggestedGroupProductionDto>();
 
             /*
-             * Phải group giống SuggestAsync:
-             * - không ghép khác product_type
-             * - không ghép lẫn NVL/SUB/BOTH
+             * Logic mới:
+             * - Chỉ group theo product_type.
+             * - Không group theo prod_method.
+             * - NVL + SUB được ghép chung.
              */
-            foreach (var productMethodGroup in allCleanRows
+            foreach (var productTypeGroup in allCleanRows
                 .Where(x => x.Item != null)
                 .Where(x => x.Item.product_type_id.HasValue)
-                .Where(x => ResolveRowProductionMethodOrNull(x) != null)
-                .GroupBy(x => new
-                {
-                    product_type_id = x.Item.product_type_id!.Value,
-                    prod_method = ResolveRowProductionMethodOrNull(x)!
-                })
-                .Where(g => g.Count() >= 2))
+                .Where(x => IsGroupableProductionMethod(x.SingleProd.prod_method))
+                .GroupBy(x => x.Item.product_type_id!.Value)
+                .OrderBy(g => g.Key))
             {
-                var rowsOfOneProductTypeAndMethod = productMethodGroup
+                var rowsOfOneProductType = productTypeGroup
                     .OrderBy(x => x.Order.delivery_date)
                     .ThenBy(x => x.Order.order_id)
                     .ToList();
 
                 var suggestions = BuildSuggestionPreviewFromSelectedCodes(
-                    rowsOfOneProductTypeAndMethod,
+                    rowsOfOneProductType,
                     selectedCodes)
                     .Where(x => !string.Equals(
                         x.suggestion_type,
@@ -3464,8 +3609,18 @@ namespace AMMS.Application.Services
 
                 foreach (var s in suggestions)
                 {
-                    s.product_type_id = productMethodGroup.Key.product_type_id;
-                    s.production_method = productMethodGroup.Key.prod_method;
+                    var memberRows = rowsOfOneProductType
+                        .Where(x => s.suggest_order.Contains(x.Order.order_id))
+                        .ToList();
+
+                    s.product_type_id = productTypeGroup.Key;
+                    s.production_method = ResolveGroupProductionMethodLabel(memberRows);
+                    s.can_group = true;
+                    s.create_group_allowed = true;
+                    s.suggestion_key = BuildSuggestionKey(s);
+                    s.reason = NoteGroupSuggestion;
+                    s.note = NoteGroupSuggestion;
+
                     result.Add(s);
                 }
             }
@@ -3542,7 +3697,7 @@ namespace AMMS.Application.Services
         }
 
         private static string FormatSuggestionForManualSelectionError(
-            SuggestedGroupProductionDto s)
+    SuggestedGroupProductionDto s)
         {
             var orders = s.suggest_order == null
                 ? ""
@@ -3558,28 +3713,9 @@ namespace AMMS.Application.Services
             return
                 $"orders=[{orders}], " +
                 $"process=[{processes}], " +
-                $"method={s.production_method ?? "(unknown)"}, " +
-                $"product_type_id={(s.product_type_id.HasValue ? s.product_type_id.Value.ToString() : "(null)")}, " +
-                $"material_key={s.material_key ?? "(null)"}";
-        }
-
-        private static bool SameOrderSet(
-            List<int>? a,
-            List<int> b)
-        {
-            var aa = (a ?? new List<int>())
-                .Where(x => x > 0)
-                .Distinct()
-                .OrderBy(x => x)
-                .ToList();
-
-            var bb = b
-                .Where(x => x > 0)
-                .Distinct()
-                .OrderBy(x => x)
-                .ToList();
-
-            return aa.SequenceEqual(bb);
+                $"method={s.production_method}, " +
+                $"product_type_id={s.product_type_id}, " +
+                $"material_key={s.material_key}";
         }
 
         private static List<string> SplitImageUrls(string? csv)
@@ -3758,13 +3894,6 @@ namespace AMMS.Application.Services
             public DateTime? start_time { get; set; }
 
             public DateTime? end_time { get; set; }
-        }
-
-        private static bool IsPrivateOrderProcess(string? processCode)
-        {
-            var code = NormProcessCode(processCode);
-
-            return code is "BE" or "DUT" or "DAN";
         }
 
         private static bool IsDept1(string code)
@@ -4327,19 +4456,14 @@ namespace AMMS.Application.Services
             return result;
         }
 
-        private static string NormalizeProductionMethodForGroup(string? method)
+        private static string? NormalizeProductionMethodForGroup(string? method)
         {
-            var value = (method ?? "")
-                .Trim()
-                .ToUpperInvariant();
+            var value = (method ?? "").Trim().ToUpperInvariant();
 
-            return value switch
-            {
-                "NVL" => "NVL",
-                "SUB" => "SUB",
-                "BOTH" => "BOTH",
-                _ => ""
-            };
+            if (value == "NVL" || value == "SUB" || value == "BOTH")
+                return value;
+
+            return null;
         }
 
         private static List<string> NormalizeSelectedCodesForGroup(
@@ -4562,187 +4686,162 @@ namespace AMMS.Application.Services
         {
             warnings = new List<GroupProductionPlanWarningDto>();
 
-            var normalizedSelectedCodes = selectedCodes
-     .Select(NormProcessCode)
-     .Where(x => !string.IsNullOrWhiteSpace(x))
-     .Distinct(StringComparer.OrdinalIgnoreCase)
-     .OrderBy(FullRouteIndex)
-     .ToList();
+            ValidateRowsHaveGroupableProductionMethodOrThrow(
+                rows,
+                "build kế hoạch group");
 
-            var nonDept1Codes = normalizedSelectedCodes
-                .Where(x => !IsDept1(x))
+            selectedCodes = NormalizeSelectedCodesForGroup(selectedCodes);
+
+            EnsureOnlyGroupableDept2Codes(selectedCodes);
+
+            /*
+             * Chỉ lấy các code thật sự có trong route của ít nhất 2 order.
+             */
+            var groupCodes = selectedCodes
+                .Where(code =>
+                    rows.Count(r =>
+                        r.RouteCodes.Contains(code, StringComparer.OrdinalIgnoreCase) &&
+                        IsGroupableProductionMethod(r.SingleProd.prod_method)) >= 2)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
                 .ToList();
 
-            var sharedProcessCodes = nonDept1Codes
-                .Where(x => !IsPrivateOrderProcess(x))
-                .ToList();
+            if (groupCodes.Count == 0)
+            {
+                warnings.Add(new GroupProductionPlanWarningDto
+                {
+                    process_code = string.Join(",", selectedCodes),
+                    reason = "Không có công đoạn phòng ban 2 đủ điều kiện ghép nhóm.",
+                    affected_order_ids = rows
+                        .Select(x => x.Order.order_id)
+                        .Distinct()
+                        .OrderBy(x => x)
+                        .ToList()
+                });
 
-            var privateOrderProcessCodes = nonDept1Codes
-                .Where(IsPrivateOrderProcess)
+                return new List<ProductionPlanSegment>();
+            }
+
+            /*
+             * Rule mới:
+             * PHU/CAN/BOI nếu cùng bộ selectedCodes và cùng material key tổng hợp
+             * thì gom thành 1 GROUP segment.
+             *
+             * Ví dụ selectedCodes = PHU,CAN
+             * => tạo 1 GROUP production có 2 task PHU, CAN.
+             */
+            var rowsHavingAllGroupCodes = rows
+                .Where(r => groupCodes.All(code =>
+                    r.RouteCodes.Contains(code, StringComparer.OrdinalIgnoreCase)))
+                .Where(r => IsGroupableProductionMethod(r.SingleProd.prod_method))
                 .ToList();
 
             var result = new List<ProductionPlanSegment>();
 
-            /*
-             * 1. PHU / CAN / BOI:
-             * Vẫn có thể sản xuất GROUP nếu cùng material_key.
-             */
-            foreach (var processCode in sharedProcessCodes)
+            var compositeMaterialGroups = rowsHavingAllGroupCodes
+                .GroupBy(r => BuildCompositeGroupMaterialKey(groupCodes, r))
+                .ToList();
+
+            foreach (var mg in compositeMaterialGroups)
             {
-                var deptCode = ResolveDepartmentCode(processCode);
-                var deptName = ResolveDepartmentName(deptCode);
+                var memberRows = mg
+                    .OrderBy(x => x.Order.delivery_date)
+                    .ThenBy(x => x.Order.order_id)
+                    .ToList();
 
-                var membersWithProcess = rows
-    .Where(r => r.RouteCodes.Contains(processCode, StringComparer.OrdinalIgnoreCase))
-    .Where(r => ResolveRowProductionMethodOrNull(r) != null)
-    .ToList();
+                if (memberRows.Count < 2)
+                {
+                    warnings.Add(new GroupProductionPlanWarningDto
+                    {
+                        process_code = string.Join(",", groupCodes),
+                        reason = "Nhóm vật tư chỉ có một đơn hàng nên không tạo lệnh ghép.",
+                        affected_order_ids = memberRows
+                            .Select(x => x.Order.order_id)
+                            .ToList()
+                    });
 
-                if (membersWithProcess.Count == 0)
                     continue;
-
-                if (RequiresSameMaterialKey(processCode))
-                {
-                    var materialGroups = membersWithProcess
-    .GroupBy(x => BuildGroupPlanKey(processCode, x))
-    .ToList();
-
-                    if (materialGroups.Count > 1)
-                    {
-                        warnings.Add(new GroupProductionPlanWarningDto
-                        {
-                            process_code = processCode,
-                            reason = $"Công đoạn {processCode} khác mã vật tư nên không thể ghép chung tất cả order. Hệ thống tự tách theo từng nhóm vật tư.",
-                            affected_order_ids = membersWithProcess
-                                .Select(x => x.Order.order_id)
-                                .Distinct()
-                                .OrderBy(x => x)
-                                .ToList(),
-                            material_groups = materialGroups.ToDictionary(
-                                g => g.Key,
-                                g => g.Select(x => x.Order.order_id)
-                                      .Distinct()
-                                      .OrderBy(x => x)
-                                      .ToList())
-                        });
-                    }
-
-                    foreach (var mg in materialGroups)
-                    {
-                        result.Add(new ProductionPlanSegment
-                        {
-                            DepartmentCode = deptCode,
-                            DepartmentName = deptName,
-                            ProcessCodes = new List<string> { processCode },
-                            Members = mg.ToList(),
-                            MaterialKey = mg.Key
-                        });
-                    }
                 }
-                else
-                {
-                    var methodGroups = membersWithProcess
-    .GroupBy(x => ResolveRowProductionMethodOrThrow(x))
-    .ToList();
 
-                    foreach (var mg in methodGroups)
-                    {
-                        result.Add(new ProductionPlanSegment
-                        {
-                            DepartmentCode = deptCode,
-                            DepartmentName = deptName,
-                            ProcessCodes = new List<string> { processCode },
-                            Members = mg.ToList(),
-                            MaterialKey = $"METHOD={mg.Key}"
-                        });
-                    }
-                }
+                result.Add(new ProductionPlanSegment
+                {
+                    DepartmentCode = "DEPT_2",
+                    DepartmentName = "Phủ - Cán - Bồi",
+                    ProcessCodes = groupCodes,
+                    Members = memberRows,
+                    MaterialKey = mg.Key
+                });
             }
 
             /*
- * 2. BE / DUT / DAN:
- *
- * Rule mới:
- * - Nếu user chọn trực tiếp BE/DUT/DAN => vẫn tạo SPLIT riêng từng order.
- * - Nếu user chọn bất kỳ công đoạn Dept2: PHU/CAN/CAN_MANG/BOI
- *   => tự động tách toàn bộ Dept3 phía sau: BE/DUT/DAN sang SPLIT riêng từng order.
- *
- * Mục tiêu:
- * - SINGLE gốc giữ Dept1: RALO/CAT/IN và shadow task GroupedWaiting của Dept2.
- * - GROUP giữ Dept2 được chọn: PHU/CAN/BOI...
- * - SPLIT giữ Dept3: BE/DUT/DAN riêng từng order.
- */
-            var selectedDept2Codes = normalizedSelectedCodes
-                .Where(IsDept2)
-                .ToList();
-
-            var selectedDept3Codes = normalizedSelectedCodes
-                .Where(IsPrivateOrderProcess)
-                .ToList();
+             * Các công đoạn sau GROUP:
+             * - Tách riêng từng order.
+             * - BE,DUT,DAN giống RALO,CAT,IN: mỗi order 1 production riêng.
+             */
+            var groupedCodeByOrderId = result
+                .Where(x => x.IsGroup)
+                .SelectMany(segment => segment.Members.Select(member => new
+                {
+                    order_id = member.Order.order_id,
+                    codes = segment.ProcessCodes
+                }))
+                .GroupBy(x => x.order_id)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.SelectMany(x => x.codes)
+                        .Select(NormProcessCode)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(FullRouteIndex)
+                        .ToList());
 
             foreach (var row in rows.OrderBy(x => x.Order.order_id))
             {
-                var privateCodesForOrder = new List<string>();
-
-                /*
-                 * Case A:
-                 * User chọn trực tiếp BE/DUT/DAN.
-                 */
-                privateCodesForOrder.AddRange(
-                    selectedDept3Codes
-                        .Where(code => row.RouteCodes.Contains(code, StringComparer.OrdinalIgnoreCase)));
-
-                /*
-                 * Case B:
-                 * User chọn PHU/CAN/BOI.
-                 * Khi đã ghép/tách Dept2 thì Dept3 phía sau không được nằm chung production
-                 * với RALO/CAT/IN nữa, nên tự động tách BE/DUT/DAN.
-                 */
-                if (selectedDept2Codes.Count > 0)
+                if (!groupedCodeByOrderId.TryGetValue(row.Order.order_id, out var groupedCodesForOrder) ||
+                    groupedCodesForOrder.Count == 0)
                 {
-                    var lastSelectedDept2Index = row.RouteCodes
-                        .Select((code, index) => new
-                        {
-                            code = NormProcessCode(code),
-                            index
-                        })
-                        .Where(x => selectedDept2Codes.Contains(
-                            x.code,
-                            StringComparer.OrdinalIgnoreCase))
-                        .Select(x => x.index)
-                        .DefaultIfEmpty(-1)
-                        .Max();
-
-                    if (lastSelectedDept2Index >= 0)
-                    {
-                        var dept3AfterSelectedDept2 = row.RouteCodes
-                            .Skip(lastSelectedDept2Index + 1)
-                            .Where(IsDept3)
-                            .OrderBy(FullRouteIndex)
-                            .ToList();
-
-                        privateCodesForOrder.AddRange(dept3AfterSelectedDept2);
-                    }
+                    continue;
                 }
 
-                privateCodesForOrder = privateCodesForOrder
+                var lastGroupedIndex = row.RouteCodes
+                    .Select((code, index) => new
+                    {
+                        code = NormProcessCode(code),
+                        index
+                    })
+                    .Where(x => groupedCodesForOrder.Contains(x.code, StringComparer.OrdinalIgnoreCase))
+                    .Select(x => x.index)
+                    .DefaultIfEmpty(-1)
+                    .Max();
+
+                if (lastGroupedIndex < 0)
+                    continue;
+
+                var afterGroupPrivateCodes = row.RouteCodes
+                    .Skip(lastGroupedIndex + 1)
+                    .Select(NormProcessCode)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Where(x => !groupedCodesForOrder.Contains(x, StringComparer.OrdinalIgnoreCase))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .OrderBy(FullRouteIndex)
                     .ToList();
 
-                if (privateCodesForOrder.Count == 0)
+                if (afterGroupPrivateCodes.Count == 0)
                     continue;
 
                 result.Add(new ProductionPlanSegment
                 {
-                    DepartmentCode = "DEPT_3",
-                    DepartmentName = ResolveDepartmentName("DEPT_3"),
-                    ProcessCodes = privateCodesForOrder,
+                    DepartmentCode = "SPLIT",
+                    DepartmentName = "Công đoạn riêng sau ghép nhóm",
+                    ProcessCodes = afterGroupPrivateCodes,
                     Members = new List<GroupOrderRow> { row },
-                    MaterialKey = $"ORDER:{row.Order.order_id}:DEPT_3"
+                    MaterialKey = $"ORDER:{row.Order.order_id}:AFTER_GROUP"
                 });
             }
 
-            return MergeAdjacentSegments(result);
+            return result
+                .OrderBy(x => x.IsGroup ? 1 : 2)
+                .ThenBy(x => x.Members.Min(m => m.Order.order_id))
+                .ToList();
         }
 
         private static DateTime DateOnlyStart(DateTime value)
@@ -4809,22 +4908,39 @@ namespace AMMS.Application.Services
         }
 
         private static DateTime ResolveStageStart(
-            GroupProductionConfirmPreviewResponse preview,
-            ProductionPlanSegment segment)
+    GroupProductionConfirmPreviewResponse preview,
+    ProductionPlanSegment segment)
         {
             if (segment.IsGroup)
             {
-                return preview.dept1_private_stage.planned_end_date;
+                var matched = preview.group_stages.FirstOrDefault(x =>
+                    SameOrderSet(
+                        x.order_ids,
+                        segment.Members.Select(m => m.Order.order_id).ToList())
+                    &&
+                    SameProcessCodes(
+                        x.process_codes,
+                        segment.ProcessCodes));
+
+                if (matched != null)
+                    return matched.planned_start_date;
+
+                return preview.group_stages.Count > 0
+                    ? preview.group_stages.Min(x => x.planned_start_date)
+                    : preview.suggested_planned_start_date;
             }
 
-            if (segment.DepartmentCode == "DEPT_3")
-            {
-                var lastGroupEnd = preview.group_stages.Count == 0
-                    ? preview.dept1_private_stage.planned_end_date
-                    : preview.group_stages.Max(x => x.planned_end_date);
+            var orderIds = segment.Members
+                .Select(x => x.Order.order_id)
+                .Distinct()
+                .ToList();
 
-                return lastGroupEnd;
-            }
+            var split = preview.split_stages.FirstOrDefault(x =>
+                SameOrderSet(x.order_ids, orderIds) &&
+                SameProcessCodes(x.process_codes, segment.ProcessCodes));
+
+            if (split != null)
+                return split.planned_start_date;
 
             return preview.suggested_planned_start_date;
         }
@@ -4833,15 +4949,36 @@ namespace AMMS.Application.Services
             GroupProductionConfirmPreviewResponse preview,
             ProductionPlanSegment segment)
         {
-            var start = ResolveStageStart(preview, segment);
-
             if (segment.IsGroup)
-                return start.AddDays(Dept2Days);
+            {
+                var matched = preview.group_stages.FirstOrDefault(x =>
+                    SameOrderSet(
+                        x.order_ids,
+                        segment.Members.Select(m => m.Order.order_id).ToList())
+                    &&
+                    SameProcessCodes(
+                        x.process_codes,
+                        segment.ProcessCodes));
 
-            if (segment.DepartmentCode == "DEPT_3")
-                return start.AddDays(Dept3Days);
+                if (matched != null)
+                    return matched.planned_end_date;
 
-            return start.AddDays(1);
+                return ResolveStageStart(preview, segment).AddDays(Dept2Days);
+            }
+
+            var orderIds = segment.Members
+                .Select(x => x.Order.order_id)
+                .Distinct()
+                .ToList();
+
+            var split = preview.split_stages.FirstOrDefault(x =>
+                SameOrderSet(x.order_ids, orderIds) &&
+                SameProcessCodes(x.process_codes, segment.ProcessCodes));
+
+            if (split != null)
+                return split.planned_end_date;
+
+            return ResolveStageStart(preview, segment).AddDays(Dept3Days);
         }
 
         private static int GetGlobalRouteIndex(
@@ -5338,9 +5475,9 @@ namespace AMMS.Application.Services
             return methods[0];
         }
 
-        private static void ValidateRowsHaveSameProductionMethodOrThrow(
-            List<GroupOrderRow> rows,
-            string actionName)
+        private static void ValidateRowsHaveGroupableProductionMethodOrThrow(
+    List<GroupOrderRow> rows,
+    string actionName)
         {
             if (rows == null || rows.Count == 0)
                 throw new InvalidOperationException($"Không có order để {actionName}.");
@@ -5354,28 +5491,36 @@ namespace AMMS.Application.Services
             if (invalidRows.Count > 0)
             {
                 throw new InvalidOperationException(
-                    $"Không thể {actionName} vì có order chưa có prod_method hợp lệ SUB/NVL/BOTH. " +
+                    $"Không thể {actionName} vì có order chưa có prod_method hợp lệ. " +
                     $"Chi tiết: {string.Join(" | ", invalidRows)}");
             }
 
-            var methodGroups = rows
-                .GroupBy(x => ResolveRowProductionMethodOrThrow(x), StringComparer.OrdinalIgnoreCase)
-                .Select(g => new
-                {
-                    method = g.Key,
-                    order_ids = g.Select(x => x.Order.order_id).Distinct().OrderBy(x => x).ToList()
-                })
+            var bothRows = rows
+                .Where(x => string.Equals(
+                    ResolveRowProductionMethodOrNull(x),
+                    "BOTH",
+                    StringComparison.OrdinalIgnoreCase))
+                .Select(x => $"{x.Order.order_id}(prod_id={x.SingleProd.prod_id})")
                 .ToList();
 
-            if (methodGroups.Count > 1)
+            if (bothRows.Count > 0)
             {
-                var detail = methodGroups
-                    .Select(x => $"{x.method}: orders={string.Join(",", x.order_ids)}")
-                    .ToList();
-
                 throw new InvalidOperationException(
-                    $"Không thể {actionName} vì các order có prod_method khác nhau. " +
-                    $"Chỉ được ghép các order cùng method SUB/NVL/BOTH. Chi tiết: {string.Join(" | ", detail)}");
+                    $"Không thể {actionName} vì method BOTH không được ghép. " +
+                    $"Các order BOTH phải sản xuất đơn riêng. Order BOTH: {string.Join(", ", bothRows)}");
+            }
+
+            var unsupported = rows
+                .Where(x => !IsGroupableProductionMethod(x.SingleProd.prod_method))
+                .Select(x =>
+                    $"order_id={x.Order.order_id}, method={ShowText(x.SingleProd.prod_method)}")
+                .ToList();
+
+            if (unsupported.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"Không thể {actionName}. Chỉ cho phép ghép NVL/SUB. " +
+                    $"Không hợp lệ: {string.Join(" | ", unsupported)}");
             }
         }
 
@@ -5405,10 +5550,13 @@ namespace AMMS.Application.Services
 
         private string BuildGroupPlanKey(string processCode, GroupOrderRow row)
         {
-            var method = ResolveRowProductionMethodOrThrow(row);
+            /*
+             * - NVL và SUB có thể ghép chung nếu cùng product_type,
+             *   cùng công đoạn groupable, cùng nhóm vật tư/kỹ thuật.
+             */
             var materialKey = ResolveMaterialGroupKey(processCode, row);
 
-            return $"METHOD={method}|{materialKey}";
+            return materialKey;
         }
 
         private static void ValidateRowsHaveNoStartedTaskOrThrow(
@@ -5436,6 +5584,236 @@ namespace AMMS.Application.Services
                 $"Với NVL: không được có bất kỳ task nào đã bắt đầu. " +
                 $"Với SUB: chỉ cho phép RALO/CAT/IN đã Finished do lấy BTP, nhưng công đoạn group đang chọn phải chưa bắt đầu. " +
                 $"Chi tiết: {string.Join(" | ", invalidRows)}");
+        }
+
+    private static bool IsGroupableDept2Process(string? processCode)
+        {
+            var code = NormProcessCode(processCode);
+
+            return GroupableDept2Codes.Contains(
+                code,
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static bool IsPrivateOrderProcess(string? processCode)
+        {
+            var code = NormProcessCode(processCode);
+
+            /*
+             * Tất cả công đoạn không thuộc PHU/CAN/BOI đều không tạo GROUP.
+             * Chúng sẽ nằm trong SINGLE private hoặc SPLIT riêng từng order.
+             */
+            return !IsGroupableDept2Process(code);
+        }
+
+
+        private static List<string> NormalizeSelectedCodesForGroup(List<string>? selectedCodes)
+        {
+            return (selectedCodes ?? new List<string>())
+                .SelectMany(x => GroupProductionHelper.ParseCodes(x))
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+        }
+
+        private static void EnsureOnlyGroupableDept2Codes(List<string> selectedCodes)
+        {
+            var invalid = selectedCodes
+                .Select(NormProcessCode)
+                .Where(x => !IsGroupableDept2Process(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (invalid.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    "Chỉ được ghép nhóm sản xuất ở công đoạn PHU, CAN, BOI. " +
+                    $"Không hợp lệ: {string.Join(",", invalid)}");
+            }
+        }
+
+        private static bool IsGroupableProductionMethod(string? method)
+        {
+            var value = NormalizeProductionMethodForGroup(method);
+
+            return value == "NVL" || value == "SUB";
+        }
+
+        private static string ResolveGroupProductionMethodLabel(IEnumerable<GroupOrderRow> rows)
+        {
+            var methods = rows
+                .Select(x => NormalizeProductionMethodForGroup(x.SingleProd.prod_method))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x)
+                .ToList();
+
+            if (methods.Count == 0)
+                throw new InvalidOperationException("Không xác định được prod_method cho group.");
+
+            if (methods.Any(x => x == "BOTH"))
+            {
+                throw new InvalidOperationException(
+                    "Không thể ghép production có method BOTH. BOTH phải sản xuất đơn riêng.");
+            }
+
+            if (methods.Count == 1)
+                return methods[0]!;
+
+            /*
+             * Có cả NVL và SUB.
+             */
+            return "MIXED";
+        }
+
+        private static string ResolveMethodSummary(IEnumerable<GroupOrderRow> rows)
+        {
+            return string.Join(", ",
+                rows
+                    .Select(x => $"{x.Order.order_id}:{ResolveRowProductionMethodOrNull(x)}")
+                    .OrderBy(x => x));
+        }
+
+        private static bool SameProcessCodes(
+    List<string>? a,
+    List<string>? b)
+        {
+            var aa = (a ?? new List<string>())
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+
+            var bb = (b ?? new List<string>())
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+
+            return aa.SequenceEqual(bb, StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static bool SameOrderSet(
+            List<int>? a,
+            List<int>? b)
+        {
+            var aa = (a ?? new List<int>())
+                .Distinct()
+                .OrderBy(x => x)
+                .ToList();
+
+            var bb = (b ?? new List<int>())
+                .Distinct()
+                .OrderBy(x => x)
+                .ToList();
+
+            return aa.SequenceEqual(bb);
+        }
+
+        private string BuildCompositeGroupMaterialKey(
+            List<string> processCodes,
+            GroupOrderRow row)
+        {
+            var keys = processCodes
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .Select(code => BuildGroupPlanKey(code, row))
+                .ToList();
+
+            return string.Join(" | ", keys);
+        }
+
+        private static List<string> BuildPrivateCodesBeforeGroupForOrder(
+    GroupOrderRow row,
+    List<string> groupedCodes)
+        {
+            groupedCodes = groupedCodes
+                .Select(NormProcessCode)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var firstGroupedIndex = row.RouteCodes
+                .Select((code, index) => new
+                {
+                    code = NormProcessCode(code),
+                    index
+                })
+                .Where(x => groupedCodes.Contains(x.code, StringComparer.OrdinalIgnoreCase))
+                .Select(x => x.index)
+                .DefaultIfEmpty(-1)
+                .Min();
+
+            if (firstGroupedIndex <= 0)
+                return new List<string>();
+
+            return row.RouteCodes
+                .Take(firstGroupedIndex)
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+        }
+
+        private static List<GroupProductionScheduleStageDto> BuildPrivateStagesBeforeGroup(
+            List<GroupOrderRow> rows,
+            List<ProductionPlanSegment> plan,
+            DateTime start)
+        {
+            var groupSegments = plan
+                .Where(x => x.IsGroup)
+                .ToList();
+
+            if (groupSegments.Count == 0)
+                return new List<GroupProductionScheduleStageDto>();
+
+            var groupedCodesByOrder = groupSegments
+                .SelectMany(segment => segment.Members.Select(member => new
+                {
+                    order_id = member.Order.order_id,
+                    codes = segment.ProcessCodes
+                }))
+                .GroupBy(x => x.order_id)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.SelectMany(x => x.codes)
+                        .Select(NormProcessCode)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(FullRouteIndex)
+                        .ToList());
+
+            var result = new List<GroupProductionScheduleStageDto>();
+
+            foreach (var row in rows.OrderBy(x => x.Order.order_id))
+            {
+                if (!groupedCodesByOrder.TryGetValue(row.Order.order_id, out var groupedCodes))
+                    continue;
+
+                var privateCodes = BuildPrivateCodesBeforeGroupForOrder(
+                    row,
+                    groupedCodes);
+
+                if (privateCodes.Count == 0)
+                    continue;
+
+                result.Add(BuildStageDto(
+                    deptCode: "PRIVATE_BEFORE_GROUP",
+                    deptName: "Công đoạn riêng trước ghép nhóm",
+                    stageType: "SINGLE_PRIVATE",
+                    processCodes: privateCodes,
+                    orderIds: new List<int> { row.Order.order_id },
+                    start: start,
+                    durationDays: Dept1Days,
+                    note: NotePrivateBeforeGroup));
+            }
+
+            return result;
         }
     }
 }

@@ -382,24 +382,12 @@ namespace AMMS.Application.Services
                 currentTask.process?.process_code);
 
             /*
-             * GROUP:
-             * max_allowed phải tính theo tổng output sau công đoạn hiện tại
-             * của từng order, có cộng hao hụt SUB.
+             * GROUP / MIXED:
+             * Không dùng groupProd.prod_method để tính max.
+             * Mỗi link dùng singleProd.prod_method riêng:
+             * - NVL: fallback qty_plan hoặc estimate thường.
+             * - SUB: tính downstream input/output theo BTP boundary.
              */
-            if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
-            {
-                if (string.Equals(prod.prod_method, "SUB", StringComparison.OrdinalIgnoreCase))
-                {
-                    return await ResolveGroupSubPlannedInputQtyForScanAsync(
-                        currentTask,
-                        prod,
-                        ct);
-                }
-
-                /*
-                 * Logic cũ cho GROUP + NVL / BOTH giữ nguyên phía dưới.
-                 */
-            }
             if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
             {
                 var links = await _db.task_links
@@ -442,9 +430,6 @@ namespace AMMS.Application.Services
                         link.qty_plan,
                         ct);
 
-                    /*
-                     * qty_good là output sau công đoạn hiện tại.
-                     */
                     total += stageQty?.output_qty ?? Math.Max(link.qty_plan, 1);
                 }
 
@@ -452,8 +437,7 @@ namespace AMMS.Application.Services
             }
 
             /*
-             * SINGLE/SPLIT:
-             * nếu là SUB/BOTH downstream thì lấy output_qty.
+             * SINGLE/SPLIT giữ logic cũ.
              */
             var singleCtx = await GetTaskEstimateContextAsync(
                 currentTask.task_id,
@@ -1835,12 +1819,12 @@ namespace AMMS.Application.Services
              *
              * Lượng chuẩn để FE validate là estimatedInputQty, ví dụ 6290.
              */
-            var isGroupSub =
-                ctx.Production != null &&
-                string.Equals(ctx.Production.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(ctx.Production.prod_method, "SUB", StringComparison.OrdinalIgnoreCase);
+            var isGroupLinkForSubOrder =
+    ctx.Production != null &&
+    link.qty_plan > 0 &&
+    string.Equals(ctx.Production.prod_method, "SUB", StringComparison.OrdinalIgnoreCase);
 
-            var displayActualQty = isGroupSub
+            var displayActualQty = isGroupLinkForSubOrder
                 ? estimatedInputQty
                 : Math.Round(actualQtyPrevStage, 4);
 
