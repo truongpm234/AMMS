@@ -1383,34 +1383,100 @@ namespace AMMS.Application.Services
                 try
                 {
                     /*
-                     * Bước 1:
-                     * Tạo/schedule production + tasks như logic cũ.
-                     */
-                    await ExecuteAsync(orderId, CancellationToken.None);
-
-                    /*
-                     * Bước 2:
-                     * Sau khi production đã được tạo xong,
-                     * tự trigger duyệt ready/method.
+                     * Flow mới:
+                     * - QueueRelease sau layout KHÔNG được gọi ExecuteAsync nữa.
+                     * - Không tạo task.
+                     * - Không lập lịch.
                      *
-                     * SetProductionReadyAsync sẽ tự quyết định:
-                     * - 1 method khả dụng: auto approve
-                     * - nhiều method khả dụng: waiting manager approval
+                     * Chỉ xử lý case đặc biệt:
+                     * - Nếu order chỉ có đúng 1 method sản xuất khả dụng
+                     *   thì tự tạo production shell Pending + auto approve method.
+                     * - Nếu có 2+ method thì không tạo production, đợi GM gọi start-ready.
                      */
-                    if (autoApproveSingleMethod)
-                    {
-                        await TryAutoApproveProductionMethodAfterLayoutAsync(
-                            orderId,
-                            CancellationToken.None);
-                    }
+                    if (!autoApproveSingleMethod)
+                        return;
+
+                    await TryCreatePendingProductionShellAfterLayoutIfSingleMethodAsync(
+                        orderId,
+                        CancellationToken.None);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex,
-                        "Background production release failed. OrderId={OrderId}",
+                    _logger.LogError(
+                        ex,
+                        "QueueRelease failed. OrderId={OrderId}",
                         orderId);
                 }
             });
+        }
+
+        private async Task TryCreatePendingProductionShellAfterLayoutIfSingleMethodAsync(
+    int orderId,
+    CancellationToken ct = default)
+        {
+            using var scope = _scopeFactory.CreateScope();
+
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var productionService = scope.ServiceProvider.GetRequiredService<IProductionService>();
+
+            var ord = await db.orders
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.order_id == orderId, ct);
+
+            if (ord == null)
+            {
+                _logger.LogWarning(
+                    "[QueueRelease] Skip because order not found. OrderId={OrderId}",
+                    orderId);
+                return;
+            }
+
+            if (!ord.layout_confirmed)
+            {
+                _logger.LogInformation(
+                    "[QueueRelease] Skip because layout_confirmed=false. OrderId={OrderId}",
+                    orderId);
+                return;
+            }
+
+            /*
+             * Nếu order đã có production active thì không tạo lại.
+             */
+            var hasActiveProduction = await db.productions
+                .AsNoTracking()
+                .AnyAsync(x =>
+                    x.order_id == orderId &&
+                    x.end_date == null &&
+                    (
+                        x.prod_kind == null ||
+                        x.prod_kind.ToUpper() != "GROUP"
+                    ),
+                    ct);
+
+            if (hasActiveProduction)
+            {
+                _logger.LogInformation(
+                    "[QueueRelease] Skip because production shell already exists. OrderId={OrderId}",
+                    orderId);
+                return;
+            }
+
+            /*
+             * Hàm này sẽ:
+             * - check số method khả dụng
+             * - nếu đúng 1 method thì tạo production Pending
+             * - nếu 0 hoặc 2+ method thì không tạo gì
+             */
+            var result = await productionService.AutoCreatePendingProductionAfterLayoutIfSingleMethodAsync(
+                orderId,
+                ct);
+
+            _logger.LogInformation(
+                "[QueueRelease] AutoCreatePendingProductionAfterLayout result. OrderId={OrderId}, Created={Created}, Method={Method}, Reason={Reason}",
+                orderId,
+                result.created,
+                result.method,
+                result.reason);
         }
 
         private async Task TryAutoApproveProductionMethodAfterLayoutAsync(

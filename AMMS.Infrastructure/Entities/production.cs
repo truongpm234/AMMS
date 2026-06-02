@@ -21,6 +21,8 @@ public partial class production
 
     public DateTime? actual_start_date { get; set; }
 
+    public DateTime? planned_end_date { get; set; }
+
     public DateTime? end_date { get; set; }
 
     public string? status { get; set; }

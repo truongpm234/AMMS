@@ -171,16 +171,20 @@ namespace AMMS.Application.Services
                     on o.order_id equals pr.order_id
 
                 where pr.prod_kind == "SINGLE"
-                      && pr.status == "Scheduled"
+                      && (
+                            pr.status == "Pending" ||
+                            pr.status == "Scheduled"
+                         )
 
-                      && o.status == "Scheduled"
+                      && (
+                            o.status == "Pending" ||
+                            o.status == "Scheduled"
+                         )
                       && o.layout_confirmed
                       && o.is_production_ready
 
                       && o.delivery_date != null
                       && o.delivery_date >= minDeliveryDate
-
-                      && _db.tasks.Any(t => t.prod_id == pr.prod_id)
 
                       && !_db.prod_orders.Any(po =>
                             po.order_id == o.order_id &&
@@ -259,7 +263,11 @@ namespace AMMS.Application.Services
                     x.Item.product_type_id == productTypeId.Value)
 
                 .Where(x => ResolveRowProductionMethodOrNull(x) != null)
-
+                .Where(x =>
+                {
+                    var method = ResolveRowProductionMethodOrNull(x);
+                    return method == "NVL" || method == "SUB";
+                })
                 .Where(x =>
                     selectedCodes.Count == 0 ||
                     selectedCodes.All(code =>
@@ -414,6 +422,13 @@ namespace AMMS.Application.Services
                     .OrderBy(x => x.seq_num)
                     .ToListAsync(ct);
 
+                await EnsureSingleHeadTasksBeforeGroupAsync(
+                    rows,
+                    selectedCodes,
+                    allSteps,
+                    preview,
+                    ct);
+
                 var createdGroupProdIds = new List<int>();
                 var createdSplitProdIds = new List<int>();
 
@@ -493,6 +508,129 @@ namespace AMMS.Application.Services
             });
         }
 
+        private async Task EnsureSingleHeadTasksBeforeGroupAsync(
+    List<GroupOrderRow> rows,
+    List<string> selectedGroupCodes,
+    List<product_type_process> allSteps,
+    GroupProductionConfirmPreviewResponse preview,
+    CancellationToken ct)
+        {
+            var selectedSet = selectedGroupCodes
+                .Select(NormProcessCode)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var now = AppTime.NowVnUnspecified();
+
+            foreach (var row in rows)
+            {
+                var route = row.RouteCodes
+                    .Select(NormProcessCode)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .ToList();
+
+                var firstGroupIndex = route.FindIndex(x => selectedSet.Contains(x));
+
+                if (firstGroupIndex <= 0)
+                    continue;
+
+                var headCodes = route
+                    .Take(firstGroupIndex)
+                    .ToList();
+
+                var existingCodes = await _db.tasks
+                    .AsNoTracking()
+                    .Include(x => x.process)
+                    .Where(x => x.prod_id == row.SingleProd.prod_id)
+                    .Select(x => x.process != null ? x.process.process_code : null)
+                    .ToListAsync(ct);
+
+                var existingSet = existingCodes
+                    .Select(NormProcessCode)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                var method = ResolveRowProductionMethodOrThrow(row);
+
+                var subCoveredCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                if ((method == "SUB" || method == "BOTH") &&
+                    row.SingleProd.sub_product_id.HasValue)
+                {
+                    var subPath = await _db.sub_products
+                        .AsNoTracking()
+                        .Where(x => x.id == row.SingleProd.sub_product_id.Value)
+                        .Select(x => x.product_process)
+                        .FirstOrDefaultAsync(ct);
+
+                    subCoveredCodes = ParseProcessCodes(subPath)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                }
+
+                var headStart = preview.suggested_planned_start_date;
+                var headEnd = preview.dept1_private_stage.planned_end_date;
+
+                var headSteps = allSteps
+                    .Where(x => headCodes.Contains(
+                        NormProcessCode(x.process_code),
+                        StringComparer.OrdinalIgnoreCase))
+                    .OrderBy(x => x.seq_num)
+                    .ToList();
+
+                var totalMinutes = Math.Max(1, (int)(headEnd - headStart).TotalMinutes);
+                var minutesPerTask = Math.Max(1, totalMinutes / Math.Max(1, headSteps.Count));
+
+                for (var i = 0; i < headSteps.Count; i++)
+                {
+                    var step = headSteps[i];
+                    var code = NormProcessCode(step.process_code);
+
+                    if (existingSet.Contains(code))
+                        continue;
+
+                    var isFinishedBySub =
+                        method == "SUB" &&
+                        subCoveredCodes.Contains(code);
+
+                    var start = headStart.AddMinutes(minutesPerTask * i);
+                    var end = i == headSteps.Count - 1
+                        ? headEnd
+                        : headStart.AddMinutes(minutesPerTask * (i + 1));
+
+                    var task = new task
+                    {
+                        prod_id = row.SingleProd.prod_id,
+                        process_id = step.process_id,
+                        seq_num = step.seq_num,
+                        name = step.process_name ?? step.process_code ?? code,
+
+                        status = isFinishedBySub ? "Finished" : "Unassigned",
+
+                        machine = ResolveTaskMachineFromProcess(step),
+                        input_mode = "MANUAL",
+
+                        start_time = isFinishedBySub ? now : null,
+                        end_time = isFinishedBySub ? now : null,
+
+                        planned_start_time = start,
+                        planned_end_time = end,
+
+                        reason = isFinishedBySub
+                            ? "Bán thành phẩm đã cover công đoạn này khi lập lịch group."
+                            : "Task SINGLE trước công đoạn ghép.",
+
+                        is_taken_sub_product = isFinishedBySub
+                    };
+
+                    await _db.tasks.AddAsync(task, ct);
+                }
+
+                row.SingleProd.planned_start_date ??= headStart;
+                row.SingleProd.planned_end_date = headEnd;
+                row.SingleProd.status = "Scheduled";
+            }
+
+            await _db.SaveChangesAsync(ct);
+        }
+
         private async Task<production> CreateDepartmentGroupProductionAsync(
     ProductionPlanSegment segment,
     int productTypeId,
@@ -539,7 +677,7 @@ namespace AMMS.Application.Services
                 planned_start_date = plannedStart,
                 status = "Scheduled",
                 product_type_id = productTypeId,
-
+                planned_end_date = plannedEnd,
                 note = string.IsNullOrWhiteSpace(note)
                     ? $"Group {segment.DepartmentName}: {codesCsv}"
                     : $"{note} | Group {segment.DepartmentName}: {codesCsv}",
@@ -619,6 +757,12 @@ namespace AMMS.Application.Services
                         StringComparer.OrdinalIgnoreCase))
                 .ToList();
 
+            /*
+             * - Nếu single production đã có task cũ thì validate và xóa task được group.
+             * - Nếu chưa có task thì vẫn tạo group task
+             */
+            var missingSingleTaskLinks = new List<(int singleProdId, int orderId, string code)>();
+
             foreach (var member in segment.Members)
             {
                 foreach (var code in selectedCodes)
@@ -632,10 +776,20 @@ namespace AMMS.Application.Services
 
                     if (!hasTask)
                     {
-                        throw new InvalidOperationException(
-                            $"Không tìm thấy task công đoạn {code} trong production single {member.SingleProd.prod_id} của order {member.Order.order_id}.");
+                        missingSingleTaskLinks.Add((
+                            member.SingleProd.prod_id,
+                            member.Order.order_id,
+                            code));
                     }
                 }
+            }
+
+            if (tasksToDelete.Count > 0)
+            {
+                await ValidateSingleTasksCanBeDeletedForGroupAsync(
+                    tasksToDelete,
+                    allSingleTasks,
+                    ct);
             }
 
             await ValidateSingleTasksCanBeDeletedForGroupAsync(
@@ -676,42 +830,45 @@ namespace AMMS.Application.Services
 
             await _db.SaveChangesAsync(ct);
 
-            foreach (var singleTask in tasksToDelete)
+            foreach (var member in segment.Members)
             {
-                if (!singleTask.prod_id.HasValue)
-                    throw new InvalidOperationException($"Task {singleTask.task_id} thiếu prod_id.");
-
-                var singleProdId = singleTask.prod_id.Value;
-
-                if (!memberBySingleProdId.TryGetValue(singleProdId, out var member))
-                    throw new InvalidOperationException($"Không tìm thấy member của single_prod_id={singleProdId}.");
-
-                var processCode = NormProcessCode(singleTask.process?.process_code);
-
-                if (!groupTaskByCode.TryGetValue(processCode, out var groupTask))
-                    throw new InvalidOperationException($"Không tìm thấy group task cho process_code={processCode}.");
-
-                await _db.task_links.AddAsync(new task_link
+                foreach (var processCodeRaw in selectedCodes)
                 {
-                    group_prod_id = groupProd.prod_id,
-                    group_task_id = groupTask.task_id,
+                    var processCode = NormProcessCode(processCodeRaw);
 
-                    single_prod_id = singleProdId,
+                    if (!groupTaskByCode.TryGetValue(processCode, out var groupTask))
+                        throw new InvalidOperationException($"Không tìm thấy group task cho process_code={processCode}.");
 
-                    // Quan trọng:
-                    // Task single sẽ bị xóa nên không được giữ FK tới task này.
-                    single_task_id = null,
+                    var originalSingleTask = allSingleTasks.FirstOrDefault(x =>
+                        x.prod_id == member.SingleProd.prod_id &&
+                        string.Equals(
+                            NormProcessCode(x.process?.process_code),
+                            processCode,
+                            StringComparison.OrdinalIgnoreCase));
 
-                    // Chỉ lưu để trace/debug.
-                    original_single_task_id = singleTask.task_id,
+                    await _db.task_links.AddAsync(new task_link
+                    {
+                        group_prod_id = groupProd.prod_id,
+                        group_task_id = groupTask.task_id,
 
-                    order_id = member.Order.order_id,
-                    process_code = processCode,
-                    qty_plan = member.Item.quantity,
+                        single_prod_id = member.SingleProd.prod_id,
+                        single_task_id = null,
 
-                    status = "Active",
-                    created_at = now
-                }, ct);
+                        original_single_task_id = originalSingleTask?.task_id,
+
+                        order_id = member.Order.order_id,
+                        process_code = processCode,
+                        qty_plan = member.Item.quantity,
+
+                        status = "Active",
+                        created_at = now
+                    }, ct);
+                }
+            }
+
+            if (tasksToDelete.Count > 0)
+            {
+                _db.tasks.RemoveRange(tasksToDelete);
             }
 
             _db.tasks.RemoveRange(tasksToDelete);
@@ -869,7 +1026,7 @@ namespace AMMS.Application.Services
                 planned_start_date = plannedStart,
                 status = "Scheduled",
                 product_type_id = productTypeId,
-
+                planned_end_date = plannedEnd,
                 note = string.IsNullOrWhiteSpace(note)
                     ? $"Split {segment.DepartmentName}: {codesCsv}"
                     : $"{note} | Split {segment.DepartmentName}: {codesCsv}",
@@ -878,7 +1035,7 @@ namespace AMMS.Application.Services
                 prod_method = inheritedProdMethod,
                 group_process_codes = codesCsv,
                 group_total_qty = member.Item.quantity,
-                end_date = plannedEnd
+                end_date = null
             };
 
             await _hub.Clients.Group(RealtimeGroups.ByRole("production manager")).SendAsync("group-production", new { meassage = $"Lệnh sản xuất {splitProd.prod_id} đã được lên lịch" });
@@ -2031,21 +2188,16 @@ namespace AMMS.Application.Services
                 prod_id = prod.prod_id,
                 code = prod.code,
                 status = prod.status,
-
                 can_start = canStart,
                 can_start_message = canStartMessage,
                 product_type_id = prod.product_type_id,
                 product_type_name = productTypeName,
-
-                /*
-                 * FIX:
-                 * GROUP + SUB thì total_qty hiển thị theo số lượng cần sản xuất
-                 * đã cộng hao phí, ví dụ 6290.
-                 *
-                 * GROUP + NVL/BOTH hoặc case thường thì vẫn lấy group_total_qty.
-                 */
+                planned_start_date = prod.planned_start_date,
+                planned_end_date = prod.planned_end_date,
+                actual_start_date = prod.actual_start_date,
+                end_date = prod.end_date,
+                issue_file = prod.sub_product_issue_file,
                 total_qty = displayTotalQty,
-
                 process_codes = prod.group_process_codes,
                 orders = orderRows,
                 stages = stages,
@@ -3384,97 +3536,6 @@ namespace AMMS.Application.Services
         {
             return string.Equals(status, "Finished", StringComparison.OrdinalIgnoreCase)
                    || endTime != null;
-        }
-
-        private async Task LinkAndRemoveSingleTasksAsync(
-    production groupProd,
-    List<task> groupTasks,
-    List<SingleRow> rows,
-    CancellationToken ct)
-        {
-            var groupTaskCodes = new Dictionary<string, task>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var groupTask in groupTasks)
-            {
-                var code = await _db.product_type_processes
-                    .Where(x => x.process_id == groupTask.process_id)
-                    .Select(x => x.process_code)
-                    .FirstAsync(ct);
-
-                groupTaskCodes[GroupProductionHelper.Norm(code)] = groupTask;
-            }
-
-            var singleProdIds = rows
-                .Select(x => x.SingleProdId)
-                .Distinct()
-                .ToList();
-
-            var singleTasks = await _db.tasks
-                .Include(x => x.process)
-                .Where(x => x.prod_id.HasValue && singleProdIds.Contains(x.prod_id.Value))
-                .ToListAsync(ct);
-
-            var taskIds = singleTasks.Select(x => x.task_id).ToList();
-
-            var taskIdsWithLogs = await _db.task_logs
-                .AsNoTracking()
-                .Where(x => x.task_id.HasValue && taskIds.Contains(x.task_id.Value))
-                .Select(x => x.task_id!.Value)
-                .Distinct()
-                .ToListAsync(ct);
-
-            var taskIdsWithLogsSet = taskIdsWithLogs.ToHashSet();
-
-            var tasksToRemove = new List<task>();
-
-            foreach (var row in rows)
-            {
-                foreach (var kv in groupTaskCodes)
-                {
-                    var code = kv.Key;
-                    var groupTask = kv.Value;
-
-                    var singleTask = singleTasks.FirstOrDefault(x =>
-                        x.prod_id == row.SingleProdId &&
-                        string.Equals(
-                            GroupProductionHelper.Norm(x.process?.process_code),
-                            code,
-                            StringComparison.OrdinalIgnoreCase));
-
-                    if (singleTask == null)
-                    {
-                        throw new InvalidOperationException(
-                            $"Production riêng {row.SingleProdId} không có task công đoạn {code}.");
-                    }
-
-                    if (taskIdsWithLogsSet.Contains(singleTask.task_id) ||
-                        string.Equals(singleTask.status, "Ready", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(singleTask.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
-                        singleTask.start_time != null ||
-                        singleTask.end_time != null)
-                    {
-                        throw new InvalidOperationException(
-                            $"Không thể ghép công đoạn {code} của production {row.SingleProdId} vì task đã bắt đầu hoặc đã có log.");
-                    }
-
-                    await _db.task_links.AddAsync(new task_link
-                    {
-                        group_prod_id = groupProd.prod_id,
-                        group_task_id = groupTask.task_id,
-                        single_prod_id = row.SingleProdId,
-                        single_task_id = singleTask.task_id,
-                        order_id = row.OrderId,
-                        process_code = code,
-                        qty_plan = row.Qty,
-                        status = "Waiting",
-                        created_at = AppTime.NowVnUnspecified()
-                    }, ct);
-
-                    tasksToRemove.Add(singleTask);
-                }
-            }
-
-            _db.tasks.RemoveRange(tasksToRemove);
         }
 
         private static (

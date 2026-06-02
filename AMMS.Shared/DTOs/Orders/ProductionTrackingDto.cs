@@ -18,6 +18,7 @@ namespace AMMS.Shared.DTOs.Orders
         public string? note { get; set; }
         public DateTime? created_at { get; set; }
         public DateTime? planned_start_date { get; set; }
+        public DateTime? planned_end_date { get; set; }
         public DateTime? actual_start_date { get; set; }
         public bool? is_full_process { get; set; }
         public int sub_product_used_qty { get; set; }

@@ -21,7 +21,7 @@ namespace AMMS.Shared.DTOs.Productions
         public string? production_status { get; set; }
 
         public string? order_status { get; set; }
-
+        public DateTime? planned_end_date { get; set; }
         public string? customer_name { get; set; }
 
         public string? production_method { get; set; }

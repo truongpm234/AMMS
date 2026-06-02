@@ -95,7 +95,8 @@ namespace AMMS.Application.Services
                     if (prod.created_at == null)
                         prod.created_at = now;
 
-                    prod.planned_start_date = plan.PlanningAnchor;
+                    prod.planned_start_date = plan.Stages.Min(x => x.PlannedStart);
+                    prod.planned_end_date = plan.Stages.Max(x => x.PlannedEnd);
 
                     await _db.SaveChangesAsync();
 
@@ -208,6 +209,10 @@ namespace AMMS.Application.Services
                         })
                         .ToList();
 
+                    prod.status = "Scheduled";
+                    prod.planned_start_date = tasks.Min(x => x.planned_start_time);
+                    prod.planned_end_date = tasks.Max(x => x.planned_end_time);
+
                     await _taskRepo.AddRangeAsync(tasks);
                     await _taskRepo.SaveChangesAsync();
 
@@ -316,7 +321,7 @@ namespace AMMS.Application.Services
                 code = "TMP-PROD",
                 order_id = orderId,
                 manager_id = managerId,
-                status = "Scheduled",
+                status = "Pending",
                 product_type_id = productTypeId,
                 created_at = now,
                 planned_start_date = null,
@@ -550,11 +555,13 @@ namespace AMMS.Application.Services
                 steps.Count,
                 minStartWaitMinutes);
 
-            var fifoAnchor = await ResolveQueueAnchorAsync(ctx, baseAnchor, ct);
-
+            /*
+             * Không ép order mới chạy sau toàn bộ order cũ.
+             * Scheduler sẽ tự tìm slot trống theo từng máy.
+             */
             var plan = await BuildStagePlansFromAnchorAsync(
                 ctx,
-                fifoAnchor,
+                baseAnchor,
                 steps,
                 normalizedCsv,
                 ct);
@@ -566,13 +573,11 @@ namespace AMMS.Application.Services
 
                 if (estimatedFinish > finishDeadline)
                 {
-                    _logger.LogWarning(
-                        "FIFO scheduling may cause lateness. OrderId={OrderId}, RequestId={RequestId}, Anchor={Anchor}, EstimatedFinish={EstimatedFinish}, Deadline={Deadline}",
-                        ctx.OrderId,
-                        ctx.OrderRequestId,
-                        fifoAnchor,
-                        estimatedFinish,
-                        finishDeadline);
+                    throw new InvalidOperationException(
+                        $"Không thể lập lịch kịp ngày giao. " +
+                        $"OrderId={ctx.OrderId}, estimated_finish={estimatedFinish:yyyy-MM-dd HH:mm}, " +
+                        $"deadline={finishDeadline:yyyy-MM-dd HH:mm}. " +
+                        $"Cần đợi xưởng rãnh.");
                 }
             }
 
@@ -959,7 +964,7 @@ namespace AMMS.Application.Services
             string normalizedCsv,
             CancellationToken ct)
         {
-            var machinePoolCache = new Dictionary<string, MachinePoolState>(StringComparer.OrdinalIgnoreCase);
+            var machineIntervalCache = new Dictionary<string, List<MachineBusyInterval>>(StringComparer.OrdinalIgnoreCase);
             var candidateCache = new Dictionary<string, List<machine>>(StringComparer.OrdinalIgnoreCase);
 
             var result = new List<StagePlanDraft>();
@@ -993,8 +998,20 @@ namespace AMMS.Application.Services
 
                 foreach (var candidate in candidates)
                 {
-                    var pool = await GetOrBuildPoolStateAsync(candidate, planningAnchor, machinePoolCache, ct);
-                    var (laneIndex, laneFreeAt) = GetEarliestLane(pool.LaneAvailableAt);
+                    var machineCode = candidate.machine_code?.Trim();
+
+                    if (string.IsNullOrWhiteSpace(machineCode))
+                        throw new InvalidOperationException($"Machine thiếu machine_code. machine_id={candidate.machine_id}");
+
+                    if (!machineIntervalCache.TryGetValue(machineCode, out var intervals))
+                    {
+                        intervals = await LoadMachineBusyIntervalsAsync(
+                            machineCode,
+                            planningAnchor,
+                            ct);
+
+                        machineIntervalCache[machineCode] = intervals;
+                    }
 
                     var independent = ProductionFlowHelper.IsInitialParallel(pcode);
 
@@ -1011,15 +1028,16 @@ namespace AMMS.Application.Services
                     if (!independent && raloEnd.HasValue && earliestByFlow < raloEnd.Value)
                         earliestByFlow = raloEnd.Value;
 
-                    var startCandidate = laneFreeAt > earliestByFlow
-                        ? laneFreeAt
-                        : earliestByFlow;
-
-                    var plannedStart = _cal.NormalizeStart(startCandidate);
-
                     var setupMinutes = GetSetupMinutes(pcode, ctx);
                     var effectiveCap = GetEffectiveCapacityPerHour(candidate);
                     var durationHours = EstimateStageDurationHours(pcode, requiredUnits, candidate, ctx);
+
+                    var plannedStart = FindEarliestMachineSlot(
+                        candidate,
+                        pcode,
+                        earliestByFlow,
+                        durationHours,
+                        intervals);
 
                     var plannedEnd = _cal.AddWorkingHours(plannedStart, durationHours);
 
@@ -1031,7 +1049,7 @@ namespace AMMS.Application.Services
                         ProcessCode = pcode,
                         MachineCode = candidate.machine_code,
                         MachineEntity = candidate,
-                        LaneIndex = laneIndex,
+                        LaneIndex = 0,
                         Unit = unit,
                         RequiredUnits = requiredUnits,
                         EffectiveCapacityPerHour = effectiveCap,
@@ -1052,9 +1070,23 @@ namespace AMMS.Application.Services
                 if (best == null)
                     throw new Exception($"Cannot build plan for process_code={pcode}");
 
-                var selectedPool = await GetOrBuildPoolStateAsync(best.MachineEntity, planningAnchor, machinePoolCache, ct);
-                selectedPool.LaneAvailableAt[best.LaneIndex] =
-                    best.PlannedEnd.AddMinutes(GetMachineTurnaroundMinutes(best.ProcessCode));
+                var selectedMachineCode = best.MachineCode.Trim();
+
+                if (!machineIntervalCache.TryGetValue(selectedMachineCode, out var selectedIntervals))
+                {
+                    selectedIntervals = await LoadMachineBusyIntervalsAsync(
+                        selectedMachineCode,
+                        planningAnchor,
+                        ct);
+
+                    machineIntervalCache[selectedMachineCode] = selectedIntervals;
+                }
+
+                selectedIntervals.Add(new MachineBusyInterval
+                {
+                    Start = best.PlannedStart,
+                    End = best.PlannedEnd.AddMinutes(GetMachineTurnaroundMinutes(best.ProcessCode))
+                });
 
                 result.Add(best);
 
@@ -1378,6 +1410,96 @@ namespace AMMS.Application.Services
             await _db.SaveChangesAsync(ct);
         }
 
+        private async Task<List<MachineBusyInterval>> LoadMachineBusyIntervalsAsync(
+    string machineCode,
+    DateTime anchor,
+    CancellationToken ct)
+        {
+            var key = (machineCode ?? "").Trim().ToUpperInvariant();
+
+            if (string.IsNullOrWhiteSpace(key))
+                return new List<MachineBusyInterval>();
+
+            var rows = await (
+                from t in _db.tasks.AsNoTracking()
+                join p in _db.productions.AsNoTracking()
+                    on t.prod_id equals p.prod_id into pj
+                from p in pj.DefaultIfEmpty()
+
+                where t.machine != null
+                      && t.machine.Trim().ToUpper() == key
+                      && (
+                            p == null ||
+                            p.status == null ||
+                            (
+                                p.status.ToUpper() != "CANCELLED" &&
+                                p.status.ToUpper() != "COMPLETED"
+                            )
+                         )
+
+                select new
+                {
+                    Start =
+                        t.start_time
+                        ?? t.planned_start_time,
+
+                    /*
+                     * Ưu tiên actual end_time trước planned_end_time.
+                     * Nếu order cũ xong sớm thì slot được giải phóng sớm.
+                     */
+                    End =
+                        t.end_time
+                        ?? t.planned_end_time
+                }
+            ).ToListAsync(ct);
+
+            return rows
+                .Where(x => x.Start.HasValue && x.End.HasValue)
+                .Select(x => new MachineBusyInterval
+                {
+                    Start = DateTime.SpecifyKind(x.Start!.Value, DateTimeKind.Unspecified),
+                    End = DateTime.SpecifyKind(x.End!.Value, DateTimeKind.Unspecified)
+                })
+                .Where(x => x.End > anchor)
+                .OrderBy(x => x.Start)
+                .ToList();
+        }
+
+        private DateTime FindEarliestMachineSlot(
+    machine machine,
+    string processCode,
+    DateTime earliestStart,
+    double durationHours,
+    List<MachineBusyInterval> intervals)
+        {
+            var capacity = Math.Max(1, machine.quantity);
+            var cursor = _cal.NormalizeStart(earliestStart);
+
+            for (var guard = 0; guard < 5000; guard++)
+            {
+                var plannedEnd = _cal.AddWorkingHours(cursor, durationHours);
+
+                var overlapping = intervals
+                    .Where(x => x.Start < plannedEnd && x.End > cursor)
+                    .OrderBy(x => x.End)
+                    .ToList();
+
+                if (overlapping.Count < capacity)
+                    return cursor;
+
+                /*
+                 * Nhảy tới lúc một reservation kết thúc để thử lại.
+                 */
+                var nextCursor = overlapping.Min(x => x.End)
+                    .AddMinutes(GetMachineTurnaroundMinutes(processCode));
+
+                cursor = _cal.NormalizeStart(nextCursor);
+            }
+
+            throw new InvalidOperationException(
+                $"Không tìm được slot trống cho máy {machine.machine_code}, process={processCode}.");
+        }
+
         private sealed class StagePlanDraft
         {
             public int ProcessId { get; init; }
@@ -1394,6 +1516,13 @@ namespace AMMS.Application.Services
             public int HandoffMinutes { get; init; }
             public DateTime PlannedStart { get; init; }
             public DateTime PlannedEnd { get; init; }
+        }
+
+        private sealed class MachineBusyInterval
+        {
+            public DateTime Start { get; set; }
+
+            public DateTime End { get; set; }
         }
 
         private sealed class PlanBuildResult
