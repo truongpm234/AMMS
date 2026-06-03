@@ -6167,18 +6167,30 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         private async Task<(bool? can_start, string? message)> ResolveCanStartForProductionCardAsync(
-    BaseRow row,
-    TaskRow? currentTask,
-    bool? isProductionReady,
-    CancellationToken ct)
+            BaseRow row,
+            TaskRow? currentTask,
+            bool? isProductionReady,
+            CancellationToken ct)
         {
-            if (currentTask == null)
-            {
-                if (string.Equals(row.production_status, "Pending", StringComparison.OrdinalIgnoreCase))
-                    return (false, "Production chưa được GM xác nhận lập lịch nên chưa có task để bắt đầu.");
+            var prodStatus = (row.production_status ?? "").Trim();
 
-                return (false, "Production chưa có task.");
+            if (StatusEquals(prodStatus, "Pending"))
+                return (false, "Production chưa được GM xác nhận lập lịch nên chưa thể bắt đầu.");
+
+            if (StatusEquals(prodStatus, "Cancelled"))
+                return (false, "Production đã bị hủy.");
+
+            if (StatusEquals(prodStatus, "Importing"))
+                return (false, "Production đã sản xuất xong, đang chờ nhập kho thành phẩm.");
+
+            if (StatusEquals(prodStatus, "Finished") ||
+                StatusEquals(prodStatus, "Completed"))
+            {
+                return (false, "Production đã hoàn tất.");
             }
+
+            if (currentTask == null)
+                return (false, "Production chưa có task hoặc tất cả task đã hoàn thành.");
 
             if (IsFinishedStatus(currentTask.Status, currentTask.EndTime))
                 return (false, "Công đoạn hiện tại đã Finished.");
@@ -6197,9 +6209,8 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             /*
-             * FIX QUAN TRỌNG:
-             * Không được return true ngay khi task Ready.
-             * Dù Ready vẫn phải check dependency vì có thể data cũ/bug cũ đã set Ready sai.
+             * Vẫn check dependency dù task đã Ready,
+             * để tránh data cũ set Ready sai nhưng công đoạn trước chưa xong.
              */
             var dep = await CheckTaskCanStartForCardAsync(
                 currentTask.TaskId,
@@ -6361,27 +6372,25 @@ namespace AMMS.Infrastructure.Repositories
                     continue;
 
                 /*
-                 * FIX 1:
-                 * Với production SUB dùng BTP có sẵn, previous có thể đã được đáp ứng
-                 * bởi sub_product.product_process.
+                 * FIX:
+                 * Chỉ dùng 1 helper thống nhất cho:
+                 * - SINGLE SUB
+                 * - SINGLE BOTH
+                 * - GROUP SUB
+                 * - GROUP MIXED NVL + SUB
                  *
-                 * Ví dụ:
-                 * order route = RALO,CAT,IN,PHU,CAN,BOI,BE,DUT,DAN
-                 * sub_product = RALO,CAT,IN
-                 * current = PHU
-                 * previous = IN
-                 *
-                 * Trường hợp này PHU được phép start nếu production đã Scheduled
-                 * và các điều kiện khác OK, không cần tìm production IN khác.
+                 * Không gọi helper cũ IsPreviousStageSatisfiedByExternalSubProductForCanStartAsync nữa,
+                 * vì helper đó chỉ hiểu pure SUB và không bao phủ group mixed.
                  */
-                var previousSatisfiedBySub = await IsPreviousStageSatisfiedByExternalSubProductForCanStartAsync(
-                    currentProd,
-                    currentCode,
-                    previousCode,
-                    route,
-                    ct);
+                var previousSatisfiedBySubOrBoth = await IsPreviousStageSatisfiedBySubOrBothForCanStartAsync(
+                    currentProd: currentProd,
+                    orderId: orderId,
+                    currentProcessCode: currentCode,
+                    previousProcessCode: previousCode,
+                    orderRouteCodes: route,
+                    ct: ct);
 
-                if (previousSatisfiedBySub)
+                if (previousSatisfiedBySubOrBoth)
                     continue;
 
                 var previous = await FindPreviousStageForOrderForCanStartAsync(
@@ -6444,6 +6453,139 @@ namespace AMMS.Infrastructure.Repositories
             public string? status { get; set; }
             public DateTime? end_time { get; set; }
             public bool is_group_task { get; set; }
+        }
+
+        private async Task<bool> IsPreviousStageSatisfiedBySubOrBothForCanStartAsync(
+    production currentProd,
+    int orderId,
+    string currentProcessCode,
+    string previousProcessCode,
+    IReadOnlyList<string> orderRouteCodes,
+    CancellationToken ct)
+        {
+            var currentCode = NormCanStartCode(currentProcessCode);
+            var previousCode = NormCanStartCode(previousProcessCode);
+
+            if (currentProd == null ||
+                orderId <= 0 ||
+                string.IsNullOrWhiteSpace(currentCode) ||
+                string.IsNullOrWhiteSpace(previousCode))
+            {
+                return false;
+            }
+
+            /*
+             * Nếu current production là GROUP, không được dùng groupProd.prod_method.
+             * Vì group có thể là MIXED: order A = NVL, order B = SUB.
+             * Phải lấy single production tương ứng của order đó.
+             */
+            var sourceProd = await ResolveSourceProductionForOrderCanStartAsync(
+                currentProd,
+                orderId,
+                ct);
+
+            if (sourceProd == null)
+                sourceProd = currentProd;
+
+            var method = NormCanStartCode(sourceProd.prod_method);
+
+            if (method != "SUB" && method != "BOTH")
+                return false;
+
+            if (!sourceProd.sub_product_id.HasValue || sourceProd.sub_product_id.Value <= 0)
+                return false;
+
+            var subCodes = await GetSubProductProcessCodesForCanStartAsync(
+                sourceProd.sub_product_id.Value,
+                ct);
+
+            if (subCodes.Count == 0)
+                return false;
+
+            /*
+             * previous phải nằm trong BTP.
+             * Ví dụ BTP = RALO,CAT,IN
+             * current = PHU
+             * previous = IN
+             * => previous được xem là đã thỏa bởi BTP.
+             */
+            if (!subCodes.Contains(previousCode, StringComparer.OrdinalIgnoreCase))
+                return false;
+
+            /*
+             * current không được nằm trong BTP.
+             * Nếu current cũng nằm trong BTP thì task đó không nên chạy nữa.
+             */
+            if (subCodes.Contains(currentCode, StringComparer.OrdinalIgnoreCase))
+                return false;
+
+            var route = (orderRouteCodes ?? Array.Empty<string>())
+                .Select(NormCanStartCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            if (route.Count == 0)
+                return true;
+
+            var currentIndex = route.FindIndex(x =>
+                string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase));
+
+            var subIndexes = subCodes
+                .Select(code => route.FindIndex(x =>
+                    string.Equals(x, code, StringComparison.OrdinalIgnoreCase)))
+                .Where(x => x >= 0)
+                .ToList();
+
+            if (currentIndex < 0 || subIndexes.Count == 0)
+                return true;
+
+            var subLastIndex = subIndexes.Max();
+
+            /*
+             * Chỉ cho qua nếu current nằm sau boundary cuối cùng của BTP.
+             */
+            return currentIndex > subLastIndex;
+        }
+
+        private async Task<production?> ResolveSourceProductionForOrderCanStartAsync(
+    production currentProd,
+    int orderId,
+    CancellationToken ct)
+        {
+            if (currentProd == null || orderId <= 0)
+                return currentProd;
+
+            /*
+             * SINGLE/SPLIT có order_id trực tiếp thì dùng chính production hiện tại.
+             */
+            if (!string.Equals(currentProd.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
+                return currentProd;
+
+            /*
+             * GROUP production không có order_id.
+             * Lấy single production member tương ứng từ prod_orders.
+             */
+            var singleProdId = await _db.prod_orders
+                .AsNoTracking()
+                .Where(x =>
+                    x.prod_id == currentProd.prod_id &&
+                    x.order_id == orderId &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ) &&
+                    x.single_prod_id.HasValue)
+                .Select(x => x.single_prod_id!.Value)
+                .FirstOrDefaultAsync(ct);
+
+            if (singleProdId <= 0)
+                return currentProd;
+
+            var singleProd = await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.prod_id == singleProdId, ct);
+
+            return singleProd ?? currentProd;
         }
 
         private async Task<List<int>> ResolveOrderIdsOfProductionForCanStartAsync(
