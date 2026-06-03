@@ -2460,7 +2460,7 @@ namespace AMMS.Application.Services
                     firstOutput?.name
                     ?? $"BTP sau {task.process?.process_code}";
             }
-
+            NormalizeGroupDetailStagesBySequentialFlow(stages);
             var previousStageContext = await BuildPreviousStageContextForGroupAsync(
                 prod,
                 tasks,
@@ -2521,6 +2521,289 @@ namespace AMMS.Application.Services
 
                 preview = preview
             };
+        }
+
+        private static void NormalizeGroupDetailStagesBySequentialFlow(
+    List<GroupProductionStageDto>? stages)
+        {
+            if (stages == null || stages.Count <= 1)
+                return;
+
+            var orderedStages = stages
+                .Where(x => x != null)
+                .OrderBy(x => x.seq_num ?? int.MaxValue)
+                .ThenBy(x => x.task_id)
+                .ToList();
+
+            if (orderedStages.Count <= 1)
+                return;
+
+            for (var i = 0; i < orderedStages.Count; i++)
+            {
+                var currentStage = orderedStages[i];
+
+                /*
+                 * Công đoạn đầu tiên giữ estimate đã tính từ QR prepare.
+                 * Ví dụ PHU:
+                 * - estimated = tổng BTP từ IN/SUB
+                 * - actual = output thực tế khi đã báo cáo
+                 */
+                if (i == 0)
+                {
+                    SyncCurrentStageOutputEstimate(
+                        currentStage,
+                        currentStage.estimated_output_qty);
+
+                    continue;
+                }
+
+                var previousStage = orderedStages[i - 1];
+
+                /*
+                 * Công đoạn sau phải lấy output khả dụng của công đoạn trước:
+                 * - nếu công đoạn trước đã Finished và có actual_output_qty > 0: lấy actual
+                 * - nếu chưa Finished: lấy estimated_output_qty
+                 */
+                var sequentialInputQty = ResolveSequentialInputQtyFromPreviousStage(
+                    previousStage);
+
+                if (sequentialInputQty <= 0)
+                {
+                    SyncCurrentStageOutputEstimate(
+                        currentStage,
+                        currentStage.estimated_output_qty);
+
+                    continue;
+                }
+
+                var oldEstimatedQty = ResolveOldEstimatedQtyBeforeNormalize(
+                    currentStage);
+
+                /*
+                 * FIX CHÍNH:
+                 * estimated_output_qty của công đoạn hiện tại phải đi theo flow.
+                 *
+                 * Ví dụ:
+                 * PHU actual = 5090
+                 * => CAN estimated_output_qty = 5090
+                 *
+                 * CAN chưa Finished
+                 * => BOI estimated_output_qty = CAN estimated_output_qty = 5090
+                 */
+                currentStage.estimated_output_qty = RoundQty(sequentialInputQty);
+
+                /*
+                 * Input PREV/BTP của công đoạn hiện tại cũng phải đồng bộ.
+                 * Ví dụ CAN input "Bán thành phẩm phủ" = 5090.
+                 */
+                SyncPreviousStageInputMaterial(
+                    currentStage,
+                    sequentialInputQty);
+
+                /*
+                 * Output estimated của chính công đoạn hiện tại đồng bộ với estimated_output_qty.
+                 */
+                SyncCurrentStageOutputEstimate(
+                    currentStage,
+                    sequentialInputQty);
+
+                /*
+                 * Vật tư tiêu hao như màng/keo/sóng nếu đang lấy theo estimate cũ
+                 * thì scale lại theo số lượng mới để màn hình không bị lệch.
+                 *
+                 * Ví dụ CAN:
+                 * old estimated = 4626
+                 * new estimated = 5090
+                 * MANG_12MIC sẽ được scale theo 5090 / 4626.
+                 */
+                ScaleConsumableMaterialEstimateByQtyRatio(
+                    currentStage,
+                    oldEstimatedQty,
+                    sequentialInputQty);
+            }
+        }
+
+        private static decimal ResolveSequentialInputQtyFromPreviousStage(
+            GroupProductionStageDto? previousStage)
+        {
+            if (previousStage == null)
+                return 0m;
+
+            /*
+             * Ưu tiên actual_output_qty vì đây là số lượng thực tế sau khi báo cáo.
+             */
+            if (previousStage.actual_output_qty > 0)
+                return previousStage.actual_output_qty;
+
+            /*
+             * Nếu chưa báo cáo thì dùng estimated_output_qty.
+             */
+            if (previousStage.estimated_output_qty > 0)
+                return previousStage.estimated_output_qty;
+
+            /*
+             * Fallback từ outputs.
+             */
+            if (previousStage.outputs != null && previousStage.outputs.Count > 0)
+            {
+                var outputQty = previousStage.outputs
+                    .Where(x => x != null)
+                    .Select(x =>
+                        x.actual_qty > 0
+                            ? x.actual_qty
+                            : x.estimated_qty)
+                    .DefaultIfEmpty(0m)
+                    .Max();
+
+                if (outputQty > 0)
+                    return outputQty;
+            }
+
+            return 0m;
+        }
+
+        private static decimal ResolveOldEstimatedQtyBeforeNormalize(
+            GroupProductionStageDto stage)
+        {
+            if (stage == null)
+                return 0m;
+
+            if (stage.estimated_output_qty > 0)
+                return stage.estimated_output_qty;
+
+            var prevInput = stage.input_materials?
+                .Where(x => IsPreviousStageInputMaterial(x.code, x.name))
+                .Select(x => x.estimated_qty)
+                .DefaultIfEmpty(0m)
+                .Max() ?? 0m;
+
+            if (prevInput > 0)
+                return prevInput;
+
+            var outputEstimated = stage.outputs?
+                .Where(x => x != null)
+                .Select(x => x.estimated_qty)
+                .DefaultIfEmpty(0m)
+                .Max() ?? 0m;
+
+            return outputEstimated;
+        }
+
+        private static void SyncPreviousStageInputMaterial(
+            GroupProductionStageDto stage,
+            decimal sequentialInputQty)
+        {
+            if (stage.input_materials == null || stage.input_materials.Count == 0)
+                return;
+
+            foreach (var input in stage.input_materials)
+            {
+                if (!IsPreviousStageInputMaterial(input.code, input.name))
+                    continue;
+
+                input.estimated_qty = RoundQty(sequentialInputQty);
+
+                /*
+                 * actual_qty ở input PREV nghĩa là BTP thực tế đang có từ công đoạn trước.
+                 * Vì vậy cho bằng sequentialInputQty để FE mở chi tiết cũng đúng.
+                 */
+                input.actual_qty = RoundQty(sequentialInputQty);
+            }
+        }
+
+        private static void SyncCurrentStageOutputEstimate(
+            GroupProductionStageDto stage,
+            decimal estimatedQty)
+        {
+            if (stage.outputs == null || stage.outputs.Count == 0)
+                return;
+
+            var currentCode = NormGroupDetailCode(stage.process_code);
+
+            foreach (var output in stage.outputs)
+            {
+                var outputCode = NormGroupDetailCode(output.code);
+
+                /*
+                 * Chỉ sync output chính của công đoạn hiện tại.
+                 * Ví dụ stage CAN thì sync output code CAN.
+                 */
+                if (!string.Equals(outputCode, currentCode, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                output.estimated_qty = RoundQty(estimatedQty);
+
+                /*
+                 * Không sửa output.actual_qty.
+                 * actual_qty phải lấy từ task_log/output_json sau khi báo cáo.
+                 */
+            }
+        }
+
+        private static void ScaleConsumableMaterialEstimateByQtyRatio(
+            GroupProductionStageDto stage,
+            decimal oldEstimatedQty,
+            decimal newEstimatedQty)
+        {
+            if (stage.input_materials == null || stage.input_materials.Count == 0)
+                return;
+
+            if (oldEstimatedQty <= 0 || newEstimatedQty <= 0)
+                return;
+
+            /*
+             * Nếu không thay đổi số lượng thì không scale.
+             */
+            if (Math.Abs(oldEstimatedQty - newEstimatedQty) < 0.0001m)
+                return;
+
+            var ratio = newEstimatedQty / oldEstimatedQty;
+
+            if (ratio <= 0)
+                return;
+
+            foreach (var input in stage.input_materials)
+            {
+                /*
+                 * PREV/BTP đã sync riêng, không scale thêm.
+                 */
+                if (IsPreviousStageInputMaterial(input.code, input.name))
+                    continue;
+
+                /*
+                 * Chỉ scale estimated của NVL/vật tư tiêu hao.
+                 * actual_qty chỉ được lấy từ log, không tự sửa.
+                 */
+                if (input.estimated_qty > 0)
+                    input.estimated_qty = RoundQty(input.estimated_qty * ratio);
+            }
+        }
+
+        private static bool IsPreviousStageInputMaterial(string? code, string? name)
+        {
+            var c = NormGroupDetailCode(code);
+            var n = NormGroupDetailCode(name);
+
+            return c == "PREV"
+                || c == "BTP"
+                || c == "REFERENCE_INPUT"
+                || c == "INPUT"
+                || n.Contains("BAN_THANH_PHAM")
+                || n.Contains("BTP");
+        }
+
+        private static string NormGroupDetailCode(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+        }
+
+        private static decimal RoundQty(decimal value)
+        {
+            return Math.Round(value, 4, MidpointRounding.AwayFromZero);
         }
 
         private async Task<GroupProductionConfirmPreviewResponse> BuildProductionGroupPreviewForDetailAsync(
@@ -5688,15 +5971,6 @@ namespace AMMS.Application.Services
             {
                 return new List<T>();
             }
-        }
-
-        private static string NormGroupDetailCode(string? value)
-        {
-            return (value ?? "")
-                .Trim()
-                .ToUpperInvariant()
-                .Replace(" ", "_")
-                .Replace("-", "_");
         }
 
         private static bool SameGroupDetailCode(string? a, string? b)
