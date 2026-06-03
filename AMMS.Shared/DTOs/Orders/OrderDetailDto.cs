@@ -19,7 +19,7 @@ namespace AMMS.Shared.DTOs.Orders
         public string customer_name { get; set; } = string.Empty;
         public string? customer_email { get; set; }
         public string? customer_phone { get; set; }
-
+        public string? print_ready_file { get; set; }
         public string? detail_address { get; set; }
 
         public string product_name { get; set; } = string.Empty;

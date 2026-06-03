@@ -1364,7 +1364,7 @@ namespace AMMS.Application.Services
 
                 if (!string.IsNullOrWhiteSpace(issueFile))
                 {
-                    response.message = "Đã duyệt sản xuất bằng bán thành phẩm và tạo phiếu xuất kho BTP.";
+                    response.message = "Đã duyệt sản xuất bằng bán thành phẩm.";
                 }
             }
 
@@ -3974,7 +3974,8 @@ namespace AMMS.Application.Services
                 if (string.Equals(prod.status, "InProcessing", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(prod.status, "Importing", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(prod.status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(prod.status, "Completed", StringComparison.OrdinalIgnoreCase))
+                    string.Equals(prod.status, "Completed", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(prod.status, "Finished", StringComparison.OrdinalIgnoreCase))
                 {
                     throw new InvalidOperationException(
                         $"Production đã bắt đầu hoặc đã hoàn tất. Status={prod.status}");
@@ -3989,28 +3990,26 @@ namespace AMMS.Application.Services
                     string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
                 {
                     throw new InvalidOperationException(
-                        "Không cho ghép production method BOTH vì BOTH gồm 2 nguồn input khác nhau theo ratio, khó đồng bộ hao hụt và phân bổ sản lượng group.");
+                        "Không cho ghép production method BOTH vì BOTH gồm 2 nguồn input khác nhau theo ratio.");
                 }
 
                 /*
                  * CASE GROUP:
-                 * - Xuất NVL/BTP cho các single member.
-                 * - Tạo file xuất kho chung.
-                 * - Không chạy xuống logic SINGLE nữa.
+                 * - Tạo phiếu xuất kho chung cho toàn bộ order trong group.
+                 * - Lưu file vào GROUP + SINGLE member + SPLIT member.
                  */
                 if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
                 {
-                    await ConfirmGroupProductionIssueAsync(
+                    var issueFile = await ConfirmGroupProductionIssueAsync(
                         prod,
                         confirmedByUserId,
                         ct);
 
                     prod.status = "Scheduled";
 
-                    prod.planned_start_date ??= await _db.tasks
-                        .AsNoTracking()
-                        .Where(x => x.prod_id == prod.prod_id)
-                        .MinAsync(x => x.planned_start_time, ct);
+                    prod.planned_start_date ??= await ResolveProductionPlannedStartFromTasksAsync(
+                        prod.prod_id,
+                        ct);
 
                     prod.planned_end_date = await ResolveProductionPlannedEndFromTasksAsync(
                         prod.prod_id,
@@ -4029,8 +4028,8 @@ namespace AMMS.Application.Services
                         production_method = prod.prod_method,
                         planned_start_date = prod.planned_start_date,
                         planned_end_date = prod.planned_end_date,
-                        issue_file = prod.sub_product_issue_file,
-                        message = "Đã xác nhận lập lịch production ghép và tạo phiếu xuất kho."
+                        issue_file = issueFile,
+                        message = "Đã xác nhận lập lịch production ghép và tạo phiếu xuất kho chung."
                     };
                 }
 
@@ -4050,85 +4049,102 @@ namespace AMMS.Application.Services
                 if (!order.is_production_ready)
                     throw new InvalidOperationException("Order chưa được duyệt phương thức sản xuất.");
 
-                var orderReq = await _db.order_requests
-                    .AsNoTracking()
-                    .Where(x => x.order_id == order.order_id)
-                    .OrderByDescending(x => x.order_request_id)
-                    .FirstOrDefaultAsync(ct)
-                    ?? throw new InvalidOperationException("Order request not found.");
-
-                var orderQty = orderReq.quantity ?? await _db.order_items
-                    .AsNoTracking()
-                    .Where(x => x.order_id == order.order_id)
-                    .OrderBy(x => x.item_id)
-                    .Select(x => x.quantity)
-                    .FirstOrDefaultAsync(ct);
-
-                if (orderQty <= 0)
-                    throw new InvalidOperationException("Số lượng order không hợp lệ.");
-
-                var estimate = await LoadAcceptedEstimateOrThrowAsync(
-                    orderReq,
-                    ct);
-
-                /*
-                 * Chỉ bây giờ mới trừ NVL/vật tư.
-                 */
-                await ReserveMaterialsForConfirmedProductionMethodAsync(
+                var issueFileSingleOrSplit = await ConfirmSingleOrSplitProductionIssueAsync(
                     prod,
-                    orderReq,
-                    estimate,
-                    method,
-                    orderQty,
-                    ct);
-
-                /*
-                 * Chỉ bây giờ mới trừ BTP nếu method SUB/BOTH.
-                 */
-                await IssueSubProductIfNeededOnScheduleAsync(
-                    prod,
-                    order,
-                    orderReq,
-                    method,
                     confirmedByUserId,
                     ct);
+
+                var hasTasks = await _db.tasks
+                    .AsNoTracking()
+                    .AnyAsync(x => x.prod_id == prod.prod_id, ct);
+
+                var isSplit = string.Equals(
+                    prod.prod_kind,
+                    "SPLIT",
+                    StringComparison.OrdinalIgnoreCase);
+
+                /*
+                 * SINGLE full path thường chưa có task tại thời điểm confirm schedule,
+                 * nên mới gọi ScheduleTasksAfterMethodAsync.
+                 *
+                 * SPLIT đã được tạo task từ flow create group,
+                 * không được gọi ScheduleTasksAfterMethodAsync nữa vì sẽ tạo sai full path.
+                 */
+                if (!hasTasks && !isSplit)
+                {
+                    await _db.SaveChangesAsync(ct);
+                    await tx.CommitAsync(ct);
+
+                    var scheduledProdId = await ScheduleTasksAfterMethodAsync(
+                        order.order_id,
+                        ct);
+
+                    var scheduledProd = await _db.productions
+                        .FirstOrDefaultAsync(x => x.prod_id == scheduledProdId, ct)
+                        ?? prod;
+
+                    scheduledProd.status = "Scheduled";
+
+                    scheduledProd.sub_product_issue_file ??= issueFileSingleOrSplit;
+
+                    scheduledProd.planned_start_date ??= await ResolveProductionPlannedStartFromTasksAsync(
+                        scheduledProd.prod_id,
+                        ct);
+
+                    scheduledProd.planned_end_date = await ResolveProductionPlannedEndFromTasksAsync(
+                        scheduledProd.prod_id,
+                        ct);
+
+                    order.status = "Scheduled";
+
+                    await _db.SaveChangesAsync(ct);
+
+                    return new ConfirmProductionScheduleResponse
+                    {
+                        success = true,
+                        prod_id = scheduledProd.prod_id,
+                        order_id = order.order_id,
+                        production_code = scheduledProd.code,
+                        prod_kind = scheduledProd.prod_kind,
+                        production_method = scheduledProd.prod_method,
+                        planned_start_date = scheduledProd.planned_start_date,
+                        planned_end_date = scheduledProd.planned_end_date,
+                        issue_file = scheduledProd.sub_product_issue_file,
+                        message = "Đã xác nhận lập lịch, tạo phiếu xuất kho và tạo task sản xuất."
+                    };
+                }
+
+                /*
+                 * SPLIT hoặc SINGLE đã có task sẵn.
+                 */
+                prod.status = "Scheduled";
+                prod.sub_product_issue_file ??= issueFileSingleOrSplit;
+
+                prod.planned_start_date ??= await ResolveProductionPlannedStartFromTasksAsync(
+                    prod.prod_id,
+                    ct);
+
+                prod.planned_end_date = await ResolveProductionPlannedEndFromTasksAsync(
+                    prod.prod_id,
+                    ct);
+
+                order.status = "Scheduled";
 
                 await _db.SaveChangesAsync(ct);
                 await tx.CommitAsync(ct);
 
-                /*
-                 * Chỉ sau khi xuất kho thành công mới tạo task/lập lịch.
-                 */
-                var scheduledProdId = await ScheduleTasksAfterMethodAsync(
-                    order.order_id,
-                    ct);
-
-                var scheduledProd = await _db.productions
-                    .FirstOrDefaultAsync(x => x.prod_id == scheduledProdId, ct)
-                    ?? prod;
-
-                scheduledProd.status = "Scheduled";
-                scheduledProd.planned_start_date ??= await ResolveProductionPlannedStartFromTasksAsync(scheduledProd.prod_id, ct);
-
-                scheduledProd.planned_end_date = await ResolveProductionPlannedEndFromTasksAsync(
-                    scheduledProd.prod_id,
-                    ct);
-                order.status = "Scheduled";
-
-                await _db.SaveChangesAsync(ct);
-
                 return new ConfirmProductionScheduleResponse
                 {
                     success = true,
-                    prod_id = scheduledProd.prod_id,
+                    prod_id = prod.prod_id,
                     order_id = order.order_id,
-                    production_code = scheduledProd.code,
-                    prod_kind = scheduledProd.prod_kind,
-                    production_method = scheduledProd.prod_method,
-                    planned_start_date = scheduledProd.planned_start_date,
-                    planned_end_date = scheduledProd.planned_end_date,
-                    issue_file = scheduledProd.sub_product_issue_file,
-                    message = "Đã xác nhận lập lịch và tạo task sản xuất."
+                    production_code = prod.code,
+                    prod_kind = prod.prod_kind,
+                    production_method = prod.prod_method,
+                    planned_start_date = prod.planned_start_date,
+                    planned_end_date = prod.planned_end_date,
+                    issue_file = prod.sub_product_issue_file,
+                    message = "Đã xác nhận lập lịch và tạo phiếu xuất kho cho production."
                 };
             });
         }
@@ -4690,20 +4706,29 @@ namespace AMMS.Application.Services
             throw new InvalidOperationException($"Unsupported production method: {method}");
         }
 
-        private async Task ConfirmGroupProductionIssueAsync(
+        private async Task<string?> ConfirmGroupProductionIssueAsync(
     production groupProd,
     int? confirmedByUserId,
     CancellationToken ct)
         {
-            if (!string.Equals(groupProd.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Production này không phải production ghép.");
+            if (groupProd == null)
+                throw new InvalidOperationException("group production is required.");
 
-            if (string.Equals(groupProd.status, "InProcessing", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(groupProd.status, "Importing", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(groupProd.status, "Completed", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(groupProd.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Production không phải GROUP.");
+
+            /*
+             * Idempotent:
+             * Nếu group đã có file rồi thì chỉ sync lại file cho member SINGLE/SPLIT.
+             */
+            if (!string.IsNullOrWhiteSpace(groupProd.sub_product_issue_file))
             {
-                throw new InvalidOperationException(
-                    $"Không thể xuất kho/lập lịch vì group production đang ở trạng thái {groupProd.status}.");
+                await ApplyGroupIssueFileToMemberProductionsAsync(
+                    groupProd.prod_id,
+                    groupProd.sub_product_issue_file,
+                    ct);
+
+                return groupProd.sub_product_issue_file;
             }
 
             var links = await _db.prod_orders
@@ -4713,28 +4738,20 @@ namespace AMMS.Application.Services
                 .OrderBy(x => x.order_id)
                 .ToListAsync(ct);
 
-            if (links.Count < 2)
-                throw new InvalidOperationException("Production ghép cần ít nhất 2 order active.");
+            if (links.Count == 0)
+                throw new InvalidOperationException("Production ghép chưa có order active.");
 
             var issueLines = new List<ProductionIssueLine>();
 
             foreach (var link in links)
             {
-                var singleProdId = link.single_prod_id ?? 0;
-
-                if (singleProdId <= 0)
-                    throw new InvalidOperationException(
-                        $"prod_order thiếu single_prod_id. group_prod_id={groupProd.prod_id}, order_id={link.order_id}");
+                if (!link.single_prod_id.HasValue || link.single_prod_id.Value <= 0)
+                    throw new InvalidOperationException($"ProdOrder order_id={link.order_id} thiếu single_prod_id.");
 
                 var singleProd = await _db.productions
-                    .FirstOrDefaultAsync(x =>
-                        x.prod_id == singleProdId &&
-                        x.order_id == link.order_id,
-                        ct);
-
-                if (singleProd == null)
-                    throw new InvalidOperationException(
-                        $"Không tìm thấy single production. single_prod_id={singleProdId}, order_id={link.order_id}");
+                    .FirstOrDefaultAsync(x => x.prod_id == link.single_prod_id.Value, ct)
+                    ?? throw new InvalidOperationException(
+                        $"Không tìm thấy single production. single_prod_id={link.single_prod_id}");
 
                 var ord = await _db.orders
                     .FirstOrDefaultAsync(x => x.order_id == link.order_id, ct)
@@ -4762,21 +4779,14 @@ namespace AMMS.Application.Services
                         $"Order {link.order_id} đang dùng BOTH nên không được ghép production.");
                 }
 
-                var orderQty = req.quantity ?? await _db.order_items
-                    .AsNoTracking()
-                    .Where(x => x.order_id == link.order_id)
-                    .OrderBy(x => x.item_id)
-                    .Select(x => x.quantity)
-                    .FirstOrDefaultAsync(ct);
-
-                if (orderQty <= 0)
-                    throw new InvalidOperationException($"Order {link.order_id} có quantity không hợp lệ.");
+                var orderQty = await ResolveOrderQtyAsync(
+                    ord.order_id,
+                    req,
+                    ct);
 
                 /*
-                 * Quan trọng:
-                 * Hàm này phải là nơi trừ NVL/vật tư theo method đã duyệt.
-                 * Nếu code cũ của bạn đã có ReserveMaterialsForConfirmedProductionMethodAsync
-                 * thì di chuyển hàm đó sang bước confirm schedule, không gọi ở manager approve nữa.
+                 * Xuất NVL/vật tư cho từng single member.
+                 * Hàm này idempotent: nếu đã có stock_move ref_doc thì không trừ lần nữa.
                  */
                 var nvlLines = await IssueMaterialsForProductionOnScheduleAsync(
                     singleProd,
@@ -4791,7 +4801,6 @@ namespace AMMS.Application.Services
 
                 /*
                  * Nếu SUB thì xuất BTP.
-                 * Nếu NVL thì không có BTP.
                  */
                 if (method == "SUB")
                 {
@@ -4811,8 +4820,7 @@ namespace AMMS.Application.Services
             }
 
             /*
-             * Tạo một file xuất kho chung cho group production.
-             * Vẫn dùng field cũ sub_product_issue_file để lưu file xuất kho chung.
+             * Tạo file xuất kho chung cho group.
              */
             var issueFileUrl = await CreateAndUploadProductionIssueFileAsync(
                 groupProd,
@@ -4823,25 +4831,200 @@ namespace AMMS.Application.Services
             groupProd.sub_product_issue_file = issueFileUrl;
             groupProd.status = "Scheduled";
 
-            foreach (var link in links)
+            /*
+             * Gắn file chung vào:
+             * - SINGLE member trước group
+             * - SPLIT member sau group
+             */
+            await ApplyGroupIssueFileToMemberProductionsAsync(
+                groupProd.prod_id,
+                issueFileUrl,
+                ct);
+
+            await _db.SaveChangesAsync(ct);
+
+            return issueFileUrl;
+        }
+
+        private async Task ApplyGroupIssueFileToMemberProductionsAsync(
+    int groupProdId,
+    string? issueFileUrl,
+    CancellationToken ct)
+        {
+            if (groupProdId <= 0 || string.IsNullOrWhiteSpace(issueFileUrl))
+                return;
+
+            var members = await _db.prod_orders
+                .Where(x =>
+                    x.prod_id == groupProdId &&
+                    x.status == "Active")
+                .ToListAsync(ct);
+
+            if (members.Count == 0)
+                return;
+
+            var orderIds = members
+                .Select(x => x.order_id)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            var singleProdIds = members
+                .Where(x => x.single_prod_id.HasValue && x.single_prod_id.Value > 0)
+                .Select(x => x.single_prod_id!.Value)
+                .Distinct()
+                .ToList();
+
+            /*
+             * 1. SINGLE member trước group.
+             */
+            if (singleProdIds.Count > 0)
             {
-                if (!link.single_prod_id.HasValue)
-                    continue;
+                var singleProds = await _db.productions
+                    .Where(x => singleProdIds.Contains(x.prod_id))
+                    .ToListAsync(ct);
 
-                var singleProd = await _db.productions
-                    .FirstOrDefaultAsync(x => x.prod_id == link.single_prod_id.Value, ct);
-
-                if (singleProd != null)
+                foreach (var prod in singleProds)
                 {
-                    /*
-                     * Gắn chung file xuất kho group vào single production
-                     * để detail từng order cũng nhìn thấy file.
-                     */
-                    singleProd.sub_product_issue_file = issueFileUrl;
+                    prod.sub_product_issue_file = issueFileUrl;
                 }
             }
 
-            await _db.SaveChangesAsync(ct);
+            /*
+             * 2. SPLIT production sau group.
+             */
+            if (orderIds.Count > 0)
+            {
+                var splitProds = await _db.productions
+                    .Where(x =>
+                        x.order_id.HasValue &&
+                        orderIds.Contains(x.order_id.Value) &&
+                        x.prod_kind == "SPLIT" &&
+                        x.status != "Cancelled")
+                    .ToListAsync(ct);
+
+                foreach (var prod in splitProds)
+                {
+                    prod.sub_product_issue_file = issueFileUrl;
+                }
+            }
+        }
+
+        private async Task<string?> ConfirmSingleOrSplitProductionIssueAsync(
+    production prod,
+    int? confirmedByUserId,
+    CancellationToken ct)
+        {
+            if (prod == null)
+                throw new InvalidOperationException("production is required.");
+
+            if (!prod.order_id.HasValue || prod.order_id.Value <= 0)
+                throw new InvalidOperationException("Production chưa gắn order.");
+
+            /*
+             * Idempotent:
+             * Nếu đã có file rồi thì không xuất kho lại.
+             */
+            if (!string.IsNullOrWhiteSpace(prod.sub_product_issue_file))
+                return prod.sub_product_issue_file;
+
+            /*
+             * Nếu là SPLIT của order đã nằm trong GROUP và group đã có file,
+             * copy file group, không trừ kho thêm lần nữa.
+             */
+            if (string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase))
+            {
+                var groupFile = await ResolveActiveGroupIssueFileByOrderIdAsync(
+                    prod.order_id.Value,
+                    ct);
+
+                if (!string.IsNullOrWhiteSpace(groupFile))
+                {
+                    prod.sub_product_issue_file = groupFile;
+                    return groupFile;
+                }
+            }
+
+            var ord = await _db.orders
+                .FirstOrDefaultAsync(x => x.order_id == prod.order_id.Value, ct)
+                ?? throw new InvalidOperationException($"Không tìm thấy order_id={prod.order_id.Value}");
+
+            var req = await _db.order_requests
+                .AsNoTracking()
+                .Where(x => x.order_id == ord.order_id)
+                .OrderByDescending(x => x.order_request_id)
+                .FirstOrDefaultAsync(ct)
+                ?? throw new InvalidOperationException($"Không tìm thấy order_request của order_id={ord.order_id}");
+
+            var estimate = await LoadAcceptedEstimateOrThrowAsync(req, ct);
+
+            var method = (prod.prod_method ?? "")
+                .Trim()
+                .ToUpperInvariant();
+
+            if (method is not ("NVL" or "SUB" or "BOTH"))
+                throw new InvalidOperationException($"Production method không hợp lệ: {method}");
+
+            var orderQty = await ResolveOrderQtyAsync(
+                ord.order_id,
+                req,
+                ct);
+
+            var issueLines = new List<ProductionIssueLine>();
+
+            var nvlLines = await IssueMaterialsForProductionOnScheduleAsync(
+                prod,
+                req,
+                estimate,
+                method,
+                orderQty,
+                confirmedByUserId,
+                ct);
+
+            issueLines.AddRange(nvlLines);
+
+            var btpLine = await IssueSubProductForProductionOnScheduleAsync(
+                prod,
+                ord,
+                req,
+                method,
+                confirmedByUserId,
+                ct);
+
+            if (btpLine != null)
+                issueLines.Add(btpLine);
+
+            var issueFileUrl = await CreateAndUploadProductionIssueFileAsync(
+                prod,
+                issueLines,
+                $"Phiếu xuất kho production {prod.code}",
+                ct);
+
+            prod.sub_product_issue_file = issueFileUrl;
+
+            return issueFileUrl;
+        }
+
+        private async Task<string?> ResolveActiveGroupIssueFileByOrderIdAsync(
+    int orderId,
+    CancellationToken ct)
+        {
+            if (orderId <= 0)
+                return null;
+
+            return await (
+                from po in _db.prod_orders.AsNoTracking()
+                join gp in _db.productions.AsNoTracking()
+                    on po.prod_id equals gp.prod_id
+                where po.order_id == orderId
+                      && po.status == "Active"
+                      && gp.prod_kind == "GROUP"
+                      && gp.status != "Cancelled"
+                      && gp.sub_product_issue_file != null
+                      && gp.sub_product_issue_file != ""
+                orderby gp.prod_id descending
+                select gp.sub_product_issue_file
+            ).FirstOrDefaultAsync(ct);
         }
 
         private async Task<List<ProductionIssueLine>> IssueMaterialsForProductionOnScheduleAsync(
@@ -4855,18 +5038,43 @@ namespace AMMS.Application.Services
         {
             method = (method ?? "").Trim().ToUpperInvariant();
 
+            if (prod == null)
+                throw new InvalidOperationException("production is required.");
+
+            if (!prod.order_id.HasValue || prod.order_id.Value <= 0)
+                throw new InvalidOperationException("Production chưa gắn order.");
+
+            var refDoc = $"PROD-NVL-ISSUE-{prod.prod_id}";
+
             /*
-             * SUB vẫn cần NVL/vật tư phụ cho các công đoạn sau BTP,
-             * ví dụ PHU/CAN/BE tuỳ estimate/BOM.
-             *
-             * Vì vậy không return rỗng cho SUB.
-             * Hàm này nên đọc từ BOM/cost_estimate_process theo logic cũ của bạn.
+             * Idempotent:
+             * Nếu đã xuất NVL cho production này rồi, không trừ lần nữa.
+             * Chỉ build lại line từ stock_move cũ để tạo file nếu cần.
              */
+            var existed = await _db.stock_moves
+                .AsNoTracking()
+                .AnyAsync(x =>
+                    x.ref_doc == refDoc &&
+                    x.type == "OUT" &&
+                    x.material_id != null,
+                    ct);
+
+            if (existed)
+            {
+                return await BuildIssueLinesFromExistingStockMovesAsync(
+                    prod,
+                    refDoc,
+                    ct);
+            }
+
             var orderItemIds = await _db.order_items
                 .AsNoTracking()
-                .Where(x => x.order_id == prod.order_id)
+                .Where(x => x.order_id == prod.order_id.Value)
                 .Select(x => x.item_id)
                 .ToListAsync(ct);
+
+            if (orderItemIds.Count == 0)
+                throw new InvalidOperationException($"Order {prod.order_id.Value} chưa có order_item.");
 
             var boms = await _db.boms
                 .Where(x =>
@@ -4882,23 +5090,24 @@ namespace AMMS.Application.Services
                 if (!bom.material_id.HasValue || bom.material_id.Value <= 0)
                     continue;
 
+                var qty = bom.qty_total ?? 0m;
+
+                if (qty <= 0)
+                    continue;
+
                 var material = await _db.materials
                     .FirstOrDefaultAsync(x => x.material_id == bom.material_id.Value, ct);
 
                 if (material == null)
                     throw new InvalidOperationException($"Không tìm thấy material_id={bom.material_id.Value}");
 
-                var qty = bom.qty_total ?? 0m;
-
-                if (qty <= 0)
-                    continue;
-
                 var currentStock = material.stock_qty ?? 0m;
 
                 if (currentStock < qty)
                 {
                     throw new InvalidOperationException(
-                        $"Không đủ tồn NVL/vật tư. material_id={material.material_id}, code={material.code}, tồn={currentStock}, cần={qty}");
+                        $"Không đủ tồn kho NVL/vật tư. " +
+                        $"Material={material.code} - {material.name}, tồn={currentStock}, cần={qty}.");
                 }
 
                 material.stock_qty = currentStock - qty;
@@ -4906,13 +5115,14 @@ namespace AMMS.Application.Services
                 await _db.stock_moves.AddAsync(new stock_move
                 {
                     material_id = material.material_id,
+                    sub_product_id = null,
                     type = "OUT",
                     qty = qty,
-                    ref_doc = $"PROD-ISSUE-{prod.prod_id}",
+                    ref_doc = refDoc,
                     user_id = userId,
                     move_date = AppTime.NowVnUnspecified(),
                     note =
-                        $"Xuất NVL/vật tư khi GM xác nhận lập lịch. " +
+                        $"Xuất NVL/vật tư khi xác nhận lập lịch. " +
                         $"prod_id={prod.prod_id}, order_id={prod.order_id}, method={method}"
                 }, ct);
 
@@ -4922,6 +5132,7 @@ namespace AMMS.Application.Services
                     prod_id = prod.prod_id,
                     item_type = "MATERIAL",
                     material_id = material.material_id,
+                    sub_product_id = null,
                     code = material.code ?? bom.material_code ?? "",
                     name = material.name ?? bom.material_name ?? "",
                     qty = qty,
@@ -4952,6 +5163,43 @@ namespace AMMS.Application.Services
             if (prod.sub_product_used_qty <= 0)
                 throw new InvalidOperationException("Production dùng SUB/BOTH nhưng sub_product_used_qty không hợp lệ.");
 
+            var refDoc = $"PROD-BTP-ISSUE-{prod.prod_id}";
+
+            /*
+             * Idempotent:
+             * Nếu đã xuất BTP cho production này rồi thì không trừ lần nữa.
+             */
+            var existed = await _db.stock_moves
+                .AsNoTracking()
+                .AnyAsync(x =>
+                    x.ref_doc == refDoc &&
+                    x.type == "OUT" &&
+                    x.sub_product_id == prod.sub_product_id.Value,
+                    ct);
+
+            if (existed)
+            {
+                var subOld = await _db.sub_products
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.id == prod.sub_product_id.Value, ct);
+
+                return new ProductionIssueLine
+                {
+                    order_id = ord.order_id,
+                    prod_id = prod.prod_id,
+                    item_type = "SUB_PRODUCT",
+                    material_id = null,
+                    sub_product_id = prod.sub_product_id.Value,
+                    code = $"SUB-{prod.sub_product_id.Value}",
+                    name = subOld == null
+                        ? "Bán thành phẩm"
+                        : $"Bán thành phẩm {subOld.product_process}",
+                    qty = prod.sub_product_used_qty,
+                    unit = "sp",
+                    note = $"Đã xuất BTP trước đó cho method {method}"
+                };
+            }
+
             var sub = await _db.sub_products
                 .FirstOrDefaultAsync(x => x.id == prod.sub_product_id.Value, ct)
                 ?? throw new InvalidOperationException($"Không tìm thấy sub_product_id={prod.sub_product_id.Value}");
@@ -4970,18 +5218,15 @@ namespace AMMS.Application.Services
 
             await _db.stock_moves.AddAsync(new stock_move
             {
-                /*
-                 * Nếu stock_move của bạn chưa có sub_product_id thì thêm DB field như bên dưới.
-                 */
                 sub_product_id = sub.id,
                 material_id = null,
                 type = "OUT",
                 qty = prod.sub_product_used_qty,
-                ref_doc = $"PROD-BTP-ISSUE-{prod.prod_id}",
+                ref_doc = refDoc,
                 user_id = userId,
                 move_date = AppTime.NowVnUnspecified(),
                 note =
-                    $"Xuất bán thành phẩm khi GM xác nhận lập lịch. " +
+                    $"Xuất bán thành phẩm khi xác nhận lập lịch. " +
                     $"prod_id={prod.prod_id}, order_id={ord.order_id}, sub_id={sub.id}, method={method}"
             }, ct);
 
@@ -4990,6 +5235,7 @@ namespace AMMS.Application.Services
                 order_id = ord.order_id,
                 prod_id = prod.prod_id,
                 item_type = "SUB_PRODUCT",
+                material_id = null,
                 sub_product_id = sub.id,
                 code = $"SUB-{sub.id}",
                 name = $"Bán thành phẩm {sub.product_process}",
@@ -4997,6 +5243,71 @@ namespace AMMS.Application.Services
                 unit = "sp",
                 note = $"Xuất BTP cho method {method}"
             };
+        }
+
+        private async Task<List<ProductionIssueLine>> BuildIssueLinesFromExistingStockMovesAsync(
+    production prod,
+    string refDoc,
+    CancellationToken ct)
+        {
+            var result = new List<ProductionIssueLine>();
+
+            var moves = await _db.stock_moves
+                .AsNoTracking()
+                .Where(x => x.ref_doc == refDoc && x.type == "OUT")
+                .OrderBy(x => x.move_id)
+                .ToListAsync(ct);
+
+            foreach (var move in moves)
+            {
+                if (move.material_id.HasValue && move.material_id.Value > 0)
+                {
+                    var material = await _db.materials
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(x => x.material_id == move.material_id.Value, ct);
+
+                    result.Add(new ProductionIssueLine
+                    {
+                        order_id = prod.order_id,
+                        prod_id = prod.prod_id,
+                        item_type = "MATERIAL",
+                        material_id = move.material_id,
+                        sub_product_id = null,
+                        code = material?.code ?? $"MAT-{move.material_id}",
+                        name = material?.name ?? "Nguyên vật liệu",
+                        qty = (decimal)move.qty,
+                        unit = material?.unit ?? "",
+                        note = "Dòng xuất kho đã tồn tại trước đó"
+                    });
+
+                    continue;
+                }
+
+                if (move.sub_product_id.HasValue && move.sub_product_id.Value > 0)
+                {
+                    var sub = await _db.sub_products
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(x => x.id == move.sub_product_id.Value, ct);
+
+                    result.Add(new ProductionIssueLine
+                    {
+                        order_id = prod.order_id,
+                        prod_id = prod.prod_id,
+                        item_type = "SUB_PRODUCT",
+                        material_id = null,
+                        sub_product_id = move.sub_product_id,
+                        code = $"SUB-{move.sub_product_id}",
+                        name = sub == null
+                            ? "Bán thành phẩm"
+                            : $"Bán thành phẩm {sub.product_process}",
+                        qty = (decimal)move.qty,
+                        unit = "sp",
+                        note = "Dòng xuất BTP đã tồn tại trước đó"
+                    });
+                }
+            }
+
+            return result;
         }
 
         private async Task<string?> CreateAndUploadProductionIssueFileAsync(
@@ -5037,10 +5348,6 @@ namespace AMMS.Application.Services
             }
 
             var fileName = $"production-issue-{prod.prod_id}-{now:yyyyMMddHHmmss}.csv";
-            var tempPath = Path.Combine(Path.GetTempPath(), fileName);
-
-            await File.WriteAllTextAsync(tempPath, sb.ToString(), ct);
-
             var bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
 
             await using var ms = new MemoryStream(bytes);
@@ -5055,6 +5362,29 @@ namespace AMMS.Application.Services
                 publicId);
 
             return url;
+        }
+
+        private async Task<int> ResolveOrderQtyAsync(
+    int orderId,
+    order_request req,
+    CancellationToken ct)
+        {
+            var orderQty = req.quantity ?? 0;
+
+            if (orderQty > 0)
+                return orderQty;
+
+            orderQty = await _db.order_items
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderBy(x => x.item_id)
+                .Select(x => x.quantity)
+                .FirstOrDefaultAsync(ct);
+
+            if (orderQty <= 0)
+                throw new InvalidOperationException($"Order {orderId} có quantity không hợp lệ.");
+
+            return orderQty;
         }
 
         private static string EscapeCsv(string? value)

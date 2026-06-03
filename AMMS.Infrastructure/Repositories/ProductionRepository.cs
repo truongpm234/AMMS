@@ -2632,6 +2632,7 @@ namespace AMMS.Infrastructure.Repositories
                 .Where(t => t.prod_id == prodId)
                 .Select(t => new
                 {
+                    t.task_id,
                     t.status,
                     t.end_time,
                     t.seq_num
@@ -2641,11 +2642,11 @@ namespace AMMS.Infrastructure.Repositories
             if (tasks.Count == 0)
                 return false;
 
-            var allFinished = tasks.All(t =>
+            var allOwnTasksFinished = tasks.All(t =>
                 string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
                 t.end_time != null);
 
-            if (!allFinished)
+            if (!allOwnTasksFinished)
                 return false;
 
             var finishedAt = tasks
@@ -2654,29 +2655,36 @@ namespace AMMS.Infrastructure.Repositories
                 .DefaultIfEmpty(now)
                 .Max();
 
-            var hasUnfinishedOwnTasks = await _db.tasks
-    .AsNoTracking()
-    .Where(x => x.prod_id == prodId)
-    .AnyAsync(x =>
-        x.status == null ||
-        x.status.Trim().ToUpper() != "FINISHED",
-        ct);
+            /*
+             * FIX CHÍNH:
+             * Không chặn production SINGLE/SPLIT chuyển Importing vì còn group link chưa xong.
+             *
+             * Production là 1 batch sản xuất.
+             * Nếu batch đó đã xong hết task của chính nó thì batch đó phải Importing.
+             *
+             * Order/request chỉ được Importing khi full path của order xong,
+             * phần đó được kiểm soát bằng CanMoveOrderToImportingByFullPathAsync().
+             */
+            var changed = false;
 
-            if (hasUnfinishedOwnTasks)
-                return false;
+            if (!string.Equals(prod.status, "Importing", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(prod.status, "Finished", StringComparison.OrdinalIgnoreCase))
+            {
+                prod.status = "Importing";
+                changed = true;
+            }
 
-            var hasUnfinishedGroup = await HasUnfinishedGroupLinksForSingleProductionAsync(
-                prodId,
-                ct);
-
-            if (hasUnfinishedGroup)
-                return false;
-
-            prod.end_date = finishedAt;
-            prod.status = "Importing";
+            if (prod.end_date == null)
+            {
+                prod.end_date = finishedAt;
+                changed = true;
+            }
 
             if (prod.actual_start_date == null)
+            {
                 prod.actual_start_date = finishedAt;
+                changed = true;
+            }
 
             var isGroupProduction = string.Equals(
                 prod.prod_kind,
@@ -2685,6 +2693,10 @@ namespace AMMS.Infrastructure.Repositories
 
             if (isGroupProduction)
             {
+                /*
+                 * GROUP xong chỉ đóng production GROUP.
+                 * Order/request chỉ lên Importing nếu full path của từng order đã xong.
+                 */
                 await SyncGroupMemberOrdersToImportingAsync(
                     prod,
                     finishedAt,
@@ -2692,6 +2704,10 @@ namespace AMMS.Infrastructure.Repositories
             }
             else
             {
+                /*
+                 * SINGLE/SPLIT xong thì đóng chính production đó.
+                 * Order/request chỉ lên Importing nếu full path của order đã xong.
+                 */
                 await SyncSingleProductionOrderToImportingAsync(
                     prod,
                     finishedAt,
@@ -2699,7 +2715,8 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             await _db.SaveChangesAsync(ct);
-            return true;
+
+            return changed;
         }
 
         private async Task SyncSingleProductionOrderToImportingAsync(
@@ -2707,7 +2724,7 @@ namespace AMMS.Infrastructure.Repositories
     DateTime finishedAt,
     CancellationToken ct)
         {
-            if (!prod.order_id.HasValue)
+            if (!prod.order_id.HasValue || prod.order_id.Value <= 0)
                 return;
 
             var canMoveOrder = await CanMoveOrderToImportingByFullPathAsync(
@@ -2719,8 +2736,10 @@ namespace AMMS.Infrastructure.Repositories
 
             await SyncOrderAndRequestsToImportingAsync(
                 prod.order_id.Value,
+                finishedAt,
                 ct);
         }
+
         private async Task SyncGroupMemberOrdersToImportingAsync(
     production groupProd,
     DateTime finishedAt,
@@ -2735,13 +2754,12 @@ namespace AMMS.Infrastructure.Repositories
             foreach (var member in members)
             {
                 /*
-                 * Giữ logic này nếu bạn vẫn muốn update single production gốc
-                 * khi các task còn lại của single production đó đã xong.
+                 * Nếu single production gốc của order cũng đã xong hết task riêng
+                 * thì cho single production đó Importing.
                  *
-                 * Nhưng KHÔNG được vì singleProd Importing mà kéo order Importing theo.
-                 * Order chỉ được Importing ở block CanMoveOrderToImportingByFullPathAsync bên dưới.
+                 * Nhưng KHÔNG được kéo order lên Importing tại đây nếu full path chưa xong.
                  */
-                if (member.single_prod_id.HasValue)
+                if (member.single_prod_id.HasValue && member.single_prod_id.Value > 0)
                 {
                     var singleProd = await _db.productions
                         .FirstOrDefaultAsync(x => x.prod_id == member.single_prod_id.Value, ct);
@@ -2754,19 +2772,16 @@ namespace AMMS.Infrastructure.Repositories
 
                         if (singleAllFinished)
                         {
-                            singleProd.status = "Importing";
-                            singleProd.end_date ??= finishedAt;
-
-                            if (singleProd.actual_start_date == null)
-                                singleProd.actual_start_date = finishedAt;
+                            await MarkProductionRowImportingAsync(
+                                singleProd,
+                                finishedAt,
+                                ct);
                         }
                     }
                 }
 
                 /*
-                 * FIX CHÍNH:
-                 * Không sync order theo việc GROUP vừa Importing.
-                 * Phải check full production path của order.
+                 * Order/request chỉ Importing khi full path của order đã xong.
                  */
                 var canMoveOrder = await CanMoveOrderToImportingByFullPathAsync(
                     member.order_id,
@@ -2777,14 +2792,37 @@ namespace AMMS.Infrastructure.Repositories
 
                 await SyncOrderAndRequestsToImportingAsync(
                     member.order_id,
+                    finishedAt,
                     ct);
             }
+        }
+
+        private Task MarkProductionRowImportingAsync(
+    production prod,
+    DateTime finishedAt,
+    CancellationToken ct)
+        {
+            if (prod == null)
+                return Task.CompletedTask;
+
+            if (!string.Equals(prod.status, "Finished", StringComparison.OrdinalIgnoreCase))
+            {
+                prod.status = "Importing";
+            }
+
+            prod.end_date ??= finishedAt;
+            prod.actual_start_date ??= finishedAt;
+
+            return Task.CompletedTask;
         }
 
         private async Task<bool> CanMoveOrderToImportingByFullPathAsync(
     int orderId,
     CancellationToken ct)
         {
+            if (orderId <= 0)
+                return false;
+
             var routeCodes = await GetOrderFullProductionPathAsync(
                 orderId,
                 ct);
@@ -2792,6 +2830,20 @@ namespace AMMS.Infrastructure.Repositories
             if (routeCodes.Count == 0)
                 return false;
 
+            routeCodes = routeCodes
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+
+            if (routeCodes.Count == 0)
+                return false;
+
+            /*
+             * Chỉ khi công đoạn cuối của full path xong mới xét đưa order/request Importing.
+             * Ví dụ full path cuối là DAN thì DAN phải Finished.
+             */
             var finalProcessCode = routeCodes.Last();
 
             var finalFinished = await IsOrderProcessFinishedAsync(
@@ -2802,6 +2854,12 @@ namespace AMMS.Infrastructure.Repositories
             if (!finalFinished)
                 return false;
 
+            /*
+             * Check lại toàn bộ công đoạn trong full path.
+             * Bao gồm:
+             * - task trực tiếp trong SINGLE/SPLIT
+             * - group task thông qua task_links/task_qtys
+             */
             foreach (var code in routeCodes)
             {
                 var finished = await IsOrderProcessFinishedAsync(
@@ -2820,6 +2878,9 @@ namespace AMMS.Infrastructure.Repositories
     int orderId,
     CancellationToken ct)
         {
+            if (orderId <= 0)
+                return new List<string>();
+
             var item = await _db.order_items
                 .AsNoTracking()
                 .Where(x => x.order_id == orderId)
@@ -2831,8 +2892,7 @@ namespace AMMS.Infrastructure.Repositories
                 })
                 .FirstOrDefaultAsync(ct);
 
-            var fromOrderItem = ParseProcessCodesForImportingCheck(
-                item?.production_process);
+            var fromOrderItem = ParseProcessCodes(item?.production_process);
 
             if (fromOrderItem.Count > 0)
                 return fromOrderItem;
@@ -2840,33 +2900,78 @@ namespace AMMS.Infrastructure.Repositories
             if (item?.product_type_id == null || item.product_type_id.Value <= 0)
                 return new List<string>();
 
-            return await _db.product_type_processes
+            var fromMaster = await _db.product_type_processes
                 .AsNoTracking()
                 .Where(x =>
                     x.product_type_id == item.product_type_id.Value &&
                     (x.is_active ?? true))
                 .OrderBy(x => x.seq_num)
-                .Select(x => NormalizeProcessCodeForImportingCheck(x.process_code))
-                .Where(x => x != "")
+                .Select(x => x.process_code)
                 .ToListAsync(ct);
+
+            return fromMaster
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
+        }
+
+        private static readonly string[] FullRouteOrder =
+{
+    "RALO", "CAT", "IN", "PHU", "CAN", "BOI", "BE", "DUT", "DAN"
+};
+
+        private static string NormProcessCode(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+        }
+
+        private static int FullRouteIndex(string? value)
+        {
+            var code = NormProcessCode(value);
+
+            var idx = Array.FindIndex(
+                FullRouteOrder,
+                x => string.Equals(x, code, StringComparison.OrdinalIgnoreCase));
+
+            return idx < 0 ? 999 : idx;
+        }
+
+        private static List<string> ParseProcessCodes(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\', '\n', '\r', '\t' },
+                    StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
         }
 
         private async Task<bool> IsOrderProcessFinishedAsync(
     int orderId,
-    string processCode,
+    string? processCode,
     CancellationToken ct)
         {
-            var code = NormalizeProcessCodeForImportingCheck(processCode);
+            var code = NormProcessCode(processCode);
 
-            if (string.IsNullOrWhiteSpace(code))
+            if (orderId <= 0 || string.IsNullOrWhiteSpace(code))
                 return false;
 
             /*
-             * 1. Check task trực tiếp:
-             * - SINGLE RALO,CAT,IN
-             * - SPLIT BE,DUT,DAN
+             * CASE 1:
+             * Công đoạn nằm trong production riêng SINGLE/SPLIT.
              */
-            var directRows = await (
+            var directFinished = await (
                 from t in _db.tasks.AsNoTracking()
 
                 join p in _db.productions.AsNoTracking()
@@ -2876,96 +2981,76 @@ namespace AMMS.Infrastructure.Repositories
                     on t.process_id equals pp0.process_id into ppj
                 from pp in ppj.DefaultIfEmpty()
 
-                where p.order_id == orderId &&
+                where p.order_id == orderId
+                      && p.status != "Cancelled"
+                      && pp != null
+                      && pp.process_code != null
+                      && pp.process_code.Trim().ToUpper() == code
+                      &&
                       (
-                          p.status == null ||
-                          p.status.ToUpper() != "CANCELLED"
+                          t.status != null &&
+                          t.status.Trim().ToUpper() == "FINISHED"
+                          ||
+                          t.end_time != null
                       )
 
-                select new
-                {
-                    process_code = pp != null ? pp.process_code : null,
-                    t.status,
-                    t.end_time
-                }
-            ).ToListAsync(ct);
-
-            var directFinished = directRows.Any(x =>
-                string.Equals(
-                    NormalizeProcessCodeForImportingCheck(x.process_code),
-                    code,
-                    StringComparison.OrdinalIgnoreCase) &&
-                IsFinishedForImportingCheck(x.status, x.end_time));
+                select t.task_id
+            ).AnyAsync(ct);
 
             if (directFinished)
                 return true;
 
             /*
-             * 2. Check GROUP task qua task_links.
-             * GROUP production không có order_id trong productions,
-             * nên bắt buộc phải check qua task_links.order_id.
+             * CASE 2:
+             * Công đoạn nằm trong GROUP production.
+             * Với group task, sản lượng từng order được mirror vào task_qtys.
              */
-            var groupRows = await (
-                from tl in _db.task_links.AsNoTracking()
-
-                join gt in _db.tasks.AsNoTracking()
-                    on tl.group_task_id equals gt.task_id
-
-                join gp in _db.productions.AsNoTracking()
-                    on tl.group_prod_id equals gp.prod_id
-
-                join pp0 in _db.product_type_processes.AsNoTracking()
-                    on gt.process_id equals pp0.process_id into ppj
-                from pp in ppj.DefaultIfEmpty()
-
-                where tl.order_id == orderId &&
-                      (
-                          tl.status == null ||
-                          tl.status.ToUpper() != "CANCELLED"
-                      ) &&
-                      (
-                          gp.status == null ||
-                          gp.status.ToUpper() != "CANCELLED"
-                      )
-
-                select new
-                {
-                    process_code = pp != null ? pp.process_code : tl.process_code,
-                    task_status = gt.status,
-                    task_end_time = gt.end_time,
-                    link_status = tl.status,
-                    tl.done_at
-                }
-            ).ToListAsync(ct);
-
-            var groupFinished = groupRows.Any(x =>
-                string.Equals(
-                    NormalizeProcessCodeForImportingCheck(x.process_code),
-                    code,
-                    StringComparison.OrdinalIgnoreCase) &&
-                (
-                    IsFinishedForImportingCheck(x.task_status, x.task_end_time) ||
-                    string.Equals(x.link_status, "Done", StringComparison.OrdinalIgnoreCase) ||
-                    x.done_at != null
-                ));
-
-            if (groupFinished)
-                return true;
-
-            /*
-             * 3. Fallback: check task_qtys.
-             * Khi group finish, MirrorGroupFinishToSingleTasksAsync đã tạo task_qty
-             * để ghi nhận sản lượng phân bổ về từng order.
-             */
-            var qtyFinished = await _db.task_qtys
+            var groupQtyFinished = await _db.task_qtys
                 .AsNoTracking()
                 .AnyAsync(x =>
                     x.order_id == orderId &&
                     x.process_code != null &&
-                    x.process_code.ToUpper() == code,
+                    x.process_code.Trim().ToUpper() == code &&
+                    x.qty_good > 0,
                     ct);
 
-            return qtyFinished;
+            if (groupQtyFinished)
+                return true;
+
+            /*
+             * CASE 3:
+             * Fallback theo task_links + group task Finished.
+             * Dùng để bao phủ trường hợp task_qtys chưa có nhưng link đã Done.
+             */
+            var groupTaskFinished = await (
+                from link in _db.task_links.AsNoTracking()
+
+                join gt in _db.tasks.AsNoTracking()
+                    on link.group_task_id equals gt.task_id
+
+                join gp in _db.productions.AsNoTracking()
+                    on gt.prod_id equals gp.prod_id
+
+                where link.order_id == orderId
+                      && link.process_code != null
+                      && link.process_code.Trim().ToUpper() == code
+                      && gp.prod_kind == "GROUP"
+                      && gp.status != "Cancelled"
+                      &&
+                      (
+                          link.status != null &&
+                          link.status.Trim().ToUpper() == "DONE"
+                          ||
+                          gt.status != null &&
+                          gt.status.Trim().ToUpper() == "FINISHED"
+                          ||
+                          gt.end_time != null
+                      )
+
+                select link.id
+            ).AnyAsync(ct);
+
+            return groupTaskFinished;
         }
 
         private static List<string> ParseProcessCodesForImportingCheck(string? raw)
@@ -3002,11 +3087,15 @@ namespace AMMS.Infrastructure.Repositories
     int prodId,
     CancellationToken ct)
         {
+            if (prodId <= 0)
+                return false;
+
             var tasks = await _db.tasks
                 .AsNoTracking()
                 .Where(x => x.prod_id == prodId)
                 .Select(x => new
                 {
+                    x.task_id,
                     x.status,
                     x.end_time
                 })
@@ -3022,38 +3111,129 @@ namespace AMMS.Infrastructure.Repositories
 
         private async Task SyncOrderAndRequestsToImportingAsync(
     int orderId,
+    DateTime finishedAt,
     CancellationToken ct)
         {
-            var order = await _db.orders
-                .FirstOrDefaultAsync(x => x.order_id == orderId, ct);
-
-            if (order == null)
+            if (orderId <= 0)
                 return;
 
-            if (!string.Equals(order.status, "Completed", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(order.status, "Delivery", StringComparison.OrdinalIgnoreCase))
+            /*
+             * Chốt lại lần cuối để tránh order bị kéo lên Importing sớm.
+             */
+            var canMoveOrder = await CanMoveOrderToImportingByFullPathAsync(
+                orderId,
+                ct);
+
+            if (!canMoveOrder)
+                return;
+
+            var ord = await _db.orders
+                .FirstOrDefaultAsync(x => x.order_id == orderId, ct);
+
+            if (ord == null)
+                return;
+
+            /*
+             * Task finish chỉ đưa về Importing.
+             * Không set Finished ở đây.
+             * Finished chỉ do warehouse/import confirmation xử lý.
+             */
+            if (!string.Equals(ord.status, "Finished", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(ord.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
             {
-                order.status = "Importing";
+                ord.status = "Importing";
             }
 
-            var quoteId = order.quote_id;
-
             var requests = await _db.order_requests
-                .Where(x =>
-                    x.order_id == orderId ||
-                    (quoteId.HasValue && x.quote_id == quoteId.Value))
+                .Where(x => x.order_id == orderId)
                 .ToListAsync(ct);
 
             foreach (var req in requests)
             {
-                if (string.Equals(req.process_status, "Completed", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(req.process_status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(req.process_status, "Cancel", StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(req.process_status, "Finished", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(req.process_status, "Cancelled", StringComparison.OrdinalIgnoreCase))
                 {
-                    continue;
+                    req.process_status = "Importing";
                 }
+            }
 
-                req.process_status = "Importing";
+            /*
+             * Khi full path của order đã xong, đồng bộ tất cả production liên quan đã hoàn thành
+             * về Importing nếu có production nào còn InProcessing do data cũ.
+             */
+            await SyncAllCompletedProductionsOfOrderToImportingAsync(
+                orderId,
+                finishedAt,
+                ct);
+        }
+
+        private async Task SyncAllCompletedProductionsOfOrderToImportingAsync(
+    int orderId,
+    DateTime finishedAt,
+    CancellationToken ct)
+        {
+            if (orderId <= 0)
+                return;
+
+            /*
+             * 1. SINGLE/SPLIT có order_id trực tiếp.
+             */
+            var directProds = await _db.productions
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.status != "Cancelled")
+                .ToListAsync(ct);
+
+            foreach (var prod in directProds)
+            {
+                var allTasksFinished = await AreAllProductionTasksFinishedAsync(
+                    prod.prod_id,
+                    ct);
+
+                if (!allTasksFinished)
+                    continue;
+
+                await MarkProductionRowImportingAsync(
+                    prod,
+                    finishedAt,
+                    ct);
+            }
+
+            /*
+             * 2. GROUP production liên quan qua prod_orders.
+             */
+            var groupProdIds = await _db.prod_orders
+                .AsNoTracking()
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.status == "Active")
+                .Select(x => x.prod_id)
+                .Distinct()
+                .ToListAsync(ct);
+
+            if (groupProdIds.Count == 0)
+                return;
+
+            var groupProds = await _db.productions
+                .Where(x =>
+                    groupProdIds.Contains(x.prod_id) &&
+                    x.prod_kind == "GROUP" &&
+                    x.status != "Cancelled")
+                .ToListAsync(ct);
+
+            foreach (var prod in groupProds)
+            {
+                var allTasksFinished = await AreAllProductionTasksFinishedAsync(
+                    prod.prod_id,
+                    ct);
+
+                if (!allTasksFinished)
+                    continue;
+
+                await MarkProductionRowImportingAsync(
+                    prod,
+                    finishedAt,
+                    ct);
             }
         }
 
@@ -4074,7 +4254,7 @@ namespace AMMS.Infrastructure.Repositories
 
                         sub_product_issue_file = prod.sub_product_issue_file,
 
-                        message = "Đã duyệt sản xuất bằng bán thành phẩm và tạo phiếu xuất kho BTP."
+                        message = "Đã duyệt sản xuất bằng bán thành phẩm."
                     };
                 }
                 else if (method == "BOTH")

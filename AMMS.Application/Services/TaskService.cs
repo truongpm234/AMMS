@@ -12,11 +12,13 @@ namespace AMMS.Application.Services
     public class TaskService : ITaskService
     {
         private readonly ITaskRepository _taskRepo;
+        private readonly IProductionRepository _prodRepo;
         private readonly AppDbContext _db;
 
-        public TaskService(ITaskRepository taskRepo, AppDbContext db)
+        public TaskService(ITaskRepository taskRepo, IProductionRepository prodRepo, AppDbContext db)
         {
             _taskRepo = taskRepo;
+            _prodRepo = prodRepo;
             _db = db;
         }
 
@@ -291,7 +293,10 @@ namespace AMMS.Application.Services
             return (code ?? "").Trim().ToUpperInvariant();
         }
 
-        public async Task<FinishTasksFromStockResponse> FinishTasksFromStockAsync(List<int> taskIds, int? scannedByUserId = null, CancellationToken ct = default)
+        public async Task<FinishTasksFromStockResponse> FinishTasksFromStockAsync(
+    List<int> taskIds,
+    int? scannedByUserId = null,
+    CancellationToken ct = default)
         {
             const string fixedReason = "Bán thành phẩm đã có sẵn trong kho";
 
@@ -306,6 +311,8 @@ namespace AMMS.Application.Services
             var result = new FinishTasksFromStockResponse();
             var now = AppTime.NowVnUnspecified();
 
+            var affectedProdIds = new HashSet<int>();
+
             foreach (var taskId in distinctTaskIds)
             {
                 var task = await _taskRepo.GetByIdTrackingAsync(taskId, ct);
@@ -319,14 +326,35 @@ namespace AMMS.Application.Services
                 if (string.Equals(task.status, "Finished", StringComparison.OrdinalIgnoreCase))
                 {
                     result.already_finished_task_ids.Add(taskId);
+
+                    if (task.prod_id.HasValue)
+                        affectedProdIds.Add(task.prod_id.Value);
+
                     continue;
                 }
 
-                await _taskRepo.MarkTaskFinishedFromStockAsync(taskId, fixedReason, now, true, ct);
+                await _taskRepo.MarkTaskFinishedFromStockAsync(
+                    taskId,
+                    fixedReason,
+                    now,
+                    true,
+                    ct);
+
+                if (task.prod_id.HasValue)
+                    affectedProdIds.Add(task.prod_id.Value);
+
                 result.finished_task_ids.Add(taskId);
             }
 
             await _taskRepo.SaveChangesAsync(ct);
+
+            foreach (var prodId in affectedProdIds)
+            {
+                await _prodRepo.TryCloseProductionIfCompletedAsync(
+                    prodId,
+                    now,
+                    ct);
+            }
 
             return result;
         }

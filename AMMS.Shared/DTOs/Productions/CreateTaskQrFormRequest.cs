@@ -11,7 +11,7 @@ namespace AMMS.Shared.DTOs.Productions
     {
         public int task_id { get; set; }
 
-        public int ttl_minutes { get; set; } = 60;
+        public int ttl_minutes { get; set; } = 6000;
 
         public int? qty_good { get; set; }
 

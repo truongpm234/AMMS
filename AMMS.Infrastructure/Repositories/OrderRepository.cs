@@ -608,6 +608,7 @@ namespace AMMS.Infrastructure.Repositories
                 ?? "Quản lí";
 
             var urlDesign = item?.design_url ?? req?.design_file_path;
+            var print_ready_url = req?.print_ready_file;
 
             var finalCost = est?.final_total_cost ?? order.total_amount ?? 0m;
 
@@ -709,7 +710,6 @@ namespace AMMS.Infrastructure.Repositories
                 production_start_date = AsUnspecified(prodStart),
                 production_end_date = AsUnspecified(prodEnd),
                 approver_name = approverName,
-
                 specification = null,
                 note = req?.description,
 
@@ -717,7 +717,7 @@ namespace AMMS.Infrastructure.Repositories
                 deposit_amount = depositFallback,
                 rush_amount = est?.rush_amount ?? 0m,
 
-                file_url = urlDesign,
+                file_url = print_ready_url,
                 contract_file = null,
 
                 lamination_material_id = est?.lamination_material_id,
