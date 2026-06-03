@@ -1249,12 +1249,12 @@ namespace AMMS.Application.Services
         }
 
         public async Task<string> UploadPrintReadyFileAsync(
-            int requestId,
-            int? estimateId,
-            Stream fileStream,
-            string fileName,
-            string? contentType,
-            CancellationToken ct = default)
+    int requestId,
+    int? estimateId,
+    Stream fileStream,
+    string fileName,
+    string? contentType,
+    CancellationToken ct = default)
         {
             if (requestId <= 0)
                 throw new ArgumentException("requestId must be > 0");
@@ -1269,11 +1269,28 @@ namespace AMMS.Application.Services
             if (request == null)
                 throw new InvalidOperationException("Order request not found");
 
+            cost_estimate? selectedEstimate = null;
+
             if (estimateId.HasValue && estimateId.Value > 0)
             {
-                var estimate = await _estimateRepo.GetTrackingByIdAsync(estimateId.Value, ct);
-                if (estimate == null || estimate.order_request_id != requestId)
+                selectedEstimate = await _estimateRepo.GetTrackingByIdAsync(
+                    estimateId.Value,
+                    ct);
+
+                if (selectedEstimate == null || selectedEstimate.order_request_id != requestId)
                     throw new InvalidOperationException("Estimate not found");
+
+                /*
+                 * FIX:
+                 * Khi consultant/designer upload print-ready-file theo estimate nào
+                 * thì nên lưu accepted_estimate_id nếu chưa có.
+                 * Các bước production phía sau đang dựa vào accepted_estimate_id khá nhiều.
+                 */
+                if (!request.accepted_estimate_id.HasValue ||
+                    request.accepted_estimate_id.Value <= 0)
+                {
+                    request.accepted_estimate_id = estimateId.Value;
+                }
             }
 
             var ext = Path.GetExtension(fileName)?.Trim().ToLowerInvariant();
@@ -1291,17 +1308,20 @@ namespace AMMS.Application.Services
     };
 
             if (string.IsNullOrWhiteSpace(ext) || !allowedExtensions.Contains(ext))
+            {
                 throw new ArgumentException(
                     "Unsupported file format. Allowed: pdf, doc, docx, xls, xlsx, ppt, pptx, txt, rtf, ai, psd, psb, eps, svg, cdr, indd, jpg, jpeg, png, tif, tiff, zip, rar, 7z");
+            }
 
             var safeFileName = Path.GetFileName(fileName);
 
-            // folder cloudinary
             var publicId = estimateId.HasValue && estimateId.Value > 0
                 ? $"print_ready/request_{requestId}/estimate_{estimateId.Value}/file"
                 : $"print_ready/request_{requestId}/file";
 
-            var finalContentType = RequestServiceHelper.ResolveContentType(safeFileName, contentType);
+            var finalContentType = RequestServiceHelper.ResolveContentType(
+                safeFileName,
+                contentType);
 
             var url = await _cloudinaryStorage.UploadRawWithPublicIdAsync(
                 fileStream,
@@ -1310,9 +1330,73 @@ namespace AMMS.Application.Services
                 publicId);
 
             request.print_ready_file = url;
+
             StampActualConsultant(request);
 
+            int? orderIdForAutoMethodCheck = null;
+
+            /*
+             * FIX CHÍNH:
+             * Upload print-ready-file được xem là xác nhận layout/file in sẵn sàng.
+             * Nhưng request.process_status giữ nguyên như yêu cầu của bạn.
+             */
+            if (request.order_id.HasValue && request.order_id.Value > 0)
+            {
+                var ord = await _db.orders
+                    .FirstOrDefaultAsync(x => x.order_id == request.order_id.Value, ct);
+
+                if (ord == null)
+                    throw new InvalidOperationException("Order not found for this request.");
+
+                var blockedStatus =
+                    string.Equals(ord.status, "InProcessing", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(ord.status, "Importing", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(ord.status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(ord.status, "Completed", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(ord.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(ord.status, "Cancelled", StringComparison.OrdinalIgnoreCase);
+
+                if (!blockedStatus)
+                {
+                    ord.layout_confirmed = true;
+
+                    /*
+                     * Sau upload print-ready-file:
+                     * - order.status = Pending
+                     * - production nếu auto tạo cũng Pending
+                     * - chưa tạo task, chưa lập lịch
+                     */
+                    ord.status = "Pending";
+                    ord.is_production_ready = false;
+
+                    orderIdForAutoMethodCheck = ord.order_id;
+                }
+            }
+
             await _requestRepo.SaveChangesAsync();
+
+            /*
+             * FIX:
+             * Sau khi lưu file + confirm layout, tự trigger check method.
+             * Nếu chỉ có 1 method khả dụng:
+             * - tạo production shell Pending nếu chưa có
+             * - điền gm_proposed_method
+             * - điền prod_method
+             * - điền is_full_process/sub_product_id/sub_product_used_qty/nvl_qty
+             * - điền gm_note/mgr_note
+             * - production_approval_flow = AUTO_SINGLE_OPTION
+             * - order.is_production_ready = true
+             *
+             * Nếu có 2+ method:
+             * - không auto duyệt
+             * - chờ GM gọi start-ready như flow cũ.
+             */
+            if (orderIdForAutoMethodCheck.HasValue)
+            {
+                QueueRelease(
+                    orderIdForAutoMethodCheck.Value,
+                    autoApproveSingleMethod: true);
+            }
 
             return url;
         }
@@ -1383,15 +1467,14 @@ namespace AMMS.Application.Services
                 try
                 {
                     /*
-                     * Flow mới:
-                     * - QueueRelease sau layout KHÔNG được gọi ExecuteAsync nữa.
+                     * Flow mới sau upload print-ready-file/layout:
+                     * - Không gọi ExecuteAsync.
                      * - Không tạo task.
                      * - Không lập lịch.
                      *
-                     * Chỉ xử lý case đặc biệt:
-                     * - Nếu order chỉ có đúng 1 method sản xuất khả dụng
-                     *   thì tự tạo production shell Pending + auto approve method.
-                     * - Nếu có 2+ method thì không tạo production, đợi GM gọi start-ready.
+                     * Chỉ tự check method:
+                     * - 1 method khả dụng: tạo/fill production shell Pending và auto approve method.
+                     * - 2+ method khả dụng: không auto duyệt, chờ GM start-ready.
                      */
                     if (!autoApproveSingleMethod)
                         return;
@@ -1440,32 +1523,16 @@ namespace AMMS.Application.Services
             }
 
             /*
-             * Nếu order đã có production active thì không tạo lại.
-             */
-            var hasActiveProduction = await db.productions
-                .AsNoTracking()
-                .AnyAsync(x =>
-                    x.order_id == orderId &&
-                    x.end_date == null &&
-                    (
-                        x.prod_kind == null ||
-                        x.prod_kind.ToUpper() != "GROUP"
-                    ),
-                    ct);
-
-            if (hasActiveProduction)
-            {
-                _logger.LogInformation(
-                    "[QueueRelease] Skip because production shell already exists. OrderId={OrderId}",
-                    orderId);
-                return;
-            }
-
-            /*
-             * Hàm này sẽ:
-             * - check số method khả dụng
-             * - nếu đúng 1 method thì tạo production Pending
-             * - nếu 0 hoặc 2+ method thì không tạo gì
+             * FIX:
+             * Không return khi đã có production shell.
+             *
+             * Lý do:
+             * - Có thể production shell đã tồn tại nhưng còn Pending/WAITING_MANAGER/prod_method null.
+             * - Nếu return ở đây thì order chỉ có 1 method vẫn không được auto duyệt.
+             *
+             * Đẩy toàn bộ quyết định vào AutoCreatePendingProductionAfterLayoutIfSingleMethodAsync:
+             * - Nếu đã approved thật rồi thì hàm đó tự skip.
+             * - Nếu shell chưa approved thì hàm đó sẽ fill data auto.
              */
             var result = await productionService.AutoCreatePendingProductionAfterLayoutIfSingleMethodAsync(
                 orderId,

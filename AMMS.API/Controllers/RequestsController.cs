@@ -1058,6 +1058,7 @@ namespace AMMS.API.Controllers
                     await tx.CommitAsync(ct);
                 });
 
+                _service.QueueRelease(orderId, autoApproveSingleMethod: true);
                 return Accepted(new
                 {
                     ok = true,

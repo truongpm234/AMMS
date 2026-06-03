@@ -1059,7 +1059,16 @@ namespace AMMS.Application.Services
             };
 
             await _db.productions.AddAsync(groupProd, ct);
+
+            /*
+             * Bắt buộc save trước để groupProd.prod_id có giá trị thật.
+             * Nếu chưa SaveChanges, groupProd.prod_id có thể vẫn = 0,
+             * task_links.group_prod_id sẽ vi phạm FK fk_task_links_group_prod.
+             */
             await _db.SaveChangesAsync(ct);
+
+            if (groupProd.prod_id <= 0)
+                throw new InvalidOperationException("Không tạo được group production id.");
 
             await _hub.Clients.Group(RealtimeGroups.ByRole("production manager"))
                 .SendAsync("group-production", new
@@ -1078,6 +1087,9 @@ namespace AMMS.Application.Services
 
             foreach (var member in segment.Members)
             {
+                if (member.SingleProd == null || member.SingleProd.prod_id <= 0)
+                    throw new InvalidOperationException($"Order {member.Order.order_id} thiếu single production hợp lệ.");
+
                 await _db.prod_orders.AddAsync(new prod_order
                 {
                     prod_id = groupProd.prod_id,
@@ -1119,6 +1131,8 @@ namespace AMMS.Application.Services
             var totalMinutes = Math.Max(1, (int)(plannedEnd - plannedStart).TotalMinutes);
             var minutesPerTask = Math.Max(1, totalMinutes / taskCount);
 
+            var createdGroupTasks = new List<(string processCode, task task)>();
+
             for (var i = 0; i < stepRows.Count; i++)
             {
                 var step = stepRows[i];
@@ -1147,136 +1161,52 @@ namespace AMMS.Application.Services
                 };
 
                 await _db.tasks.AddAsync(groupTask, ct);
-                await _db.SaveChangesAsync(ct);
+                createdGroupTasks.Add((code, groupTask));
+            }
+
+            /*
+             * Save một lần để tất cả groupTask.task_id có giá trị thật.
+             */
+            await _db.SaveChangesAsync(ct);
+
+            foreach (var item in createdGroupTasks)
+            {
+                var code = item.processCode;
+                var groupTask = item.task;
+
+                if (groupTask.task_id <= 0)
+                    throw new InvalidOperationException($"Không tạo được group task cho process_code={code}.");
 
                 foreach (var member in segment.Members)
                 {
+                    /*
+                     * FIX CHÍNH:
+                     * Bắt buộc set group_prod_id = groupProd.prod_id.
+                     * Nếu không set, int mặc định = 0 -> lỗi FK fk_task_links_group_prod.
+                     */
                     await _db.task_links.AddAsync(new task_link
                     {
+                        group_prod_id = groupProd.prod_id,
                         group_task_id = groupTask.task_id,
+
                         single_prod_id = member.SingleProd.prod_id,
+                        single_task_id = null,
+                        original_single_task_id = null,
+
                         order_id = member.Order.order_id,
                         process_code = code,
                         qty_plan = member.Item.quantity,
+
                         status = "Active",
                         created_at = now
                     }, ct);
                 }
-
-                await _db.SaveChangesAsync(ct);
             }
+
+            await _db.SaveChangesAsync(ct);
 
             return groupProd;
         }
-
-        private async Task ValidateSingleTasksCanBeDeletedForGroupAsync(
-    List<task> tasksToDelete,
-    List<task> allSingleTasks,
-    CancellationToken ct)
-        {
-            if (tasksToDelete == null || tasksToDelete.Count == 0)
-                return;
-
-            var taskIdsToDelete = tasksToDelete
-                .Select(x => x.task_id)
-                .Distinct()
-                .ToList();
-
-            var taskIdDeleteSet = taskIdsToDelete.ToHashSet();
-
-            var allTaskIds = allSingleTasks
-                .Select(x => x.task_id)
-                .Distinct()
-                .ToList();
-
-            var taskIdsWithLogs = allTaskIds.Count == 0
-                ? new HashSet<int>()
-                : (await _db.task_logs
-                    .AsNoTracking()
-                    .Where(x =>
-                        x.task_id.HasValue &&
-                        allTaskIds.Contains(x.task_id.Value))
-                    .Select(x => x.task_id!.Value)
-                    .Distinct()
-                    .ToListAsync(ct))
-                    .ToHashSet();
-
-            var alreadyLinkedTaskIds = await _db.task_links
-    .AsNoTracking()
-    .Where(x =>
-        (
-            x.single_task_id.HasValue &&
-            taskIdsToDelete.Contains(x.single_task_id.Value)
-        )
-        ||
-        (
-            x.original_single_task_id.HasValue &&
-            taskIdsToDelete.Contains(x.original_single_task_id.Value)
-        ))
-    .Where(x =>
-        x.status == null ||
-        x.status.ToUpper() != "CANCELLED")
-    .Select(x => x.original_single_task_id ?? x.single_task_id)
-    .ToListAsync(ct);
-
-            if (alreadyLinkedTaskIds.Count > 0)
-            {
-                throw new InvalidOperationException(
-                    $"Có task đã được ghép trước đó: {string.Join(",", alreadyLinkedTaskIds.Where(x => x.HasValue).Select(x => x!.Value))}");
-            }
-
-            foreach (var t in tasksToDelete)
-            {
-                var code = NormProcessCode(t.process?.process_code);
-
-                if (taskIdsWithLogs.Contains(t.task_id) ||
-                    string.Equals(t.status, "Ready", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(t.status, "InProcessing", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
-                    t.start_time != null ||
-                    t.end_time != null)
-                {
-                    throw new InvalidOperationException(
-                        $"Không thể ghép/xóa công đoạn {code} của production {t.prod_id} vì task {t.task_id} đã bắt đầu, đã Finished hoặc đã có log.");
-                }
-
-                if (!t.prod_id.HasValue || !t.seq_num.HasValue)
-                    throw new InvalidOperationException($"Task {t.task_id} thiếu prod_id hoặc seq_num.");
-
-                var laterStarted = allSingleTasks.Any(x =>
-                    x.prod_id == t.prod_id &&
-                    x.task_id != t.task_id &&
-                    !taskIdDeleteSet.Contains(x.task_id) &&
-                    x.seq_num.HasValue &&
-                    x.seq_num.Value > t.seq_num.Value &&
-                    (
-                        taskIdsWithLogs.Contains(x.task_id) ||
-                        string.Equals(x.status, "Ready", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(x.status, "InProcessing", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
-                        x.start_time != null ||
-                        x.end_time != null
-                    ));
-
-                if (laterStarted)
-                {
-                    throw new InvalidOperationException(
-                        $"Không thể ghép/xóa task {t.task_id} của production {t.prod_id} vì công đoạn phía sau đã bắt đầu hoặc đã có log.");
-                }
-            }
-        }
-
-        private static int ResolveDepartmentDurationDays(string? departmentCode)
-        {
-            return NormProcessCode(departmentCode) switch
-            {
-                "DEPT_1" => 3,
-                "DEPT_2" => 2,
-                "DEPT_3" => 2,
-                _ => 1
-            };
-        }
-
         private static string ResolveTaskMachineFromProcess(product_type_process step)
         {
             if (!string.IsNullOrWhiteSpace(step.machine))

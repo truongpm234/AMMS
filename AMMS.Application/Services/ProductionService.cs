@@ -659,19 +659,34 @@ namespace AMMS.Application.Services
                             $"Chỉ có một phương thức khả dụng là {onlyAvailableMethod}, không thể đề xuất {proposedMethod}.");
                     }
 
-                    /*
-                     * Giữ lại đề xuất GM nếu có.
-                     * Nếu GM không đề xuất gì thì có thể lưu chính method auto để tracking.
-                     */
                     prod.gm_proposed_method ??= onlyAvailableMethod;
-                    await _rt.Clients.Group(RealtimeGroups.ByRole("production manager")).SendAsync("auto scheduled", new { message = $"Lệnh sản xuất {prod.prod_id} đã được tự động duyệt" });
-                    await _notiService.CreateNotfi(6, $"Lệnh sản xuất {prod.prod_id} đã được tự động duyệt", null, prod.prod_id, "Scheduled");
+
+                    await _rt.Clients
+                        .Group(RealtimeGroups.ByRole("production manager"))
+                        .SendAsync("auto scheduled", new
+                        {
+                            message = $"Lệnh sản xuất {prod.prod_id} đã được tự động duyệt"
+                        });
+
+                    await _notiService.CreateNotfi(
+                        6,
+                        $"Lệnh sản xuất {prod.prod_id} đã được tự động duyệt",
+                        null,
+                        prod.prod_id,
+                        "Scheduled");
 
                     var selectedSubOptionForAuto = onlyAvailableMethod switch
                     {
                         "SUB" => bestSubEnoughOption,
                         "BOTH" => bestSubPartialOption,
                         _ => null
+                    };
+
+                    var selectedSubQtyForAuto = onlyAvailableMethod switch
+                    {
+                        "SUB" => orderQty,
+                        "BOTH" => selectedSubOptionForAuto?.Sub.quantity ?? 0,
+                        _ => 0
                     };
 
                     await ApplyAutoProductionMethodAsync(
@@ -681,24 +696,16 @@ namespace AMMS.Application.Services
                         onlyAvailableMethod,
                         orderQty,
                         selectedSubOptionForAuto?.Sub.id,
+                        selectedSubQtyForAuto,
                         ct);
-
-                    prod.production_approval_flow = ProductionApprovalFlowHelper.AutoSingleOption;
-
-                    var confirmedMethod = prod.prod_method;
-
-                    if (!string.IsNullOrWhiteSpace(confirmedMethod))
-                    {
-                        var confirmedEstimate = await LoadAcceptedEstimateOrThrowAsync(
-                            req,
-                            ct);
-                    }
 
                     prod.production_approval_flow = ProductionApprovalFlowHelper.AutoSingleOption;
                     prod.status = "Pending";
 
+                    ord.status = "Pending";
                     ord.is_enough = true;
                     ord.is_production_ready = true;
+                    ord.production_id = prod.prod_id;
 
                     await _db.SaveChangesAsync(ct);
                     await tx.CommitAsync(ct);
@@ -828,6 +835,7 @@ namespace AMMS.Application.Services
     string method,
     int orderQty,
     int? matchedSubProductId,
+    int matchedSubProductQty,
     CancellationToken ct)
         {
             method = (method ?? "").Trim().ToUpperInvariant();
@@ -849,19 +857,36 @@ namespace AMMS.Application.Services
                     ? false
                     : null;
 
-            prod.sub_product_id = method == "SUB" || method == "BOTH"
-                ? matchedSubProductId
-                : null;
+            if (method == "NVL")
+            {
+                prod.sub_product_id = null;
+                prod.sub_product_used_qty = 0;
+                prod.nvl_qty = orderQty;
+            }
+            else if (method == "SUB")
+            {
+                if (!matchedSubProductId.HasValue || matchedSubProductId.Value <= 0)
+                    throw new InvalidOperationException("Auto SUB thiếu sub_product_id.");
 
-            prod.sub_product_used_qty = method == "SUB" || method == "BOTH"
-                ? orderQty
-                : 0;
+                prod.sub_product_id = matchedSubProductId.Value;
+                prod.sub_product_used_qty = orderQty;
+                prod.nvl_qty = 0;
+            }
+            else if (method == "BOTH")
+            {
+                if (!matchedSubProductId.HasValue || matchedSubProductId.Value <= 0)
+                    throw new InvalidOperationException("Auto BOTH thiếu sub_product_id.");
 
-            prod.nvl_qty = method == "NVL"
-                ? orderQty
-                : method == "BOTH"
-                    ? Math.Max(orderQty - (prod.sub_product_used_qty), 0)
-                    : 0;
+                if (matchedSubProductQty <= 0)
+                    throw new InvalidOperationException("Auto BOTH thiếu số lượng BTP hợp lệ.");
+
+                if (matchedSubProductQty >= orderQty)
+                    throw new InvalidOperationException("BTP đã đủ số lượng, không nên auto BOTH.");
+
+                prod.sub_product_id = matchedSubProductId.Value;
+                prod.sub_product_used_qty = matchedSubProductQty;
+                prod.nvl_qty = orderQty - matchedSubProductQty;
+            }
 
             prod.gm_note = "Hệ thống tự đề xuất vì chỉ có một phương thức sản xuất khả dụng.";
             prod.mgr_note = "Hệ thống tự duyệt vì chỉ có một phương thức sản xuất khả dụng.";
@@ -875,6 +900,13 @@ namespace AMMS.Application.Services
             prod.actual_start_date = null;
             prod.end_date = null;
 
+            /*
+             * Chưa xuất kho BTP/NVL ở bước này.
+             * Phiếu xuất kho nên tạo khi GM xác nhận lập lịch.
+             */
+            prod.sub_product_issue_file = null;
+
+            ord.status = "Pending";
             ord.is_production_ready = true;
             ord.is_enough = true;
             ord.production_id = prod.prod_id;
@@ -4328,6 +4360,7 @@ namespace AMMS.Application.Services
                 methods.Add("BOTH");
 
             int? matchedSubProductId = null;
+            var matchedSubProductQty = 0;
 
             /*
              * matched_sub_product_id chỉ cần cho SUB/BOTH.
@@ -4336,10 +4369,12 @@ namespace AMMS.Application.Services
             if (canUseSub)
             {
                 matchedSubProductId = bestSubEnoughOption?.Sub.id;
+                matchedSubProductQty = orderQty;
             }
             else if (canUseBoth)
             {
                 matchedSubProductId = bestSubPartialOption?.Sub.id;
+                matchedSubProductQty = bestSubPartialOption?.Sub.quantity ?? 0;
             }
 
             return new ProductionMethodAvailability
@@ -4351,6 +4386,8 @@ namespace AMMS.Application.Services
                 both_enough = canUseBoth,
 
                 matched_sub_product_id = matchedSubProductId,
+                matched_sub_product_qty = matchedSubProductQty,
+
                 available_methods = methods
             };
         }
@@ -4396,7 +4433,8 @@ namespace AMMS.Application.Services
                 }
 
                 /*
-                 * Chỉ xử lý order Pending.
+                 * Chỉ xử lý order đang Pending.
+                 * Nếu order đã Scheduled/InProcessing/Importing thì không auto sửa method nữa.
                  */
                 if (!string.Equals(ord.status, "Pending", StringComparison.OrdinalIgnoreCase))
                 {
@@ -4438,7 +4476,14 @@ namespace AMMS.Application.Services
                     .OrderByDescending(x => x.prod_id)
                     .FirstOrDefaultAsync(ct);
 
-                if (existingProd != null)
+                /*
+                 * FIX:
+                 * Nếu production đã có method được duyệt thật sự thì không ghi đè.
+                 * Nhưng nếu production chỉ là shell Pending/WAITING_MANAGER/prod_method null
+                 * thì vẫn cho auto fill nếu chỉ có 1 method khả dụng.
+                 */
+                if (existingProd != null &&
+                    IsProductionMethodAlreadyApprovedForAutoSingleOption(existingProd, ord))
                 {
                     await tx.CommitAsync(ct);
 
@@ -4448,28 +4493,52 @@ namespace AMMS.Application.Services
                         order_id = orderId,
                         prod_id = existingProd.prod_id,
                         method = existingProd.prod_method,
-                        reason = "Production shell already exists."
+                        method_count = 1,
+                        available_methods = new List<string>
+                {
+                    existingProd.prod_method ?? ""
+                }
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .ToList(),
+                        reason = "Production đã có method được duyệt, không auto ghi đè."
                     };
                 }
 
                 var availability = await ResolveProductionMethodAvailabilityAsync(
                     ord,
                     req,
-                    prod: null,
+                    existingProd,
                     ct);
 
                 /*
-                 * Nếu 0 hoặc 2+ method thì không tạo production.
-                 * GM sẽ gọi start-ready.
+                 * Nếu 0 hoặc 2+ method thì không auto duyệt.
+                 * GM sẽ gọi start-ready để đề xuất, rồi manager duyệt.
                  */
                 if (availability.method_count != 1)
                 {
+                    if (existingProd != null)
+                    {
+                        existingProd.production_approval_flow = ProductionApprovalFlowHelper.WaitingManager;
+                        existingProd.status = "Pending";
+                        existingProd.gm_proposed_method = null;
+                        existingProd.prod_method = null;
+                        existingProd.is_full_process = null;
+                        existingProd.sub_product_id = null;
+                        existingProd.sub_product_used_qty = 0;
+                        existingProd.nvl_qty = 0;
+                    }
+
+                    ord.is_production_ready = false;
+                    ord.is_enough = false;
+
+                    await _db.SaveChangesAsync(ct);
                     await tx.CommitAsync(ct);
 
                     return new AutoCreatePendingProductionResultDto
                     {
                         created = false,
                         order_id = orderId,
+                        prod_id = existingProd?.prod_id,
                         method_count = availability.method_count,
                         available_methods = availability.available_methods,
                         reason = availability.method_count == 0
@@ -4480,11 +4549,14 @@ namespace AMMS.Application.Services
 
                 var method = availability.available_methods[0];
 
-                var prod = await EnsurePendingProductionShellAsync(
+                var prod = existingProd ?? await EnsurePendingProductionShellAsync(
                     ord,
                     req,
                     managerId: null,
                     ct);
+
+                await RollbackPreviousSubProductSelectionAsync(prod, ct);
+                await RollbackSubProductFinishedTasksAsync(prod.prod_id, ct);
 
                 await ApplyAutoProductionMethodAsync(
                     ord,
@@ -4493,28 +4565,12 @@ namespace AMMS.Application.Services
                     method,
                     availability.order_qty,
                     availability.matched_sub_product_id,
+                    availability.matched_sub_product_qty,
                     ct);
 
-                /*
-                 * Flow auto 1 method:
-                 * xem như GM đề xuất và Manager duyệt luôn.
-                 * Nhưng CHƯA lập lịch, CHƯA tạo task.
-                 */
                 prod.status = "Pending";
                 prod.prod_kind = "SINGLE";
-                prod.gm_proposed_method = method;
-                prod.prod_method = method;
                 prod.production_approval_flow = ProductionApprovalFlowHelper.AutoSingleOption;
-
-                prod.gm_note = "Hệ thống tự đề xuất vì chỉ có một phương thức sản xuất khả dụng.";
-                prod.mgr_note = "Hệ thống tự duyệt vì chỉ có một phương thức sản xuất khả dụng.";
-
-                prod.group_process_codes = await ResolveOrderRouteCsvAsync(orderId, ct);
-
-                prod.planned_start_date = null;
-                prod.planned_end_date = null;
-                prod.actual_start_date = null;
-                prod.end_date = null;
 
                 ord.status = "Pending";
                 ord.is_production_ready = true;
@@ -4532,9 +4588,36 @@ namespace AMMS.Application.Services
                     method = method,
                     method_count = 1,
                     available_methods = availability.available_methods,
-                    reason = "Chỉ có 1 method khả dụng nên hệ thống tự tạo production Pending và auto approve method."
+                    reason = "Chỉ có 1 method khả dụng nên hệ thống tự tạo/fill production Pending và auto approve method."
                 };
             });
+        }
+
+        private static bool IsProductionMethodAlreadyApprovedForAutoSingleOption(
+    production prod,
+    order ord)
+        {
+            if (prod == null)
+                return false;
+
+            var method = (prod.prod_method ?? "").Trim().ToUpperInvariant();
+
+            if (method is not ("NVL" or "SUB" or "BOTH"))
+                return false;
+
+            var flow = (prod.production_approval_flow ?? "").Trim().ToUpperInvariant();
+
+            var isApprovedFlow =
+                string.Equals(flow, ProductionApprovalFlowHelper.AutoSingleOption, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(flow, ProductionApprovalFlowHelper.ManualManager, StringComparison.OrdinalIgnoreCase);
+
+            if (!isApprovedFlow)
+                return false;
+
+            if (ord.is_production_ready != true)
+                return false;
+
+            return true;
         }
 
         private async Task<string> ResolveOrderRouteCsvAsync(
@@ -5431,6 +5514,14 @@ namespace AMMS.Application.Services
             public bool both_enough { get; set; }
 
             public int? matched_sub_product_id { get; set; }
+
+            /*
+             * FIX:
+             * Dùng cho BOTH.
+             * Nếu BOTH thì sub_product_used_qty không được set = orderQty,
+             * mà phải set bằng số BTP thật sự dùng.
+             */
+            public int matched_sub_product_qty { get; set; }
 
             public List<string> available_methods { get; set; } = new();
 

@@ -18,9 +18,41 @@ namespace AMMS.Shared.DTOs.Orders
     public class OrderMaterialsResponse
     {
         public int order_id { get; set; }
-        public int? order_request_id { get; set; }
+
         public string? order_code { get; set; }
+
+        public int order_request_id { get; set; }
+
+        /*
+         * NEW:
+         * Kích thước sản phẩm thật của khách.
+         * Lấy ưu tiên từ order_request.product_length_mm/product_width_mm/product_height_mm.
+         */
+        public int? product_length_mm { get; set; }
+
+        public int? product_width_mm { get; set; }
+
+        public int? product_height_mm { get; set; }
+
+        /*
+         * NEW:
+         * Kích thước in/khổ in.
+         * Lấy từ order_request.print_length_mm/print_width_mm.
+         */
+        public int? print_length_mm { get; set; }
+
+        public int? print_width_mm { get; set; }
+
+        /*
+         * NEW:
+         * Chuỗi hiển thị nhanh cho FE.
+         */
+        public string? product_size_text { get; set; }
+
+        public string? print_size_text { get; set; }
 
         public List<OrderMaterialLineDto> items { get; set; } = new();
     }
+
+
 }
