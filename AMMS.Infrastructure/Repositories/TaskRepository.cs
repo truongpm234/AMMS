@@ -329,7 +329,9 @@ namespace AMMS.Infrastructure.Repositories
             return qty;
         }
 
-        public async Task<TaskQtyPolicyDto?> GetQtyPolicyAsync(int taskId, CancellationToken ct = default)
+        public async Task<TaskQtyPolicyDto?> GetQtyPolicyAsync(
+    int taskId,
+    CancellationToken ct = default)
         {
             var taskRow = await _db.tasks
                 .AsNoTracking()
@@ -343,7 +345,14 @@ namespace AMMS.Infrastructure.Repositories
                 .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.prod_id == taskRow.prod_id.Value, ct);
 
-            if (prod == null || !prod.order_id.HasValue)
+            if (prod == null)
+                return null;
+
+            /*
+             * GROUP production có order_id = null.
+             * GROUP đang được TasksController xử lý bằng ResolveGroupQrQtyPolicyAsync.
+             */
+            if (!prod.order_id.HasValue || prod.order_id.Value <= 0)
                 return null;
 
             var req = await _db.order_requests
@@ -355,6 +364,194 @@ namespace AMMS.Infrastructure.Repositories
             if (req == null)
                 return null;
 
+            var est = await LoadAcceptedEstimateForPolicyAsync(req, ct);
+            if (est == null)
+                return null;
+
+            var currentCode = NormPolicyCode(taskRow.process?.process_code);
+            var currentName = string.IsNullOrWhiteSpace(taskRow.process?.process_name)
+                ? currentCode
+                : taskRow.process!.process_name!;
+
+            if (string.IsNullOrWhiteSpace(currentCode))
+                return null;
+
+            var currentProdRoute = await _db.tasks
+                .AsNoTracking()
+                .Include(x => x.process)
+                .Where(x => x.prod_id == taskRow.prod_id.Value)
+                .OrderBy(x => x.seq_num)
+                .ThenBy(x => x.task_id)
+                .ToListAsync(ct);
+
+            var fullRouteCodes = await ResolveFullRouteCodesForPolicyAsync(
+                prod.order_id.Value,
+                currentProdRoute.Select(x => (string?)x.process?.process_code).ToList(),
+                ct);
+
+            if (fullRouteCodes.Count == 0)
+                return null;
+
+            var fullStageIndex = fullRouteCodes.FindIndex(x =>
+                string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase));
+
+            if (fullStageIndex < 0)
+            {
+                fullStageIndex = currentProdRoute.FindIndex(x => x.task_id == taskId);
+                if (fullStageIndex < 0)
+                    fullStageIndex = 0;
+            }
+
+            var orderQty = await ResolvePolicyProductionQtyAsync(prod, req, ct);
+
+            var nUp = SafePositive(est.n_up, 1);
+            var sheetsRequired = Math.Max(est.sheets_required, 0);
+            var sheetsWaste = Math.Max(est.sheets_waste, 0);
+            var sheetsTotal = Math.Max(est.sheets_total, sheetsRequired + sheetsWaste);
+
+            /*
+             * number_of_plates nằm ở order_request, không nằm ở cost_estimate.
+             */
+            var numberOfPlates = SafePositive(req.number_of_plates ?? 0, 1);
+
+            if (sheetsRequired <= 0)
+                sheetsRequired = Math.Max(1, (int)Math.Ceiling(orderQty / (decimal)nUp));
+
+            if (sheetsTotal <= 0)
+                sheetsTotal = sheetsRequired + sheetsWaste;
+
+            if (sheetsTotal <= 0)
+                sheetsTotal = sheetsRequired;
+
+            if (sheetsTotal <= 0)
+                sheetsTotal = 1;
+
+            /*
+             * StageQuantityHelper.BuildPolicy trả về StageQtyProfile.
+             * Không truyền trực tiếp vào hàm nhận TaskQtyPolicyDto.
+             * Map qua StagePolicyCore để tránh lỗi type.
+             */
+            var rawProfile = StageQuantityHelper.BuildPolicy(
+                currentCode: currentCode,
+                currentStageIndex: fullStageIndex,
+                routeProcessCodes: fullRouteCodes.Cast<string?>().ToList(),
+                sheetsTotal: sheetsTotal,
+                nUp: nUp,
+                numberOfPlates: numberOfPlates,
+                tokenQtyMax: TokenQtyMax);
+
+            var baseProfile = new StagePolicyCore
+            {
+                qty_unit = rawProfile.QtyUnit,
+                min_allowed = rawProfile.MinAllowed,
+                max_allowed = rawProfile.MaxAllowed,
+                suggested_qty = rawProfile.SuggestedQty
+            };
+
+            var effective = await ResolveEffectiveQtyForQrPolicyAsync(
+                prod: prod,
+                currentTask: taskRow,
+                currentCode: currentCode,
+                fullRouteCodes: fullRouteCodes,
+                fullStageIndex: fullStageIndex,
+                orderQty: orderQty,
+                est: est,
+                baseProfile: baseProfile,
+                ct: ct);
+
+            var suggestedQty = Math.Max((int)Math.Ceiling(effective.qty), 1);
+            var minAllowed = 1;
+            var maxAllowed = suggestedQty;
+
+            /*
+             * Nếu không có actual/reference override thì giữ policy gốc.
+             */
+            if (!effective.has_override)
+            {
+                minAllowed = Math.Max(baseProfile.min_allowed, 1);
+                maxAllowed = Math.Max(baseProfile.max_allowed, minAllowed);
+                suggestedQty = Math.Clamp(baseProfile.suggested_qty, minAllowed, maxAllowed);
+            }
+
+            return new TaskQtyPolicyDto
+            {
+                task_id = taskId,
+
+                process_code = currentCode,
+                process_name = currentName,
+
+                qty_unit = effective.unit ?? baseProfile.qty_unit,
+
+                min_allowed = minAllowed,
+                max_allowed = maxAllowed,
+                suggested_qty = suggestedQty,
+                happy_case_qty = suggestedQty,
+
+                order_qty = orderQty,
+
+                sheets_required = sheetsRequired,
+                sheets_waste = sheetsWaste,
+                sheets_total = sheetsTotal,
+                n_up = nUp,
+                number_of_plates = numberOfPlates,
+
+                /*
+                 * Dùng seq_num thật để SPLIT không bị BOI = stage_index 0.
+                 */
+                stage_index = taskRow.seq_num ?? fullStageIndex,
+                stage_count = fullRouteCodes.Count,
+
+                production_output_qty = suggestedQty,
+                production_output_unit = effective.unit ?? baseProfile.qty_unit,
+
+                input_mode = taskRow.input_mode,
+
+                allow_manual_input =
+                    string.Equals(taskRow.input_mode, "MANUAL", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase),
+
+                can_use_manual_input = true,
+
+                manual_input_optional = !string.Equals(
+                    taskRow.input_mode,
+                    "MANUAL",
+                    StringComparison.OrdinalIgnoreCase),
+
+                is_group_production = string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase),
+                is_split_production = string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase),
+
+                group_prod_id = string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase)
+                    ? prod.prod_id
+                    : null,
+
+                split_prod_id = string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase)
+                    ? prod.prod_id
+                    : null,
+
+                group_total_qty = prod.group_total_qty,
+
+                manual_input_hint =
+                    effective.has_override
+                        ? effective.hint
+                        : "Policy lấy theo estimate chuẩn của full route sản xuất."
+            };
+        }
+
+        private sealed class EffectiveQrQtyPolicy
+        {
+            public bool has_override { get; init; }
+
+            public decimal qty { get; init; }
+
+            public string? unit { get; init; }
+
+            public string? hint { get; init; }
+        }
+
+        private async Task<cost_estimate?> LoadAcceptedEstimateForPolicyAsync(
+            order_request req,
+            CancellationToken ct)
+        {
             cost_estimate? est = null;
 
             if (req.accepted_estimate_id.HasValue && req.accepted_estimate_id.Value > 0)
@@ -374,225 +571,378 @@ namespace AMMS.Infrastructure.Repositories
                 .ThenByDescending(x => x.estimate_id)
                 .FirstOrDefaultAsync(ct);
 
-            var route = await _db.tasks
+            return est;
+        }
+
+        private sealed class StagePolicyCore
+        {
+            public string qty_unit { get; init; } = "sp";
+
+            public int min_allowed { get; init; } = 1;
+
+            public int max_allowed { get; init; } = 1;
+
+            public int suggested_qty { get; init; } = 1;
+        }
+
+        private async Task<List<string>> ResolveFullRouteCodesForPolicyAsync(
+            int orderId,
+            IReadOnlyList<string?> fallbackTaskRoute,
+            CancellationToken ct)
+        {
+            var item = await _db.order_items
                 .AsNoTracking()
-                .Include(x => x.process)
-                .Where(x => x.prod_id == taskRow.prod_id.Value)
-                .OrderBy(x => x.seq_num)
-                .ThenBy(x => x.task_id)
-                .ToListAsync(ct);
+                .Where(x => x.order_id == orderId)
+                .OrderBy(x => x.item_id)
+                .Select(x => new
+                {
+                    x.product_type_id,
+                    x.production_process
+                })
+                .FirstOrDefaultAsync(ct);
 
-            if (route.Count == 0)
-                return null;
+            var fromOrderItem = ParsePolicyRoute(item?.production_process);
+            if (fromOrderItem.Count > 0)
+                return fromOrderItem;
 
-            var currentIndex = route.FindIndex(x => x.task_id == taskId);
-            if (currentIndex < 0)
-                currentIndex = 0;
+            if (item?.product_type_id != null && item.product_type_id.Value > 0)
+            {
+                var fromProductType = await _db.product_type_processes
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.product_type_id == item.product_type_id.Value &&
+                        (x.is_active ?? true))
+                    .OrderBy(x => x.seq_num)
+                    .Select(x => x.process_code)
+                    .ToListAsync(ct);
 
-            var stage = route[currentIndex];
+                var normalized = fromProductType
+                    .Select(NormPolicyCode)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .ToList();
 
-            var pcode = Norm(stage.process?.process_code);
-            var pname = string.IsNullOrWhiteSpace(stage.process?.process_name)
-                ? pcode
-                : stage.process!.process_name!;
+                if (normalized.Count > 0)
+                    return normalized;
+            }
 
-            var orderQty = await ResolvePolicyProductionQtyAsync(prod, req, ct);
+            return (fallbackTaskRoute ?? Array.Empty<string?>())
+                .Select(NormPolicyCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+        }
 
-            var sheetsRequired = Math.Max(est?.sheets_required ?? 0, 0);
-            var sheetsWaste = Math.Max(est?.sheets_waste ?? 0, 0);
-            var sheetsTotal = Math.Max(est?.sheets_total ?? 0, sheetsRequired + sheetsWaste);
-            var nUp = SafePositive(est?.n_up ?? 0, 1);
-            var numberOfPlates = SafePositive(req.number_of_plates ?? 0, 1);
-
-            if (sheetsRequired <= 0)
-                sheetsRequired = Math.Max(1, (int)Math.Ceiling(orderQty / (decimal)nUp));
-
-            if (sheetsTotal <= 0)
-                sheetsTotal = sheetsRequired + sheetsWaste;
-
-            if (sheetsTotal <= 0)
-                sheetsTotal = sheetsRequired;
-
-            if (sheetsTotal <= 0)
-                sheetsTotal = 1;
-
-            var routeCodes = route
-    .Select(x => (string?)x.process?.process_code)
-    .ToList();
-
-            if (est == null)
-                return null;
+        private async Task<EffectiveQrQtyPolicy> ResolveEffectiveQtyForQrPolicyAsync(
+    production prod,
+    task currentTask,
+    string currentCode,
+    IReadOnlyList<string> fullRouteCodes,
+    int fullStageIndex,
+    int orderQty,
+    cost_estimate est,
+    StagePolicyCore baseProfile,
+    CancellationToken ct)
+        {
+            var method = NormPolicyCode(prod.prod_method);
+            var kind = NormPolicyCode(prod.prod_kind);
 
             /*
-             * FIX SUB SINGLE:
-             * Nếu production là SINGLE + SUB thì các công đoạn sau BTP
-             * phải validate theo actual output của công đoạn trước,
-             * không validate theo estimate/NVL.
-             *
-             * Ví dụ:
-             * IN actual = 2835
-             * PHU max_allowed phải = 2835
-             * không được dùng estimate 2145.
+             * RALO là bản kẽm, CAT là công đoạn cắt.
+             * Không ép theo actual previous như các công đoạn BTP downstream.
              */
-            var singleSubActualPolicy = await TryBuildSingleSubActualPreviousPolicyAsync(
-                taskId: taskId,
-                stage: stage,
-                prod: prod,
-                req: req,
-                est: est,
-                route: route,
-                currentIndex: currentIndex,
-                routeCodes: routeCodes,
-                orderQty: orderQty,
-                sheetsRequired: sheetsRequired,
-                sheetsWaste: sheetsWaste,
-                sheetsTotal: sheetsTotal,
-                nUp: nUp,
-                numberOfPlates: numberOfPlates,
-                ct: ct);
+            if (ProductionFlowHelper.IsRalo(currentCode) || IsCutProcess(currentCode))
+            {
+                return new EffectiveQrQtyPolicy
+                {
+                    has_override = false,
+                    qty = baseProfile.suggested_qty,
+                    unit = baseProfile.qty_unit,
+                    hint = null
+                };
+            }
 
-            if (singleSubActualPolicy != null)
-                return singleSubActualPolicy;
+            /*
+             * Ưu tiên actual output công đoạn trước.
+             * Ví dụ: BOI sau CAN thì lấy actual CAN.
+             */
+            var previousCode = fullStageIndex > 0
+                ? fullRouteCodes[fullStageIndex - 1]
+                : "";
 
-            var subPolicy = await TryBuildSubOrBothDownstreamQtyPolicyAsync(
-    currentTask: stage,
-    prod: prod,
-    req: req,
-    est: est,
-    routeCodes: routeCodes,
-    policyProductQty: orderQty,
-    ct: ct);
+            if (!string.IsNullOrWhiteSpace(previousCode))
+            {
+                var previousActual = await ResolveActualOutputQtyForOrderProcessAsync(
+                    prod.order_id!.Value,
+                    previousCode,
+                    ct);
 
-            if (subPolicy != null)
-                return subPolicy;
+                if (previousActual > 0)
+                {
+                    return new EffectiveQrQtyPolicy
+                    {
+                        has_override = true,
+                        qty = previousActual,
+                        unit = ResolveUnitForDownstreamStage(currentCode),
+                        hint =
+                            $"Số lượng QR lấy theo actual output của công đoạn trước {previousCode}. " +
+                            $"ActualPrevious={Math.Round(previousActual, 4, MidpointRounding.AwayFromZero)}."
+                    };
+                }
+            }
 
-            var bothQtyContext = await ResolveBothProductionQtyContextAsync(
+            /*
+             * Nếu chưa có actual previous thì lấy theo estimated input/output của full route.
+             */
+            var downstreamStageQty = ResolveDownstreamStageEstimatedQtyForPolicy(
                 prod,
+                currentCode,
+                fullRouteCodes,
                 orderQty,
-                routeCodes,
-                ct);
+                est);
 
-            var qtyProfile = StageQuantityHelper.BuildPolicy(
-                currentCode: pcode,
-                currentStageIndex: currentIndex,
-                routeProcessCodes: routeCodes,
-                sheetsTotal: sheetsTotal,
+            if (downstreamStageQty > 0)
+            {
+                /*
+                 * BOTH ở công đoạn đầu sau sub boundary:
+                 * số lượng = actual phần NVL trước đó + sub_product_used_qty.
+                 */
+                if (method == "BOTH")
+                {
+                    var subCodes = await ResolveSubProductProcessCodesForPolicyAsync(prod, ct);
+
+                    var isFirstAfterSub = IsFirstStageAfterSubBoundaryForPolicy(
+                        currentCode,
+                        fullRouteCodes.Cast<string?>().ToList(),
+                        subCodes);
+
+                    if (isFirstAfterSub && fullStageIndex > 0)
+                    {
+                        var actualNvlPrev = await ResolveActualOutputQtyForOrderProcessAsync(
+                            prod.order_id!.Value,
+                            fullRouteCodes[fullStageIndex - 1],
+                            ct);
+
+                        var combined = actualNvlPrev + Math.Max(prod.sub_product_used_qty, 0);
+
+                        if (combined > 0)
+                        {
+                            return new EffectiveQrQtyPolicy
+                            {
+                                has_override = true,
+                                qty = combined,
+                                unit = ResolveUnitForDownstreamStage(currentCode),
+                                hint =
+                                    $"BOTH: số lượng QR = actual phần NVL trước đó + BTP đã cấp. " +
+                                    $"ActualNVLPrev={Math.Round(actualNvlPrev, 4, MidpointRounding.AwayFromZero)}, " +
+                                    $"SubUsed={prod.sub_product_used_qty}, " +
+                                    $"Combined={Math.Round(combined, 4, MidpointRounding.AwayFromZero)}."
+                            };
+                        }
+                    }
+                }
+
+                if (method == "SUB" ||
+                    method == "BOTH" ||
+                    kind == "SPLIT" ||
+                    currentCode is "PHU" or "CAN" or "CAN_MANG" or "BOI" or "BE" or "DUT" or "DAN")
+                {
+                    return new EffectiveQrQtyPolicy
+                    {
+                        has_override = true,
+                        qty = downstreamStageQty,
+                        unit = ResolveUnitForDownstreamStage(currentCode),
+                        hint =
+                            $"Số lượng QR lấy theo estimated input của công đoạn {currentCode} trên full route. " +
+                            $"EstimatedInput={Math.Round(downstreamStageQty, 4, MidpointRounding.AwayFromZero)}."
+                    };
+                }
+            }
+
+            return new EffectiveQrQtyPolicy
+            {
+                has_override = false,
+                qty = baseProfile.suggested_qty,
+                unit = baseProfile.qty_unit,
+                hint = null
+            };
+        }
+
+        private decimal ResolveDownstreamStageEstimatedQtyForPolicy(
+            production prod,
+            string currentCode,
+            IReadOnlyList<string> fullRouteCodes,
+            int orderQty,
+            cost_estimate est)
+        {
+            if (currentCode is not ("PHU" or "CAN" or "CAN_MANG" or "BOI" or "BE" or "DUT" or "DAN"))
+                return 0m;
+
+            var nUp = est.n_up > 0 ? est.n_up : 1;
+
+            var sheetsBase = est.sheets_required > 0
+                ? est.sheets_required
+                : Math.Max(1, (int)Math.Ceiling(orderQty / (decimal)nUp));
+
+            var stageQty = SubProductionQuantityHelper.ResolveStageQty(
+                currentProcessCode: currentCode,
+                routeProcessCodes: fullRouteCodes.Cast<string?>().ToList(),
+                productQty: orderQty,
                 nUp: nUp,
-                numberOfPlates: numberOfPlates,
-                tokenQtyMax: TokenQtyMax);
+                explicitSheetsBase: sheetsBase,
+                coatingType: est.coating_type);
 
-            var minAllowed = qtyProfile.MinAllowed;
-            var maxAllowed = qtyProfile.MaxAllowed;
-            var suggestedQty = qtyProfile.SuggestedQty;
-            var happyCaseQty = qtyProfile.SuggestedQty;
+            if (stageQty.input_qty > 0)
+                return stageQty.input_qty;
 
-            var previousGroupedCap = await GetPreviousGroupedOutputQtyCapAsync(
-    stage,
-    prod,
-    ct);
+            if (stageQty.output_qty > 0)
+                return stageQty.output_qty;
 
-            if (previousGroupedCap.HasValue && previousGroupedCap.Value > 0)
+            return 0m;
+        }
+
+        private async Task<decimal> ResolveActualOutputQtyForOrderProcessAsync(
+            int orderId,
+            string processCode,
+            CancellationToken ct)
+        {
+            var code = NormPolicyCode(processCode);
+            if (orderId <= 0 || string.IsNullOrWhiteSpace(code))
+                return 0m;
+
+            /*
+             * Ưu tiên group allocation.
+             */
+            var groupQty = await _db.task_qtys
+                .AsNoTracking()
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.process_code != null &&
+                    x.process_code.Trim().ToUpper() == code &&
+                    x.qty_good > 0)
+                .OrderByDescending(x => x.created_at)
+                .Select(x => (decimal?)x.qty_good)
+                .FirstOrDefaultAsync(ct);
+
+            if (groupQty.HasValue && groupQty.Value > 0)
+                return groupQty.Value;
+
+            /*
+             * Direct task trong SINGLE/SPLIT/head production.
+             */
+            var directTaskIds = await (
+                from t in _db.tasks.AsNoTracking()
+
+                join p in _db.productions.AsNoTracking()
+                    on t.prod_id equals p.prod_id
+
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                where p.order_id == orderId
+                      && p.status != "Cancelled"
+                      && pp != null
+                      && pp.process_code != null
+                      && pp.process_code.Trim().ToUpper() == code
+
+                select t.task_id
+            )
+            .Distinct()
+            .ToListAsync(ct);
+
+            return await ResolveLatestFinishedQtyFromTaskIdsAsync(directTaskIds, ct);
+        }
+
+        private async Task<decimal> ResolveLatestFinishedQtyFromTaskIdsAsync(
+            List<int> taskIds,
+            CancellationToken ct)
+        {
+            if (taskIds == null || taskIds.Count == 0)
+                return 0m;
+
+            var logs = await _db.task_logs
+                .AsNoTracking()
+                .Where(x =>
+                    x.task_id.HasValue &&
+                    taskIds.Contains(x.task_id.Value) &&
+                    x.action_type == "Finished" &&
+                    x.qty_good.HasValue &&
+                    x.qty_good.Value > 0)
+                .Select(x => new
+                {
+                    task_id = x.task_id!.Value,
+                    qty_good = x.qty_good!.Value,
+                    log_time = x.log_time,
+                    log_id = x.log_id
+                })
+                .ToListAsync(ct);
+
+            if (logs.Count == 0)
+                return 0m;
+
+            return logs
+                .GroupBy(x => x.task_id)
+                .Select(g => g
+                    .OrderByDescending(x => x.log_time ?? DateTime.MinValue)
+                    .ThenByDescending(x => x.log_id)
+                    .First())
+                .Sum(x => (decimal)x.qty_good);
+        }
+
+        private static string ResolveUnitForDownstreamStage(string? processCode)
+        {
+            var code = NormPolicyCode(processCode);
+
+            return code switch
             {
-                maxAllowed = Math.Min(maxAllowed, previousGroupedCap.Value);
+                "PHU" => "tờ",
+                "CAN" => "tờ",
+                "CAN_MANG" => "tờ",
+                "BOI" => "tờ",
+                "BE" => "sp",
+                "DUT" => "sp",
+                "DAN" => "sp",
+                _ => "sp"
+            };
+        }
 
-                if (maxAllowed <= 0)
-                    maxAllowed = previousGroupedCap.Value;
+        private static List<string> ParsePolicyRoute(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
 
-                minAllowed = 1;
-                suggestedQty = maxAllowed;
-                happyCaseQty = suggestedQty;
-            }
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormPolicyCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndexForPolicy)
+                .ToList();
+        }
 
-            // BOTH:
-            if (bothQtyContext.IsCoveredBySub(currentIndex) &&
-                !string.Equals(pcode, "RALO", StringComparison.OrdinalIgnoreCase))
+        private static string NormPolicyCode(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+        }
+
+        private static int FullRouteIndexForPolicy(string? code)
+        {
+            return NormPolicyCode(code) switch
             {
-                minAllowed = ScaleQtyByRatio(minAllowed, bothQtyContext.NvlRatio);
-                maxAllowed = ScaleQtyByRatio(maxAllowed, bothQtyContext.NvlRatio);
-                suggestedQty = ScaleQtyByRatio(suggestedQty, bothQtyContext.NvlRatio);
-                happyCaseQty = suggestedQty;
-
-                if (maxAllowed < minAllowed)
-                    maxAllowed = minAllowed;
-
-                suggestedQty = Math.Clamp(suggestedQty, minAllowed, maxAllowed);
-            }
-
-            // Ví dụ sub có CAT,IN; tới PHU phải full estimate,
-            var shouldApplyPreviousActualCap =
-                !bothQtyContext.IsFirstStageAfterSub(currentIndex);
-
-            var previousActualCap = await GetPreviousFinishedQtyGoodCapAsync(
-                route,
-                currentIndex,
-                ct);
-
-            if (shouldApplyPreviousActualCap &&
-                previousActualCap.HasValue &&
-                previousActualCap.Value > 0)
-            {
-                maxAllowed = Math.Min(maxAllowed, previousActualCap.Value);
-                if (maxAllowed <= 0)
-                    maxAllowed = previousActualCap.Value;
-
-                minAllowed = 1;
-                suggestedQty = maxAllowed;
-            }
-
-            return new TaskQtyPolicyDto
-            {
-                task_id = taskId,
-                process_code = pcode,
-                process_name = pname,
-                qty_unit = qtyProfile.QtyUnit,
-
-                min_allowed = minAllowed,
-                max_allowed = maxAllowed,
-                suggested_qty = suggestedQty,
-                happy_case_qty = happyCaseQty,
-
-                order_qty = orderQty,
-                sheets_required = sheetsRequired,
-                sheets_waste = sheetsWaste,
-                sheets_total = sheetsTotal,
-                n_up = nUp,
-                number_of_plates = numberOfPlates,
-
-                stage_index = currentIndex,
-                stage_count = route.Count,
-
-                production_output_qty = suggestedQty,
-                production_output_unit = qtyProfile.QtyUnit,
-
-                input_mode = stage.input_mode,
-
-                allow_manual_input =
-        string.Equals(stage.input_mode, "MANUAL", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase),
-
-                can_use_manual_input =
-        string.Equals(stage.input_mode, "MANUAL", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase),
-
-                manual_input_optional = false,
-
-                is_group_production = string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase),
-                is_split_production = string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase),
-
-                group_prod_id = string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase)
-        ? prod.prod_id
-        : null,
-
-                split_prod_id = string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase)
-        ? prod.prod_id
-        : null,
-
-                group_total_qty = prod.group_total_qty,
-
-                manual_input_hint =
-        string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase)
-            ? "Task group cho phép nhập tay NVL, BTP input và output khi finish."
-            : null
+                "RALO" => 1,
+                "CAT" => 2,
+                "IN" => 3,
+                "PHU" => 4,
+                "CAN" => 5,
+                "CAN_MANG" => 5,
+                "BOI" => 6,
+                "BE" => 7,
+                "DUT" => 8,
+                "DAN" => 9,
+                _ => 999
             };
         }
 
@@ -842,53 +1192,10 @@ namespace AMMS.Infrastructure.Repositories
             return 0m;
         }
 
-        private async Task<decimal> ResolveLatestFinishedQtyFromTaskIdsAsync(
-    List<int> taskIds,
-    CancellationToken ct)
-        {
-            if (taskIds == null || taskIds.Count == 0)
-                return 0m;
-
-            var logs = await _db.task_logs
-                .AsNoTracking()
-                .Where(x =>
-                    x.task_id.HasValue &&
-                    taskIds.Contains(x.task_id.Value) &&
-                    x.action_type == "Finished" &&
-                    x.qty_good.HasValue &&
-                    x.qty_good.Value > 0)
-                .Select(x => new
-                {
-                    task_id = x.task_id!.Value,
-                    qty_good = x.qty_good!.Value,
-                    log_time = x.log_time,
-                    log_id = x.log_id,
-                    output_json = x.output_json
-                })
-                .ToListAsync(ct);
-
-            if (logs.Count == 0)
-                return 0m;
-
-            /*
-             * Mỗi task lấy log Finished mới nhất.
-             * Không cộng tất cả log cũ để tránh double khi test/recovery.
-             */
-            var latestPerTask = logs
-                .GroupBy(x => x.task_id)
-                .Select(g => g
-                    .OrderByDescending(x => x.log_time ?? DateTime.MinValue)
-                    .ThenByDescending(x => x.log_id)
-                    .First())
-                .ToList();
-
-            return latestPerTask.Sum(x => (decimal)x.qty_good);
-        }
-
         private static bool IsFirstStageAfterSubBoundaryForPolicy(
-            string? currentProcessCode,
-            IReadOnlyList<string?> routeCodes,
-            IReadOnlyList<string> subCodes)
+    string? currentProcessCode,
+    IReadOnlyList<string?> routeCodes,
+    IReadOnlyList<string> subCodes)
         {
             var route = (routeCodes ?? Array.Empty<string?>())
                 .Select(NormPolicyCode)
@@ -920,8 +1227,8 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         private async Task<List<string>> ResolveSubProductProcessCodesForPolicyAsync(
-            production prod,
-            CancellationToken ct)
+    production prod,
+    CancellationToken ct)
         {
             if (!prod.sub_product_id.HasValue || prod.sub_product_id.Value <= 0)
                 return new List<string>();
@@ -967,28 +1274,6 @@ namespace AMMS.Infrastructure.Repositories
                 return false;
 
             return currentIndex > subIndexes.Max();
-        }
-
-        private static List<string> ParsePolicyRoute(string? csv)
-        {
-            if (string.IsNullOrWhiteSpace(csv))
-                return new List<string>();
-
-            return csv
-                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(NormPolicyCode)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-
-        private static string NormPolicyCode(string? value)
-        {
-            return (value ?? "")
-                .Trim()
-                .ToUpperInvariant()
-                .Replace(" ", "_")
-                .Replace("-", "_");
         }
 
         public async Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken ct = default)

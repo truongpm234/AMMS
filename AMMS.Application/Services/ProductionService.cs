@@ -2903,302 +2903,138 @@ namespace AMMS.Application.Services
             return built;
         }
 
-        private async Task ReleasePreviousProductionMaterialReserveAsync(
-            int prodId,
-            CancellationToken ct)
-        {
-            var refPrefix = $"PROD-RESERVE-{prodId}-";
-
-            var oldMoves = await _db.stock_moves
-                .Where(x =>
-                    x.type == "OUT" &&
-                    x.ref_doc != null &&
-                    x.ref_doc.StartsWith(refPrefix))
-                .ToListAsync(ct);
-
-            if (oldMoves.Count == 0)
-                return;
-
-            var materialIds = oldMoves
-                .Select(x => x.material_id)
-                .Distinct()
-                .ToList();
-
-            var materials = await _db.materials
-                .Where(x => materialIds.Contains(x.material_id))
-                .ToDictionaryAsync(x => x.material_id, ct);
-
-            var now = AppTime.NowVnUnspecified();
-
-            foreach (var move in oldMoves)
-            {
-                if (!materials.TryGetValue((int)move.material_id, out var mat))
-                    continue;
-
-                mat.stock_qty = (mat.stock_qty ?? 0m) + move.qty;
-
-                await _db.stock_moves.AddAsync(new stock_move
-                {
-                    material_id = move.material_id,
-                    type = "IN",
-                    qty = move.qty,
-                    ref_doc = $"PROD-RESERVE-ROLLBACK-{prodId}-{move.move_id}",
-                    user_id = null,
-                    move_date = now,
-                    note = $"Rollback reserve NVL cho production {prodId}. Ref old move={move.ref_doc}"
-                }, ct);
-            }
-        }
-
-        private async Task ReserveMaterialsForConfirmedProductionMethodAsync(
-            production prod,
-            order_request req,
-            cost_estimate est,
-            string method,
-            int orderQty,
-            CancellationToken ct)
-        {
-            if (prod.prod_id <= 0)
-                throw new InvalidOperationException("Production chưa có prod_id.");
-
-            var normalizedMethod = (method ?? "").Trim().ToUpperInvariant();
-
-            if (normalizedMethod is not ("NVL" or "SUB" or "BOTH"))
-                throw new InvalidOperationException($"Method sản xuất không hợp lệ: {method}");
-
-            /*
-             * Tránh reserve trùng khi manager đổi method hoặc confirm lại.
-             */
-            await ReleasePreviousProductionMaterialReserveAsync(prod.prod_id, ct);
-
-            if (normalizedMethod == "SUB")
-                return;
-
-            var item = await _db.order_items
-                .AsNoTracking()
-                .Where(x => x.order_id == prod.order_id)
-                .OrderBy(x => x.item_id)
-                .Select(x => new
-                {
-                    x.production_process
-                })
-                .FirstOrDefaultAsync(ct);
-
-            var reserveItems = await BuildProductionMaterialReserveItemsAsync(
-                req,
-                est,
-                normalizedMethod,
-                orderQty,
-                prod.nvl_qty,
-                prod.sub_product_id,
-                item?.production_process,
-                ct);
-
-            if (reserveItems.Count == 0)
-                return;
-
-            var materialIds = reserveItems
-                .Select(x => x.material_id)
-                .Distinct()
-                .ToList();
-
-            var materials = await _db.materials
-                .Where(x => materialIds.Contains(x.material_id))
-                .ToDictionaryAsync(x => x.material_id, ct);
-
-            foreach (var itemReserve in reserveItems)
-            {
-                if (!materials.TryGetValue(itemReserve.material_id, out var mat))
-                {
-                    throw new InvalidOperationException(
-                        $"Không tìm thấy NVL material_id={itemReserve.material_id} để reserve.");
-                }
-
-                var currentStock = mat.stock_qty ?? 0m;
-
-                if (currentStock < itemReserve.qty)
-                {
-                    throw new InvalidOperationException(
-                        $"Không đủ tồn kho NVL {mat.code} - {mat.name}. " +
-                        $"Tồn={currentStock}, cần reserve={itemReserve.qty} {mat.unit}.");
-                }
-            }
-
-            var now = AppTime.NowVnUnspecified();
-
-            foreach (var itemReserve in reserveItems)
-            {
-                var mat = materials[itemReserve.material_id];
-
-                mat.stock_qty = (mat.stock_qty ?? 0m) - itemReserve.qty;
-
-                await _db.stock_moves.AddAsync(new stock_move
-                {
-                    material_id = itemReserve.material_id,
-                    type = "OUT",
-                    qty = itemReserve.qty,
-                    ref_doc = $"PROD-RESERVE-{prod.prod_id}-{normalizedMethod}",
-                    user_id = null,
-                    move_date = now,
-                    note = $"Reserve NVL khi confirm method {normalizedMethod}. order_id={prod.order_id}, prod_id={prod.prod_id}"
-                }, ct);
-            }
-        }
-
-        public async Task<ForceProductionImportingResponseDto?> ForceSetProductionImportingByProdIdAsync(
+        public async Task<object> MarkImportingAsync(
     int prodId,
+    int? userId,
     CancellationToken ct = default)
         {
-            var strategy = _db.Database.CreateExecutionStrategy();
+            var prod = await _db.productions
+                .FirstOrDefaultAsync(x => x.prod_id == prodId, ct);
 
-            return await strategy.ExecuteAsync(async () =>
+            if (prod == null)
+                throw new InvalidOperationException("Không tìm thấy production.");
+
+            var now = AppTime.NowVnUnspecified();
+
+            var kind = NormProductionStatusCode(prod.prod_kind);
+            var method = NormProductionStatusCode(prod.prod_method);
+
+            var isGroup = kind == "GROUP";
+            var isSplit = kind == "SPLIT";
+            var isSingle = string.IsNullOrWhiteSpace(kind) || kind == "SINGLE";
+
+            /*
+             * CASE ĐẶC BIỆT:
+             * SINGLE full path bằng SUB nhưng chưa hoàn tất full path.
+             * API mark-importing lúc này chỉ xác nhận production bước đầu/chuẩn bị,
+             * không được kéo production/order lên Importing sớm.
+             *
+             * Trạng thái đúng để production manager tiếp tục chạy là InProcessing.
+             */
+            if (isSingle && method == "SUB")
             {
-                await using var tx = await _db.Database.BeginTransactionAsync(ct);
+                var allTasksFinished = await AreAllTasksFinishedForProductionServiceAsync(
+                    prod.prod_id,
+                    ct);
 
-                var prod = await _db.productions
-                    .FirstOrDefaultAsync(x => x.prod_id == prodId, ct);
-
-                if (prod == null)
-                    return null;
-
-                if (string.Equals(prod.status, "Completed", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(prod.status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(prod.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                if (!allTasksFinished)
                 {
-                    throw new InvalidOperationException(
-                        $"Không thể chuyển Importing vì production đang ở trạng thái {prod.status}.");
-                }
+                    prod.status = "InProcessing";
+                    prod.actual_start_date ??= now;
 
-                var tasks = await _db.tasks
-                    .Where(x => x.prod_id == prodId)
-                    .Select(x => new
+                    if (prod.order_id.HasValue)
                     {
-                        x.status,
-                        x.start_time,
-                        x.end_time
-                    })
-                    .ToListAsync(ct);
+                        var ord = await _db.orders
+                            .FirstOrDefaultAsync(x => x.order_id == prod.order_id.Value, ct);
 
-                if (tasks.Count == 0)
-                    throw new InvalidOperationException("Production chưa có task.");
-
-                var allFinished = tasks.All(x =>
-                    string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
-                    x.end_time != null);
-
-                if (!allFinished)
-                {
-                    throw new InvalidOperationException(
-                        "Chỉ được chuyển Importing khi tất cả task của production đã Finished.");
-                }
-
-                var now = AppTime.NowVnUnspecified();
-
-                var finishedAt = tasks
-                    .Where(x => x.end_time != null)
-                    .Select(x => x.end_time!.Value)
-                    .DefaultIfEmpty(now)
-                    .Max();
-
-                prod.status = "Importing";
-                prod.end_date ??= finishedAt;
-                prod.actual_start_date ??= tasks
-                    .Where(x => x.start_time != null)
-                    .Select(x => x.start_time!.Value)
-                    .DefaultIfEmpty(finishedAt)
-                    .Min();
-
-                prod.created_at ??= now;
-                prod.planned_start_date ??= now;
-
-                var orderIds = new List<int>();
-
-                var isGroup = string.Equals(
-                    prod.prod_kind,
-                    "GROUP",
-                    StringComparison.OrdinalIgnoreCase);
-
-                if (isGroup)
-                {
-                    orderIds = await _db.prod_orders
-                        .AsNoTracking()
-                        .Where(x =>
-                            x.prod_id == prod.prod_id &&
-                            x.status == "Active")
-                        .Select(x => x.order_id)
-                        .Distinct()
-                        .ToListAsync(ct);
-                }
-                else if (prod.order_id.HasValue)
-                {
-                    orderIds.Add(prod.order_id.Value);
-                }
-
-                orderIds = orderIds
-                    .Where(x => x > 0)
-                    .Distinct()
-                    .ToList();
-
-                var updatedOrderCount = 0;
-                var updatedRequestCount = 0;
-
-                if (orderIds.Count > 0)
-                {
-                    var orders = await _db.orders
-                        .Where(x => orderIds.Contains(x.order_id))
-                        .ToListAsync(ct);
-
-                    foreach (var order in orders)
-                    {
-                        if (string.Equals(order.status, "Completed", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(order.status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(order.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                        if (ord != null &&
+                            !string.Equals(ord.status, "Importing", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(ord.status, "Finished", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(ord.status, "Completed", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(ord.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
                         {
-                            continue;
+                            ord.status = "InProcessing";
                         }
 
-                        order.status = "Importing";
-                        updatedOrderCount++;
-                    }
+                        var reqs = await _db.order_requests
+                            .Where(x => x.order_id == prod.order_id.Value)
+                            .ToListAsync(ct);
 
-                    var requests = await _db.order_requests
-                        .Where(x =>
-                            x.order_id.HasValue &&
-                            orderIds.Contains(x.order_id.Value))
-                        .ToListAsync(ct);
-
-                    foreach (var req in requests)
-                    {
-                        if (string.Equals(req.process_status, "Completed", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(req.process_status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(req.process_status, "Cancel", StringComparison.OrdinalIgnoreCase))
+                        foreach (var req in reqs)
                         {
-                            continue;
+                            if (!string.Equals(req.process_status, "Importing", StringComparison.OrdinalIgnoreCase) &&
+                                !string.Equals(req.process_status, "Finished", StringComparison.OrdinalIgnoreCase) &&
+                                !string.Equals(req.process_status, "Completed", StringComparison.OrdinalIgnoreCase) &&
+                                !string.Equals(req.process_status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                            {
+                                req.process_status = "InProcessing";
+                            }
                         }
-
-                        req.process_status = "Importing";
-                        updatedRequestCount++;
                     }
+
+                    await _db.SaveChangesAsync(ct);
+
+                    return new
+                    {
+                        success = true,
+                        prod_id = prod.prod_id,
+                        status = prod.status,
+                        order_status = "InProcessing",
+                        message =
+                            "Production SINGLE dùng SUB chưa hoàn tất full path nên chỉ chuyển InProcessing, không chuyển Importing."
+                    };
                 }
+            }
 
-                await _db.SaveChangesAsync(ct);
-                await tx.CommitAsync(ct);
+            /*
+             * GROUP/SPLIT hoặc production đã xong task:
+             * giữ logic hiện tại: gọi repository để đóng production nếu tất cả task đã Finished.
+             */
+            var changed = await _repo.TryCloseProductionIfCompletedAsync(
+                prod.prod_id,
+                now,
+                ct);
 
-                return new ForceProductionImportingResponseDto
+            if (!changed)
+            {
+                /*
+                 * Nếu production chưa xong task, không ép Importing.
+                 */
+                var refreshed = await _db.productions
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.prod_id == prod.prod_id, ct);
+
+                return new
                 {
-                    success = true,
+                    success = false,
                     prod_id = prod.prod_id,
-                    production_code = prod.code,
-                    production_status = "Importing",
-                    order_ids = orderIds,
-                    updated_order_count = updatedOrderCount,
-                    updated_request_count = updatedRequestCount,
-                    importing_at = finishedAt,
-                    message = "Đã hoàn thành lệnh sản xuất."
+                    status = refreshed?.status,
+                    message =
+                        "Production chưa đủ điều kiện chuyển Importing. Chỉ chuyển Importing khi tất cả task của production đã Finished."
                 };
-            });
+            }
+
+            var updated = await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.prod_id == prod.prod_id, ct);
+
+            return new
+            {
+                success = true,
+                prod_id = prod.prod_id,
+                status = updated?.status,
+                message = "Đã kiểm tra và cập nhật trạng thái production theo đúng full path."
+            };
         }
 
+        private static string NormProductionStatusCode(string? raw)
+        {
+            return (raw ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+        }
         private async Task<string?> CreateAndUploadSubProductIssueFileByProdIdAsync(
     int prodId,
     string reason,
@@ -5596,6 +5432,433 @@ namespace AMMS.Application.Services
             public int method_count => available_methods.Count;
         }
 
+        public async Task<ForceSetProductionImportingByProdIdResponse?> ForceSetProductionImportingByProdIdAsync(
+    int prodId,
+    CancellationToken ct = default)
+        {
+            var prod = await _db.productions
+                .FirstOrDefaultAsync(x => x.prod_id == prodId, ct);
+
+            if (prod == null)
+                return null;
+
+            var now = AppTime.NowVnUnspecified();
+
+            var kind = NormProductionStatusCode(prod.prod_kind);
+            var method = NormProductionStatusCode(prod.prod_method);
+
+            var isGroup = kind == "GROUP";
+            var isSplit = kind == "SPLIT";
+            var isSingle = string.IsNullOrWhiteSpace(kind) || kind == "SINGLE";
+
+            var allTasksFinished = await AreAllTasksFinishedForProductionServiceAsync(
+                prod.prod_id,
+                ct);
+
+            /*
+             * CASE đặc biệt:
+             * SINGLE full path dùng SUB nhưng chưa hoàn tất task.
+             * API mark-importing chỉ xác nhận production đang chạy,
+             * không được đẩy production/order lên Importing sớm.
+             */
+            if (isSingle && method == "SUB" && !allTasksFinished)
+            {
+                prod.status = "InProcessing";
+                prod.actual_start_date ??= now;
+
+                string? orderStatus = null;
+
+                if (prod.order_id.HasValue && prod.order_id.Value > 0)
+                {
+                    var ord = await _db.orders
+                        .FirstOrDefaultAsync(x => x.order_id == prod.order_id.Value, ct);
+
+                    if (ord != null &&
+                        !IsFinalOrderStatus(ord.status) &&
+                        !IsImportingStatus(ord.status))
+                    {
+                        ord.status = "InProcessing";
+                        orderStatus = ord.status;
+                    }
+
+                    var reqs = await _db.order_requests
+                        .Where(x => x.order_id == prod.order_id.Value)
+                        .ToListAsync(ct);
+
+                    foreach (var req in reqs)
+                    {
+                        if (!IsFinalOrderStatus(req.process_status) &&
+                            !IsImportingStatus(req.process_status))
+                        {
+                            req.process_status = "InProcessing";
+                        }
+                    }
+                }
+
+                await _db.SaveChangesAsync(ct);
+
+                return new ForceSetProductionImportingByProdIdResponse
+                {
+                    success = true,
+                    prod_id = prod.prod_id,
+                    order_id = prod.order_id,
+                    prod_kind = prod.prod_kind,
+                    prod_method = prod.prod_method,
+                    production_status = prod.status,
+                    order_status = orderStatus ?? "InProcessing",
+                    all_tasks_finished = false,
+                    order_full_path_finished = false,
+                    message =
+                        "Production SINGLE dùng SUB chưa hoàn tất full path nên chỉ chuyển InProcessing, không chuyển Importing."
+                };
+            }
+
+            /*
+             * Nếu task chưa xong thì không ép Importing.
+             */
+            if (!allTasksFinished)
+            {
+                return new ForceSetProductionImportingByProdIdResponse
+                {
+                    success = false,
+                    prod_id = prod.prod_id,
+                    order_id = prod.order_id,
+                    prod_kind = prod.prod_kind,
+                    prod_method = prod.prod_method,
+                    production_status = prod.status,
+                    order_status = await ResolveOrderStatusTextAsync(prod.order_id, ct),
+                    all_tasks_finished = false,
+                    order_full_path_finished = false,
+                    message =
+                        "Production chưa đủ điều kiện chuyển Importing vì vẫn còn task chưa Finished."
+                };
+            }
+
+            /*
+             * Đóng production hiện tại.
+             * Repository phải check full path trước khi kéo order/request lên Importing.
+             */
+            await _repo.TryCloseProductionIfCompletedAsync(
+                prod.prod_id,
+                now,
+                ct);
+
+            var refreshedProd = await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.prod_id == prod.prod_id, ct);
+
+            var orderFullPathFinished = prod.order_id.HasValue &&
+                                        await IsOrderFullPathFinishedForServiceAsync(
+                                            prod.order_id.Value,
+                                            ct);
+
+            return new ForceSetProductionImportingByProdIdResponse
+            {
+                success = true,
+                prod_id = prod.prod_id,
+                order_id = prod.order_id,
+                prod_kind = refreshedProd?.prod_kind,
+                prod_method = refreshedProd?.prod_method,
+                production_status = refreshedProd?.status,
+                order_status = await ResolveOrderStatusTextAsync(prod.order_id, ct),
+                all_tasks_finished = true,
+                order_full_path_finished = orderFullPathFinished,
+                message =
+                    orderFullPathFinished
+                        ? "Production đã hoàn tất và order đã đủ full path để chuyển Importing."
+                        : "Production đã hoàn tất batch hiện tại, nhưng order chưa đủ full path nên chưa chuyển order sang Importing."
+            };
+        }
+
+        private async Task<bool> AreAllTasksFinishedForProductionServiceAsync(
+            int prodId,
+            CancellationToken ct)
+        {
+            var tasks = await _db.tasks
+                .AsNoTracking()
+                .Where(x => x.prod_id == prodId)
+                .Select(x => new
+                {
+                    x.task_id,
+                    x.status,
+                    x.end_time
+                })
+                .ToListAsync(ct);
+
+            if (tasks.Count == 0)
+                return false;
+
+            return tasks.All(x =>
+                string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                x.end_time != null);
+        }
+
+        private async Task<string?> ResolveOrderStatusTextAsync(
+            int? orderId,
+            CancellationToken ct)
+        {
+            if (!orderId.HasValue || orderId.Value <= 0)
+                return null;
+
+            return await _db.orders
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId.Value)
+                .Select(x => x.status)
+                .FirstOrDefaultAsync(ct);
+        }
+
+        private async Task<bool> IsOrderFullPathFinishedForServiceAsync(
+            int orderId,
+            CancellationToken ct)
+        {
+            var route = await ResolveOrderFullPathForServiceAsync(orderId, ct);
+
+            if (route.Count == 0)
+                return false;
+
+            foreach (var processCode in route)
+            {
+                var finished = await IsOrderProcessFinishedForServiceAsync(
+                    orderId,
+                    processCode,
+                    ct);
+
+                if (!finished)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private async Task<List<string>> ResolveOrderFullPathForServiceAsync(
+            int orderId,
+            CancellationToken ct)
+        {
+            var item = await _db.order_items
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderBy(x => x.item_id)
+                .Select(x => new
+                {
+                    x.product_type_id,
+                    x.production_process
+                })
+                .FirstOrDefaultAsync(ct);
+
+            var fromOrderItem = ParseProductionPathForService(item?.production_process);
+
+            if (fromOrderItem.Count > 0)
+                return fromOrderItem;
+
+            if (item?.product_type_id == null || item.product_type_id.Value <= 0)
+                return new List<string>();
+
+            var fromProductType = await _db.product_type_processes
+                .AsNoTracking()
+                .Where(x =>
+                    x.product_type_id == item.product_type_id.Value &&
+                    (x.is_active ?? true))
+                .OrderBy(x => x.seq_num)
+                .Select(x => x.process_code)
+                .ToListAsync(ct);
+
+            return fromProductType
+                .Select(NormProductionStatusCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndexForService)
+                .ToList();
+        }
+
+        private async Task<bool> IsOrderProcessFinishedForServiceAsync(
+            int orderId,
+            string processCode,
+            CancellationToken ct)
+        {
+            var code = NormProductionStatusCode(processCode);
+
+            if (orderId <= 0 || string.IsNullOrWhiteSpace(code))
+                return false;
+
+            /*
+             * Direct task SINGLE/SPLIT.
+             */
+            var directFinished = await (
+                from t in _db.tasks.AsNoTracking()
+
+                join p in _db.productions.AsNoTracking()
+                    on t.prod_id equals p.prod_id
+
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                where p.order_id == orderId
+                      && p.status != "Cancelled"
+                      && pp != null
+                      && pp.process_code != null
+                      && pp.process_code.Trim().ToUpper() == code
+                      && (
+                            t.end_time != null ||
+                            (
+                                t.status != null &&
+                                t.status.Trim().ToUpper() == "FINISHED"
+                            )
+                         )
+
+                select t.task_id
+            ).AnyAsync(ct);
+
+            if (directFinished)
+                return true;
+
+            /*
+             * GROUP task finished + có task_qtys phân bổ cho order.
+             */
+            var groupFinished = await (
+                from link in _db.task_links.AsNoTracking()
+
+                join gt in _db.tasks.AsNoTracking()
+                    on link.group_task_id equals gt.task_id
+
+                where link.order_id == orderId
+                      && link.process_code != null
+                      && link.process_code.Trim().ToUpper() == code
+                      && (
+                            link.status == null ||
+                            link.status.Trim().ToUpper() != "CANCELLED"
+                         )
+                      && (
+                            gt.end_time != null ||
+                            (
+                                gt.status != null &&
+                                gt.status.Trim().ToUpper() == "FINISHED"
+                            )
+                         )
+                      && _db.task_qtys.AsNoTracking().Any(q =>
+                            q.group_task_id == link.group_task_id &&
+                            q.order_id == orderId &&
+                            q.process_code != null &&
+                            q.process_code.Trim().ToUpper() == code &&
+                            q.qty_good > 0)
+
+                select link.id
+            ).AnyAsync(ct);
+
+            if (groupFinished)
+                return true;
+
+            /*
+             * SUB/BOTH: các công đoạn nằm trong sub_product.product_process
+             * được xem là đã có sẵn nếu đã có phiếu xuất BTP.
+             */
+            var coveredBySub = await IsProcessCoveredByIssuedSubProductForServiceAsync(
+                orderId,
+                code,
+                ct);
+
+            return coveredBySub;
+        }
+
+        private async Task<bool> IsProcessCoveredByIssuedSubProductForServiceAsync(
+            int orderId,
+            string processCode,
+            CancellationToken ct)
+        {
+            var code = NormProductionStatusCode(processCode);
+
+            var subProductions = await _db.productions
+                .AsNoTracking()
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.sub_product_id.HasValue &&
+                    x.sub_product_id.Value > 0 &&
+                    (
+                        x.prod_method == "SUB" ||
+                        x.prod_method == "BOTH"
+                    ) &&
+                    x.status != "Cancelled")
+                .Select(x => new
+                {
+                    x.prod_id,
+                    sub_id = x.sub_product_id!.Value
+                })
+                .ToListAsync(ct);
+
+            if (subProductions.Count == 0)
+                return false;
+
+            foreach (var prod in subProductions)
+            {
+                var subProcess = await _db.sub_products
+                    .AsNoTracking()
+                    .Where(x => x.id == prod.sub_id)
+                    .Select(x => x.product_process)
+                    .FirstOrDefaultAsync(ct);
+
+                var subCodes = ParseProductionPathForService(subProcess);
+
+                if (!subCodes.Contains(code, StringComparer.OrdinalIgnoreCase))
+                    continue;
+
+                var hasIssued = await _db.stock_moves
+                    .AsNoTracking()
+                    .AnyAsync(x =>
+                        x.ref_doc == $"PROD-BTP-ISSUE-{prod.prod_id}" &&
+                        x.type == "OUT" &&
+                        x.sub_product_id == prod.sub_id,
+                        ct);
+
+                if (hasIssued)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static List<string> ParseProductionPathForService(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return new List<string>();
+
+            return raw
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormProductionStatusCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndexForService)
+                .ToList();
+        }
+
+        private static bool IsFinalOrderStatus(string? status)
+        {
+            var s = NormProductionStatusCode(status);
+
+            return s is "FINISHED" or "COMPLETED" or "CANCELLED" or "DELIVERY";
+        }
+
+        private static bool IsImportingStatus(string? status)
+        {
+            return string.Equals(status, "Importing", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static int FullRouteIndexForService(string? code)
+        {
+            return NormProductionStatusCode(code) switch
+            {
+                "RALO" => 1,
+                "CAT" => 2,
+                "IN" => 3,
+                "PHU" => 4,
+                "CAN" => 5,
+                "CAN_MANG" => 5,
+                "BOI" => 6,
+                "BE" => 7,
+                "DUT" => 8,
+                "DAN" => 9,
+                _ => 999
+            };
+        }
         private readonly IWebHostEnvironment _env;
     }
 }

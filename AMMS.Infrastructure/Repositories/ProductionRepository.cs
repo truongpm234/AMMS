@@ -2417,6 +2417,13 @@ namespace AMMS.Infrastructure.Repositories
 
                 NormalizeNullActualInputMaterials(stage);
 
+                await NormalizeEstimatedQuantitiesForProductionDetailAsync(
+                    header.pr,
+                    estimate,
+                    orderReq?.number_of_plates,
+                    stage,
+                    ct);
+
                 stages.Add(stage);
 
                 prevOutput = new StageOutputRef
@@ -2441,6 +2448,282 @@ namespace AMMS.Infrastructure.Repositories
 
             dto.stages = stages;
             return dto;
+        }
+
+        private async Task NormalizeEstimatedQuantitiesForProductionDetailAsync(
+    production prod,
+    cost_estimate? estimate,
+    int? numberOfPlates,
+    ProductionStageDto stage,
+    CancellationToken ct)
+        {
+            if (stage == null)
+                return;
+
+            /*
+             * 1. Fill output estimate từ policy QR nếu có task_id.
+             */
+            if (stage.task_id.HasValue)
+            {
+                var policy = await _taskRepo.GetQtyPolicyAsync(
+                    stage.task_id.Value,
+                    ct);
+
+                if (policy != null && policy.suggested_qty > 0)
+                {
+                    if (ValueOrZero(stage.estimated_output_quantity) <= 0)
+                        stage.estimated_output_quantity = policy.suggested_qty;
+
+                    if (stage.output_product != null &&
+                        ValueOrZero(stage.output_product.estimated_quantity) <= 0)
+                    {
+                        stage.output_product.estimated_quantity = policy.suggested_qty;
+                        stage.output_product.quantity = policy.suggested_qty;
+                        stage.output_product.quantity_source = "Estimated";
+                    }
+                }
+            }
+
+            var outputEstimate = ValueOrZero(stage.estimated_output_quantity);
+
+            /*
+             * 2. Fill input bán thành phẩm trước nếu null/0.
+             */
+            if (stage.input_materials != null)
+            {
+                foreach (var input in stage.input_materials)
+                {
+                    if (!IsPreviousInputForDetail(input.code, input.name))
+                        continue;
+
+                    if (ValueOrZero(input.estimated_quantity) <= 0 && outputEstimate > 0)
+                    {
+                        input.estimated_quantity = outputEstimate;
+                        input.quantity = outputEstimate;
+                        input.quantity_source = "Estimated";
+                    }
+                }
+            }
+
+            /*
+             * 3. Fill vật tư tiêu hao từ cost_estimate.
+             * Không dùng estimate.number_of_plates nữa.
+             */
+            if (estimate != null && stage.input_materials != null)
+            {
+                var materialEstimates = BuildConsumableEstimateForDetailStage(
+                    stage.process_code,
+                    estimate,
+                    numberOfPlates);
+
+                foreach (var input in stage.input_materials)
+                {
+                    if (IsPreviousInputForDetail(input.code, input.name))
+                        continue;
+
+                    var key = NormalizeMaterialKey(input.code, input.name);
+
+                    if (string.IsNullOrWhiteSpace(key))
+                        continue;
+
+                    if (!materialEstimates.TryGetValue(key, out var estimateQty))
+                        continue;
+
+                    if (estimateQty <= 0)
+                        continue;
+
+                    if (ValueOrZero(input.estimated_quantity) <= 0)
+                    {
+                        input.estimated_quantity = estimateQty;
+                        input.quantity = estimateQty;
+                        input.quantity_source = "Estimated";
+                    }
+                }
+            }
+
+            if (ValueOrZero(stage.estimated_output_quantity) <= 0 &&
+                stage.output_product != null &&
+                ValueOrZero(stage.output_product.estimated_quantity) > 0)
+            {
+                stage.estimated_output_quantity = stage.output_product.estimated_quantity;
+            }
+        }
+
+        private static string NormalizeMaterialKey(string? code, string? name)
+        {
+            var raw = !string.IsNullOrWhiteSpace(code)
+                ? code
+                : name;
+
+            if (string.IsNullOrWhiteSpace(raw))
+                return "";
+
+            var s = raw.Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+
+            return s switch
+            {
+                "MANG_12_MIC" => "MANG_12MIC",
+                "MANG_12MIC" => "MANG_12MIC",
+
+                "KEO_BOI" => "KEO_BOI",
+                "MOUNTING_GLUE" => "KEO_BOI",
+
+                "SONG_B" => "SONG_B_NAU",
+                "B" => "SONG_B_NAU",
+                "B_NAU" => "SONG_B_NAU",
+                "SONG_B_NAU" => "SONG_B_NAU",
+
+                "SONG_E" => "SONG_E_NAU",
+                "E" => "SONG_E_NAU",
+                "E_NAU" => "SONG_E_NAU",
+                "SONG_E_NAU" => "SONG_E_NAU",
+                "SONG_E_MOC" => "SONG_E_MOC",
+
+                "KEO_PHU_NUOC" => "KEO_PHU_NUOC",
+                "KEO_NUOC" => "KEO_PHU_NUOC",
+                "KEO_PHU_DAU" => "KEO_PHU_DAU",
+                "KEO_DAU" => "KEO_PHU_DAU",
+                "KEO_PHU_UV" => "KEO_PHU_UV",
+                "UV" => "KEO_PHU_UV",
+
+                _ => s
+            };
+        }
+
+        private static string NormalizeWaveCodeForDetail(string? wave)
+        {
+            var raw = NormalizeMaterialKey(wave, null);
+
+            return raw switch
+            {
+                "B" or "SONG_B" or "B_NAU" => "SONG_B_NAU",
+                "E" or "SONG_E" or "E_NAU" => "SONG_E_NAU",
+                "E_MOC" => "SONG_E_MOC",
+                _ => raw
+            };
+        }
+
+        private static string NormalizeCoatingCodeForDetail(string? coating)
+        {
+            var raw = NormalizeMaterialKey(coating, null);
+
+            return raw switch
+            {
+                "KEO_NUOC" => "KEO_PHU_NUOC",
+                "KEO_DAU" => "KEO_PHU_DAU",
+                "UV" or "KEO_UV" or "PHU_UV" => "KEO_PHU_UV",
+                _ => raw
+            };
+        }
+
+        private static decimal ValueOrZero(decimal? value)
+        {
+            return value ?? 0m;
+        }
+
+        private static Dictionary<string, decimal> BuildConsumableEstimateForDetailStage(
+    string? processCode,
+    cost_estimate estimate,
+    int? numberOfPlates)
+        {
+            var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+            var code = NormalizeProcessCodeForDetail(processCode);
+
+            switch (code)
+            {
+                case "RALO":
+                    AddEstimate(result, "PLATE", Math.Max(numberOfPlates ?? 0, 0));
+                    AddEstimate(result, "BAN_KEM", Math.Max(numberOfPlates ?? 0, 0));
+                    break;
+
+                case "IN":
+                    AddEstimate(
+                        result,
+                        NormalizeMaterialKey(estimate.paper_code, estimate.paper_name),
+                        estimate.sheets_total > 0 ? estimate.sheets_total : estimate.sheets_required);
+
+                    AddEstimate(result, "INK", estimate.ink_weight_kg);
+                    AddEstimate(result, "MUC", estimate.ink_weight_kg);
+                    break;
+
+                case "PHU":
+                    AddEstimate(
+                        result,
+                        NormalizeMaterialKey(estimate.coating_material_code, estimate.coating_type),
+                        estimate.coating_glue_weight_kg);
+
+                    AddEstimate(
+                        result,
+                        NormalizeCoatingCodeForDetail(estimate.coating_type),
+                        estimate.coating_glue_weight_kg);
+                    break;
+
+                case "CAN":
+                case "CAN_MANG":
+                    AddEstimate(
+                        result,
+                        NormalizeMaterialKey(estimate.lamination_material_code, estimate.lamination_material_name),
+                        estimate.lamination_weight_kg);
+
+                    AddEstimate(result, "MANG_12MIC", estimate.lamination_weight_kg);
+                    break;
+
+                case "BOI":
+                    AddEstimate(
+                        result,
+                        NormalizeWaveCodeForDetail(estimate.wave_type),
+                        estimate.wave_sheets_used ?? estimate.wave_sheets_required ?? 0);
+
+                    AddEstimate(
+                        result,
+                        NormalizeWaveCodeForDetail(estimate.wave_alternative),
+                        estimate.wave_sheets_used ?? estimate.wave_sheets_required ?? 0);
+
+                    AddEstimate(result, "KEO_BOI", estimate.mounting_glue_weight_kg);
+                    AddEstimate(result, "MOUNTING_GLUE", estimate.mounting_glue_weight_kg);
+                    break;
+            }
+
+            return result;
+        }
+
+        private static void AddEstimate(
+            Dictionary<string, decimal> result,
+            string? rawKey,
+            decimal qty)
+        {
+            var key = NormalizeMaterialKey(rawKey, null);
+
+            if (string.IsNullOrWhiteSpace(key) || qty <= 0)
+                return;
+
+            if (!result.ContainsKey(key))
+                result[key] = Math.Round(qty, 4, MidpointRounding.AwayFromZero);
+        }
+
+        private static bool IsPreviousInputForDetail(string? code, string? name)
+        {
+            var c = NormalizeMaterialKey(code, null);
+            var n = NormalizeMaterialKey(name, null);
+
+            return c == "PREV"
+                || c == "BTP"
+                || c == "REFERENCE_INPUT"
+                || n.Contains("BAN_THANH_PHAM")
+                || n.Contains("BTP");
+        }
+
+        private static string NormalizeProcessCodeForDetail(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
         }
 
         private static List<string> SplitImageUrls(string? csv)
@@ -2672,7 +2955,7 @@ namespace AMMS.Infrastructure.Repositories
             if (prod == null)
                 return false;
 
-            var tasks = await _db.tasks
+            var ownTasks = await _db.tasks
                 .Where(t => t.prod_id == prodId)
                 .Select(t => new
                 {
@@ -2683,36 +2966,33 @@ namespace AMMS.Infrastructure.Repositories
                 })
                 .ToListAsync(ct);
 
-            if (tasks.Count == 0)
+            if (ownTasks.Count == 0)
                 return false;
 
-            var allOwnTasksFinished = tasks.All(t =>
+            var allOwnTasksFinished = ownTasks.All(t =>
                 string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
                 t.end_time != null);
 
             if (!allOwnTasksFinished)
                 return false;
 
-            var finishedAt = tasks
+            var finishedAt = ownTasks
                 .Where(t => t.end_time != null)
                 .Select(t => t.end_time!.Value)
                 .DefaultIfEmpty(now)
                 .Max();
 
-            /*
-             * FIX CHÍNH:
-             * Không chặn production SINGLE/SPLIT chuyển Importing vì còn group link chưa xong.
-             *
-             * Production là 1 batch sản xuất.
-             * Nếu batch đó đã xong hết task của chính nó thì batch đó phải Importing.
-             *
-             * Order/request chỉ được Importing khi full path của order xong,
-             * phần đó được kiểm soát bằng CanMoveOrderToImportingByFullPathAsync().
-             */
             var changed = false;
 
+            /*
+             * Production là batch.
+             * Batch nào xong hết task của chính nó thì batch đó Importing.
+             * Nhưng order/request chỉ Importing nếu FULL PATH của order đã xong.
+             */
             if (!string.Equals(prod.status, "Importing", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(prod.status, "Finished", StringComparison.OrdinalIgnoreCase))
+                !string.Equals(prod.status, "Finished", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(prod.status, "Completed", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(prod.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
             {
                 prod.status = "Importing";
                 changed = true;
@@ -2737,10 +3017,6 @@ namespace AMMS.Infrastructure.Repositories
 
             if (isGroupProduction)
             {
-                /*
-                 * GROUP xong chỉ đóng production GROUP.
-                 * Order/request chỉ lên Importing nếu full path của từng order đã xong.
-                 */
                 await SyncGroupMemberOrdersToImportingAsync(
                     prod,
                     finishedAt,
@@ -2748,10 +3024,6 @@ namespace AMMS.Infrastructure.Repositories
             }
             else
             {
-                /*
-                 * SINGLE/SPLIT xong thì đóng chính production đó.
-                 * Order/request chỉ lên Importing nếu full path của order đã xong.
-                 */
                 await SyncSingleProductionOrderToImportingAsync(
                     prod,
                     finishedAt,
@@ -2759,7 +3031,6 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             await _db.SaveChangesAsync(ct);
-
             return changed;
         }
 
@@ -2785,9 +3056,9 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         private async Task SyncGroupMemberOrdersToImportingAsync(
-    production groupProd,
-    DateTime finishedAt,
-    CancellationToken ct)
+            production groupProd,
+            DateTime finishedAt,
+            CancellationToken ct)
         {
             var members = await _db.prod_orders
                 .Where(x =>
@@ -2798,10 +3069,8 @@ namespace AMMS.Infrastructure.Repositories
             foreach (var member in members)
             {
                 /*
-                 * Nếu single production gốc của order cũng đã xong hết task riêng
-                 * thì cho single production đó Importing.
-                 *
-                 * Nhưng KHÔNG được kéo order lên Importing tại đây nếu full path chưa xong.
+                 * Chỉ update single production row nếu batch đó thật sự đã xong.
+                 * Không kéo order lên Importing ở đây.
                  */
                 if (member.single_prod_id.HasValue && member.single_prod_id.Value > 0)
                 {
@@ -2825,7 +3094,7 @@ namespace AMMS.Infrastructure.Repositories
                 }
 
                 /*
-                 * Order/request chỉ Importing khi full path của order đã xong.
+                 * Chốt order/request chỉ khi full path order đã hoàn tất.
                  */
                 var canMoveOrder = await CanMoveOrderToImportingByFullPathAsync(
                     member.order_id,
@@ -2842,14 +3111,16 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         private Task MarkProductionRowImportingAsync(
-    production prod,
-    DateTime finishedAt,
-    CancellationToken ct)
+            production prod,
+            DateTime finishedAt,
+            CancellationToken ct)
         {
             if (prod == null)
                 return Task.CompletedTask;
 
-            if (!string.Equals(prod.status, "Finished", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(prod.status, "Finished", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(prod.status, "Completed", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(prod.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
             {
                 prod.status = "Importing";
             }
@@ -2867,12 +3138,7 @@ namespace AMMS.Infrastructure.Repositories
             if (orderId <= 0)
                 return false;
 
-            var routeCodes = await GetOrderFullProductionPathAsync(
-                orderId,
-                ct);
-
-            if (routeCodes.Count == 0)
-                return false;
+            var routeCodes = await GetOrderFullProductionPathAsync(orderId, ct);
 
             routeCodes = routeCodes
                 .Select(NormProcessCode)
@@ -2885,8 +3151,7 @@ namespace AMMS.Infrastructure.Repositories
                 return false;
 
             /*
-             * Chỉ khi công đoạn cuối của full path xong mới xét đưa order/request Importing.
-             * Ví dụ full path cuối là DAN thì DAN phải Finished.
+             * Công đoạn cuối cùng phải xong.
              */
             var finalProcessCode = routeCodes.Last();
 
@@ -2899,10 +3164,7 @@ namespace AMMS.Infrastructure.Repositories
                 return false;
 
             /*
-             * Check lại toàn bộ công đoạn trong full path.
-             * Bao gồm:
-             * - task trực tiếp trong SINGLE/SPLIT
-             * - group task thông qua task_links/task_qtys
+             * Và toàn bộ route trước đó cũng phải xong.
              */
             foreach (var code in routeCodes)
             {
@@ -2922,9 +3184,6 @@ namespace AMMS.Infrastructure.Repositories
     int orderId,
     CancellationToken ct)
         {
-            if (orderId <= 0)
-                return new List<string>();
-
             var item = await _db.order_items
                 .AsNoTracking()
                 .Where(x => x.order_id == orderId)
@@ -2936,30 +3195,23 @@ namespace AMMS.Infrastructure.Repositories
                 })
                 .FirstOrDefaultAsync(ct);
 
-            var fromOrderItem = ParseProcessCodes(item?.production_process);
-
+            var fromOrderItem = ParseProcessCodesForImportingCheck(item?.production_process);
             if (fromOrderItem.Count > 0)
                 return fromOrderItem;
 
             if (item?.product_type_id == null || item.product_type_id.Value <= 0)
                 return new List<string>();
 
-            var fromMaster = await _db.product_type_processes
+            return await _db.product_type_processes
                 .AsNoTracking()
                 .Where(x =>
                     x.product_type_id == item.product_type_id.Value &&
                     (x.is_active ?? true))
                 .OrderBy(x => x.seq_num)
-                .Select(x => x.process_code)
+                .Select(x => x.process_code ?? "")
                 .ToListAsync(ct);
-
-            return fromMaster
-                .Select(NormProcessCode)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(FullRouteIndex)
-                .ToList();
         }
+
 
         private static readonly string[] FullRouteOrder =
 {
@@ -3003,7 +3255,7 @@ namespace AMMS.Infrastructure.Repositories
 
         private async Task<bool> IsOrderProcessFinishedAsync(
     int orderId,
-    string? processCode,
+    string processCode,
     CancellationToken ct)
         {
             var code = NormProcessCode(processCode);
@@ -3012,8 +3264,7 @@ namespace AMMS.Infrastructure.Repositories
                 return false;
 
             /*
-             * CASE 1:
-             * Công đoạn nằm trong production riêng SINGLE/SPLIT.
+             * CASE 1: direct task trong SINGLE/SPLIT/head production.
              */
             var directFinished = await (
                 from t in _db.tasks.AsNoTracking()
@@ -3030,13 +3281,12 @@ namespace AMMS.Infrastructure.Repositories
                       && pp != null
                       && pp.process_code != null
                       && pp.process_code.Trim().ToUpper() == code
-                      &&
-                      (
-                          t.status != null &&
-                          t.status.Trim().ToUpper() == "FINISHED"
-                          ||
-                          t.end_time != null
-                      )
+                      && (
+                            t.status != null &&
+                            t.status.Trim().ToUpper() == "FINISHED"
+                            ||
+                            t.end_time != null
+                         )
 
                 select t.task_id
             ).AnyAsync(ct);
@@ -3045,57 +3295,116 @@ namespace AMMS.Infrastructure.Repositories
                 return true;
 
             /*
-             * CASE 2:
-             * Công đoạn nằm trong GROUP production.
-             * Với group task, sản lượng từng order được mirror vào task_qtys.
+             * CASE 2: group task.
+             * Một process group coi là xong với order khi:
+             * - task_links có order đó/process đó
+             * - group task Finished/end_time != null
+             * - task_qtys có qty_good cho order đó/process đó
              */
-            var groupQtyFinished = await _db.task_qtys
-                .AsNoTracking()
-                .AnyAsync(x =>
-                    x.order_id == orderId &&
-                    x.process_code != null &&
-                    x.process_code.Trim().ToUpper() == code &&
-                    x.qty_good > 0,
-                    ct);
-
-            if (groupQtyFinished)
-                return true;
-
-            /*
-             * CASE 3:
-             * Fallback theo task_links + group task Finished.
-             * Dùng để bao phủ trường hợp task_qtys chưa có nhưng link đã Done.
-             */
-            var groupTaskFinished = await (
+            var groupFinished = await (
                 from link in _db.task_links.AsNoTracking()
 
                 join gt in _db.tasks.AsNoTracking()
                     on link.group_task_id equals gt.task_id
 
-                join gp in _db.productions.AsNoTracking()
-                    on gt.prod_id equals gp.prod_id
-
                 where link.order_id == orderId
                       && link.process_code != null
                       && link.process_code.Trim().ToUpper() == code
-                      && gp.prod_kind == "GROUP"
-                      && gp.status != "Cancelled"
-                      &&
-                      (
-                          link.status != null &&
-                          link.status.Trim().ToUpper() == "DONE"
-                          ||
-                          gt.status != null &&
-                          gt.status.Trim().ToUpper() == "FINISHED"
-                          ||
-                          gt.end_time != null
-                      )
+                      && (
+                            link.status == null ||
+                            link.status.Trim().ToUpper() != "CANCELLED"
+                         )
+                      && (
+                            gt.status != null &&
+                            gt.status.Trim().ToUpper() == "FINISHED"
+                            ||
+                            gt.end_time != null
+                         )
+                      && _db.task_qtys.AsNoTracking().Any(q =>
+                            q.group_task_id == link.group_task_id &&
+                            q.order_id == orderId &&
+                            q.process_code != null &&
+                            q.process_code.Trim().ToUpper() == code &&
+                            q.qty_good > 0)
 
                 select link.id
             ).AnyAsync(ct);
 
-            return groupTaskFinished;
+            if (groupFinished)
+                return true;
+
+            /*
+             * CASE 3: SUB/BOTH dùng BTP.
+             * Những công đoạn nằm trong sub_product.product_process được xem là đã có input
+             * nếu BTP đã được xuất kho cho production của order.
+             */
+            var coveredByIssuedSubProduct = await IsProcessCoveredByIssuedSubProductAsync(
+                orderId,
+                code,
+                ct);
+
+            if (coveredByIssuedSubProduct)
+                return true;
+
+            return false;
         }
+
+        private async Task<bool> IsProcessCoveredByIssuedSubProductAsync(
+    int orderId,
+    string processCode,
+    CancellationToken ct)
+        {
+            var code = NormProcessCode(processCode);
+
+            var subProductions = await _db.productions
+                .AsNoTracking()
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.sub_product_id.HasValue &&
+                    x.sub_product_id.Value > 0 &&
+                    (
+                        x.prod_method == "SUB" ||
+                        x.prod_method == "BOTH"
+                    ) &&
+                    x.status != "Cancelled")
+                .Select(x => new
+                {
+                    x.prod_id,
+                    sub_id = x.sub_product_id!.Value
+                })
+                .ToListAsync(ct);
+
+            if (subProductions.Count == 0)
+                return false;
+
+            foreach (var p in subProductions)
+            {
+                var subProcess = await _db.sub_products
+                    .AsNoTracking()
+                    .Where(x => x.id == p.sub_id)
+                    .Select(x => x.product_process)
+                    .FirstOrDefaultAsync(ct);
+
+                var subCodes = ParseProcessCodesForImportingCheck(subProcess);
+
+                if (!subCodes.Contains(code, StringComparer.OrdinalIgnoreCase))
+                    continue;
+
+                var hasIssued = await _db.stock_moves
+                    .AsNoTracking()
+                    .AnyAsync(x =>
+                        x.ref_doc == $"PROD-BTP-ISSUE-{p.prod_id}" &&
+                        x.type == "OUT" &&
+                        x.sub_product_id == p.sub_id,
+                        ct);
+
+                if (hasIssued)
+                    return true;
+            }
+
+            return false;
+        }
+
 
         private static List<string> ParseProcessCodesForImportingCheck(string? raw)
         {
@@ -3158,12 +3467,6 @@ namespace AMMS.Infrastructure.Repositories
     DateTime finishedAt,
     CancellationToken ct)
         {
-            if (orderId <= 0)
-                return;
-
-            /*
-             * Chốt lại lần cuối để tránh order bị kéo lên Importing sớm.
-             */
             var canMoveOrder = await CanMoveOrderToImportingByFullPathAsync(
                 orderId,
                 ct);
@@ -3178,11 +3481,11 @@ namespace AMMS.Infrastructure.Repositories
                 return;
 
             /*
-             * Task finish chỉ đưa về Importing.
-             * Không set Finished ở đây.
-             * Finished chỉ do warehouse/import confirmation xử lý.
+             * Chỉ chuyển Importing.
+             * Finished chỉ do Warehouse xác nhận nhập kho thành phẩm.
              */
             if (!string.Equals(ord.status, "Finished", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(ord.status, "Completed", StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(ord.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
             {
                 ord.status = "Importing";
@@ -3195,6 +3498,7 @@ namespace AMMS.Infrastructure.Repositories
             foreach (var req in requests)
             {
                 if (!string.Equals(req.process_status, "Finished", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(req.process_status, "Completed", StringComparison.OrdinalIgnoreCase) &&
                     !string.Equals(req.process_status, "Cancelled", StringComparison.OrdinalIgnoreCase))
                 {
                     req.process_status = "Importing";
@@ -3202,13 +3506,28 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             /*
-             * Khi full path của order đã xong, đồng bộ tất cả production liên quan đã hoàn thành
-             * về Importing nếu có production nào còn InProcessing do data cũ.
+             * Đồng bộ các production liên quan đã xong task sang Importing.
              */
-            await SyncAllCompletedProductionsOfOrderToImportingAsync(
-                orderId,
-                finishedAt,
-                ct);
+            var prods = await _db.productions
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.status != "Cancelled")
+                .ToListAsync(ct);
+
+            foreach (var prod in prods)
+            {
+                var allFinished = await AreAllProductionTasksFinishedAsync(
+                    prod.prod_id,
+                    ct);
+
+                if (!allFinished)
+                    continue;
+
+                await MarkProductionRowImportingAsync(
+                    prod,
+                    finishedAt,
+                    ct);
+            }
         }
 
         private async Task SyncAllCompletedProductionsOfOrderToImportingAsync(
