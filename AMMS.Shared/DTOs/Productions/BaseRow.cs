@@ -19,7 +19,7 @@ namespace AMMS.Shared.DTOs.Productions
         public int? product_type_id { get; set; }
 
         public string? production_status { get; set; }
-
+        public string? sub_product_issue_file { get; set; }
         public string? order_status { get; set; }
         public DateTime? planned_end_date { get; set; }
         public string? customer_name { get; set; }

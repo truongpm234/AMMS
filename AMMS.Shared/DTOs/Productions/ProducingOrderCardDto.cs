@@ -17,6 +17,7 @@
         public DateTime? actual_start_date { get; set; }
         public DateTime? planned_end_date { get; set; }
         public bool? is_production_ready { get; set; }
+        public string? sub_product_issue_file { get; set; }
         public string? production_method { get; set; }
         public bool? is_full_process { get; set; }
         public int? sub_product_id { get; set; }

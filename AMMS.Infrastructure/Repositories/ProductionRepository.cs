@@ -90,7 +90,7 @@ namespace AMMS.Infrastructure.Repositories
 
                     production_status = pr.status,
                     order_status = o != null ? o.status : null,
-
+                    sub_product_issue_file = pr.sub_product_issue_file,
                     customer_name = o == null ? "Production ghép" : "",
                     planned_end_date = pr.planned_end_date,
                     production_method = pr.prod_method,
@@ -725,6 +725,7 @@ namespace AMMS.Infrastructure.Repositories
                         .OrderBy(x => x)
                         .ToList();
                 }
+
                 result.Add(new ProducingOrderCardDto
                 {
                     prod_id = r.prod_id,
@@ -749,7 +750,7 @@ namespace AMMS.Infrastructure.Repositories
                     production_status = r.production_status,
                     order_status = r.order_status,
                     stage_status = currentStageStatus,
-
+                    sub_product_issue_file = r.sub_product_issue_file,
                     created_at = r.created_at,
                     start_date = r.actual_start_date,
 
@@ -1058,11 +1059,9 @@ namespace AMMS.Infrastructure.Repositories
                 "SPLIT",
                 StringComparison.OrdinalIgnoreCase);
 
-            var routeProcessCsv =
-                (isGroupProduction || isSplitProduction) &&
-                !string.IsNullOrWhiteSpace(header.pr.group_process_codes)
-                    ? header.pr.group_process_codes
-                    : header.first_item?.production_process;
+            var routeProcessCsv = !string.IsNullOrWhiteSpace(header.pr.group_process_codes)
+                ? header.pr.group_process_codes
+                : header.first_item?.production_process;
 
             var dto = new ProductionDetailDto
             {
@@ -1472,7 +1471,6 @@ namespace AMMS.Infrastructure.Repositories
                 };
 
                 ApplyTaskLogJsonToProductionStage(stage, stageLogs);
-
                 ApplyOutputActualFallbackFromQtyGood(stage);
 
                 await ApplySubFirstDownstreamActualEstimateAsync(
@@ -1481,8 +1479,19 @@ namespace AMMS.Infrastructure.Repositories
                     steps,
                     ct);
 
-
                 NormalizeNullActualInputMaterials(stage);
+
+                ApplyCatInputActualEqualsEstimatedForProductionDetail(stage);
+
+                ApplyPreviousStageActualToInputMaterials(
+                    stage,
+                    prevOutput);
+
+                ApplyPlateActualFromRaloToInStage(
+                    stage,
+                    stages);
+
+                SyncActualQuantityFieldsForProductionDetail(stage);
 
                 stages.Add(stage);
 
@@ -1520,6 +1529,33 @@ namespace AMMS.Infrastructure.Repositories
                 string.Equals(dto.production_status, "Importing", StringComparison.OrdinalIgnoreCase);
 
             return dto;
+        }
+
+        private static void ApplyCatInputActualEqualsEstimatedForProductionDetail(
+    ProductionStageDto stage)
+        {
+            if (stage == null)
+                return;
+
+            var processCode = NormDetailProcessCode(stage.process_code);
+
+            if (!string.Equals(processCode, "CAT", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (stage.input_materials == null || stage.input_materials.Count == 0)
+                return;
+
+            foreach (var input in stage.input_materials)
+            {
+                if (input == null)
+                    continue;
+
+                if (input.estimated_quantity <= 0)
+                    continue;
+
+                input.actual_quantity = input.estimated_quantity;
+                input.quantity_source = "Estimated";
+            }
         }
 
         private static bool IsGroupSubProductionForDetail(production prod)
@@ -1830,7 +1866,10 @@ namespace AMMS.Infrastructure.Repositories
                         var totalEstimate = refMatches.Sum(x => x.quantity_used + x.quantity_left);
 
                         if (used > 0)
+                        {
                             input.actual_quantity = Math.Round(used, 4);
+                            input.quantity_source = "Actual";
+                        }
 
                         if ((input.estimated_quantity <= 0 || input.estimated_quantity == null) &&
                             totalEstimate > 0)
@@ -1875,7 +1914,10 @@ namespace AMMS.Infrastructure.Repositories
                             : x.quantity_used + x.quantity_left + x.quantity_waste);
 
                     if (materialUsed > 0)
+                    {
                         input.actual_quantity = Math.Round(materialUsed, 4);
+                        input.quantity_source = "Actual";
+                    }
 
                     if ((input.estimated_quantity <= 0 || input.estimated_quantity == null) &&
                         materialEstimated > 0)
@@ -1920,6 +1962,8 @@ namespace AMMS.Infrastructure.Repositories
                     if (good > 0)
                     {
                         stage.output_product.actual_quantity = Math.Round(good, 4);
+                        stage.output_product.quantity_source = "Actual";
+
                         stage.actual_output_quantity = Math.Round(good, 4);
                         stage.qty_good = (int)Math.Ceiling(good);
                     }
@@ -7306,8 +7350,8 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         private static void ApplyPreviousStageActualToInputMaterials(
-            ProductionStageDto stage,
-            StageOutputRef? prevOutput)
+    ProductionStageDto stage,
+    StageOutputRef? prevOutput)
         {
             if (stage?.input_materials == null || stage.input_materials.Count == 0)
                 return;
@@ -7315,21 +7359,164 @@ namespace AMMS.Infrastructure.Repositories
             if (prevOutput == null)
                 return;
 
-            var prevActual = prevOutput.ActualQuantity > 0
-                ? prevOutput.ActualQuantity
-                : prevOutput.EstimatedQuantity;
+            /*
+             * Chỉ lấy actual thật.
+             * Không fallback sang estimated, vì user yêu cầu:
+             * nếu DB/log thật sự không có thì thôi.
+             */
+            var prevActual = ToPositiveDecimalOrZero(prevOutput.ActualQuantity);
 
             if (prevActual <= 0)
                 return;
 
             foreach (var input in stage.input_materials)
             {
+                if (input == null)
+                    continue;
+
+                if (!IsActualMissing(input.actual_quantity))
+                    continue;
+
                 if (!IsPreviousStageInputForDetail(input, prevOutput))
                     continue;
 
-                if (IsActualMissing(input.actual_quantity))
+                input.actual_quantity = Math.Round(prevActual, 4);
+                input.quantity_source = "Actual";
+            }
+        }
+
+        private static void ApplyPlateActualFromRaloToInStage(
+    ProductionStageDto stage,
+    List<ProductionStageDto> previousStages)
+        {
+            if (stage == null)
+                return;
+
+            var currentCode = NormDetailProcessCode(stage.process_code);
+
+            if (!string.Equals(currentCode, "IN", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (stage.input_materials == null || stage.input_materials.Count == 0)
+                return;
+
+            var raloActual = ResolveRaloActualPlateQuantity(previousStages);
+
+            if (raloActual <= 0)
+                return;
+
+            foreach (var input in stage.input_materials)
+            {
+                if (input == null)
+                    continue;
+
+                if (!IsActualMissing(input.actual_quantity))
+                    continue;
+
+                var inputCode = NormDetailCode(input.code);
+                var inputName = NormDetailCode(input.name);
+
+                var isPlateInput =
+                    IsPlateCode(inputCode) ||
+                    IsPlateCode(inputName) ||
+                    inputName.Contains("BAN_KEM") ||
+                    inputName.Contains("KEM_IN");
+
+                if (!isPlateInput)
+                    continue;
+
+                input.actual_quantity = Math.Round(raloActual, 4);
+                input.quantity_source = "Actual";
+            }
+        }
+
+        private static decimal ResolveRaloActualPlateQuantity(
+            List<ProductionStageDto> previousStages)
+        {
+            if (previousStages == null || previousStages.Count == 0)
+                return 0m;
+
+            var raloStage = previousStages
+                .LastOrDefault(x =>
+                    string.Equals(
+                        NormDetailProcessCode(x.process_code),
+                        "RALO",
+                        StringComparison.OrdinalIgnoreCase));
+
+            if (raloStage == null)
+                return 0m;
+
+            /*
+             * Ưu tiên output actual của RALO.
+             */
+            var fromOutput = ToPositiveDecimalOrZero(
+                raloStage.output_product?.actual_quantity);
+
+            if (fromOutput > 0)
+                return fromOutput;
+
+            /*
+             * Fallback: input PLATE của RALO nếu có material_usage_json.
+             */
+            if (raloStage.input_materials != null)
+            {
+                var fromInput = raloStage.input_materials
+                    .Where(x =>
+                        x != null &&
+                        (
+                            IsPlateCode(x.code) ||
+                            IsPlateCode(x.name)
+                        ))
+                    .Select(x => ToPositiveDecimalOrZero(x.actual_quantity))
+                    .Where(x => x > 0)
+                    .DefaultIfEmpty(0m)
+                    .Max();
+
+                if (fromInput > 0)
+                    return fromInput;
+            }
+
+            if (raloStage.qty_good > 0)
+                return raloStage.qty_good;
+
+            return 0m;
+        }
+
+        private static decimal ToPositiveDecimalOrZero(decimal? value)
+        {
+            if (!value.HasValue)
+                return 0m;
+
+            return value.Value > 0m
+                ? value.Value
+                : 0m;
+        }
+
+        private static void SyncActualQuantityFieldsForProductionDetail(
+    ProductionStageDto stage)
+        {
+            if (stage == null)
+                return;
+
+            if (stage.output_product != null)
+            {
+                var outputActual = ToPositiveDecimalOrZero(
+                    stage.output_product.actual_quantity);
+
+                if (outputActual > 0)
                 {
-                    input.actual_quantity = Math.Round((decimal)prevActual, 4);
+                    stage.actual_output_quantity = Math.Round(outputActual, 4);
+
+                    if (stage.qty_good <= 0)
+                        stage.qty_good = (int)Math.Ceiling(outputActual);
+
+                    stage.output_product.quantity_source = "Actual";
+                }
+
+                if (stage.estimated_output_quantity <= 0 &&
+                    stage.output_product.estimated_quantity > 0)
+                {
+                    stage.estimated_output_quantity = stage.output_product.estimated_quantity;
                 }
             }
         }
