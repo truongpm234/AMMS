@@ -98,6 +98,8 @@ namespace AMMS.Application.Services
                     prod.planned_start_date = plan.Stages.Min(x => x.PlannedStart);
                     prod.planned_end_date = plan.Stages.Max(x => x.PlannedEnd);
 
+                    prod.group_process_codes = plan.NormalizedProcessCsv;
+
                     await _db.SaveChangesAsync();
 
                     var order = await _db.orders
@@ -212,6 +214,9 @@ namespace AMMS.Application.Services
                     prod.status = "Scheduled";
                     prod.planned_start_date = tasks.Min(x => x.planned_start_time);
                     prod.planned_end_date = tasks.Max(x => x.planned_end_time);
+                    prod.actual_start_date = null;
+                    prod.end_date = null;
+                    prod.group_process_codes = plan.NormalizedProcessCsv;
 
                     await _taskRepo.AddRangeAsync(tasks);
                     await _taskRepo.SaveChangesAsync();

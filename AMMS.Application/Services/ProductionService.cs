@@ -832,97 +832,52 @@ namespace AMMS.Application.Services
         {
             method = (method ?? "").Trim().ToUpperInvariant();
 
-            prod.gm_proposed_method ??= method;
+            if (method != "NVL" && method != "SUB" && method != "BOTH")
+                throw new InvalidOperationException($"Method không hợp lệ: {method}");
 
-            /*
-             * Chưa reserve/trừ kho ở bước auto approve.
-             */
-            prod.sub_product_id = null;
-            prod.sub_product_used_qty = 0;
-            prod.nvl_qty = 0;
-            prod.sub_product_issue_file = null;
+            prod.prod_kind = "SINGLE";
+            prod.status = "Pending";
 
-            if (method == "NVL")
-            {
-                prod.prod_method = "NVL";
-                prod.is_full_process = true;
-                prod.sub_product_id = null;
-                prod.sub_product_used_qty = 0;
-                prod.nvl_qty = orderQty;
+            prod.gm_proposed_method = method;
+            prod.prod_method = method;
 
-                ord.is_enough = true;
-                ord.is_production_ready = true;
+            prod.production_approval_flow = ProductionApprovalFlowHelper.AutoSingleOption;
 
-                return;
-            }
+            prod.is_full_process = method == "NVL"
+                ? true
+                : method == "SUB"
+                    ? false
+                    : null;
 
-            if (method == "SUB")
-            {
-                if (!matchedSubProductId.HasValue || matchedSubProductId.Value <= 0)
-                    throw new InvalidOperationException("Không tìm thấy bán thành phẩm phù hợp để auto duyệt SUB.");
+            prod.sub_product_id = method == "SUB" || method == "BOTH"
+                ? matchedSubProductId
+                : null;
 
-                var selectedSubProduct = await ResolveValidSubProductAsync(
-                    matchedSubProductId.Value,
-                    prod,
-                    req,
-                    orderQty,
-                    requireEnoughQty: true,
-                    ct);
+            prod.sub_product_used_qty = method == "SUB" || method == "BOTH"
+                ? orderQty
+                : 0;
 
-                /*
-                 * Không trừ selectedSubProduct.quantity tại đây.
-                 * Chỉ gắn sub_id và số lượng dự kiến dùng.
-                 */
-                prod.prod_method = "SUB";
-                prod.is_full_process = false;
-                prod.sub_product_id = selectedSubProduct.id;
-                prod.sub_product_used_qty = orderQty;
-                prod.nvl_qty = 0;
+            prod.nvl_qty = method == "NVL"
+                ? orderQty
+                : method == "BOTH"
+                    ? Math.Max(orderQty - (prod.sub_product_used_qty), 0)
+                    : 0;
 
-                ord.is_enough = true;
-                ord.is_production_ready = true;
+            prod.gm_note = "Hệ thống tự đề xuất vì chỉ có một phương thức sản xuất khả dụng.";
+            prod.mgr_note = "Hệ thống tự duyệt vì chỉ có một phương thức sản xuất khả dụng.";
 
-                return;
-            }
+            prod.group_process_codes = await ResolveOrderRouteCsvAsync(
+                ord.order_id,
+                ct);
 
-            if (method == "BOTH")
-            {
-                if (!matchedSubProductId.HasValue || matchedSubProductId.Value <= 0)
-                    throw new InvalidOperationException("Không tìm thấy bán thành phẩm phù hợp để auto duyệt BOTH.");
+            prod.planned_start_date = null;
+            prod.planned_end_date = null;
+            prod.actual_start_date = null;
+            prod.end_date = null;
 
-                var selectedSubProduct = await ResolveValidSubProductAsync(
-                    matchedSubProductId.Value,
-                    prod,
-                    req,
-                    orderQty,
-                    requireEnoughQty: false,
-                    ct);
-
-                var subUseQty = Math.Min(selectedSubProduct.quantity, orderQty);
-                var nvlQty = orderQty - subUseQty;
-
-                if (subUseQty <= 0)
-                    throw new InvalidOperationException("Không có số lượng bán thành phẩm hợp lệ để dùng BOTH.");
-
-                if (nvlQty <= 0)
-                    throw new InvalidOperationException("Bán thành phẩm đã đủ số lượng, nên dùng SUB thay vì BOTH.");
-
-                /*
-                 * Không trừ selectedSubProduct.quantity tại đây.
-                 */
-                prod.prod_method = "BOTH";
-                prod.is_full_process = null;
-                prod.sub_product_id = selectedSubProduct.id;
-                prod.sub_product_used_qty = subUseQty;
-                prod.nvl_qty = nvlQty;
-
-                ord.is_enough = true;
-                ord.is_production_ready = true;
-
-                return;
-            }
-
-            throw new InvalidOperationException("Unsupported production method.");
+            ord.is_production_ready = true;
+            ord.is_enough = true;
+            ord.production_id = prod.prod_id;
         }
 
         private async Task RollbackPreviousSubProductSelectionAsync(
@@ -3916,14 +3871,19 @@ namespace AMMS.Application.Services
                 .Where(x =>
                     x.order_id == ord.order_id &&
                     x.end_date == null &&
-                    x.prod_kind == "SINGLE")
+                    (
+                        x.prod_kind == null ||
+                        x.prod_kind == "SINGLE"
+                    ))
                 .OrderByDescending(x => x.prod_id)
                 .FirstOrDefaultAsync(ct);
 
             if (existing != null)
                 return existing;
 
-            int? productTypeId = await _db.order_items
+            var now = AppTime.NowVnUnspecified();
+
+            var productTypeId = await _db.order_items
                 .AsNoTracking()
                 .Where(x => x.order_id == ord.order_id)
                 .OrderBy(x => x.item_id)
@@ -3932,48 +3892,34 @@ namespace AMMS.Application.Services
 
             if (!productTypeId.HasValue || productTypeId.Value <= 0)
             {
-                productTypeId = await _db.product_types
-                    .AsNoTracking()
-                    .Where(x => x.code == req.product_type)
-                    .Select(x => (int?)x.product_type_id)
-                    .FirstOrDefaultAsync(ct);
+                productTypeId = await ResolveProductTypeIdFromRequestAsync(
+                    req,
+                    ct);
             }
 
             if (!productTypeId.HasValue || productTypeId.Value <= 0)
-                throw new InvalidOperationException("Không xác định được product_type_id để tạo production shell.");
-
-            var now = AppTime.NowVnUnspecified();
+                throw new InvalidOperationException($"Không xác định được product_type_id cho order {ord.order_id}.");
 
             var prod = new production
             {
                 code = "TMP-PROD",
                 order_id = ord.order_id,
                 manager_id = managerId,
-                created_at = now,
 
-                /*
-                 * Quan trọng:
-                 * Pending nghĩa là đã có production shell nhưng chưa lập lịch,
-                 * chưa có task.
-                 */
                 status = "Pending",
+                prod_kind = "SINGLE",
 
                 product_type_id = productTypeId.Value,
-                prod_kind = "SINGLE",
+                created_at = now,
 
                 planned_start_date = null,
                 planned_end_date = null,
                 actual_start_date = null,
                 end_date = null,
 
-                is_full_process = null,
-                prod_method = null,
-                gm_proposed_method = null,
-                production_approval_flow = null,
-
-                sub_product_id = null,
-                sub_product_used_qty = 0,
-                nvl_qty = 0
+                group_process_codes = await ResolveOrderRouteCsvAsync(
+                    ord.order_id,
+                    ct)
             };
 
             await _db.productions.AddAsync(prod, ct);
@@ -3985,6 +3931,27 @@ namespace AMMS.Application.Services
             await _db.SaveChangesAsync(ct);
 
             return prod;
+        }
+
+        private async Task<int?> ResolveProductTypeIdFromRequestAsync(
+    order_request req,
+    CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(req.product_type))
+                return null;
+
+            var codeOrName = req.product_type.Trim();
+
+            return await _db.product_types
+                .AsNoTracking()
+                .Where(x =>
+                    x.is_active == true &&
+                    (
+                        x.code == codeOrName ||
+                        x.name == codeOrName
+                    ))
+                .Select(x => (int?)x.product_type_id)
+                .FirstOrDefaultAsync(ct);
         }
 
         public async Task<ConfirmProductionScheduleResponse> ConfirmScheduleAsync(
@@ -4376,6 +4343,9 @@ namespace AMMS.Application.Services
     int orderId,
     CancellationToken ct = default)
         {
+            if (orderId <= 0)
+                throw new InvalidOperationException("order_id không hợp lệ.");
+
             var strategy = _db.Database.CreateExecutionStrategy();
 
             return await strategy.ExecuteAsync(async () =>
@@ -4386,7 +4356,16 @@ namespace AMMS.Application.Services
                     .FirstOrDefaultAsync(x => x.order_id == orderId, ct);
 
                 if (ord == null)
-                    throw new InvalidOperationException("Order not found.");
+                {
+                    await tx.CommitAsync(ct);
+
+                    return new AutoCreatePendingProductionResultDto
+                    {
+                        created = false,
+                        order_id = orderId,
+                        reason = "Order not found."
+                    };
+                }
 
                 if (!ord.layout_confirmed)
                 {
@@ -4396,28 +4375,52 @@ namespace AMMS.Application.Services
                     {
                         created = false,
                         order_id = orderId,
-                        reason = "Order chưa xác nhận layout/print-ready."
+                        reason = "Order chưa confirm layout."
+                    };
+                }
+
+                /*
+                 * Chỉ xử lý order Pending.
+                 */
+                if (!string.Equals(ord.status, "Pending", StringComparison.OrdinalIgnoreCase))
+                {
+                    await tx.CommitAsync(ct);
+
+                    return new AutoCreatePendingProductionResultDto
+                    {
+                        created = false,
+                        order_id = orderId,
+                        reason = $"Order status hiện tại là {ord.status}, không phải Pending."
                     };
                 }
 
                 var req = await _db.order_requests
-                    .AsNoTracking()
                     .Where(x => x.order_id == orderId)
                     .OrderByDescending(x => x.order_request_id)
                     .FirstOrDefaultAsync(ct);
 
                 if (req == null)
-                    throw new InvalidOperationException("Order request not found.");
+                {
+                    await tx.CommitAsync(ct);
+
+                    return new AutoCreatePendingProductionResultDto
+                    {
+                        created = false,
+                        order_id = orderId,
+                        reason = "Không tìm thấy order_request."
+                    };
+                }
 
                 var existingProd = await _db.productions
-                    .FirstOrDefaultAsync(x =>
+                    .Where(x =>
                         x.order_id == orderId &&
                         x.end_date == null &&
                         (
                             x.prod_kind == null ||
-                            x.prod_kind.ToUpper() != "GROUP"
-                        ),
-                        ct);
+                            x.prod_kind == "SINGLE"
+                        ))
+                    .OrderByDescending(x => x.prod_id)
+                    .FirstOrDefaultAsync(ct);
 
                 if (existingProd != null)
                 {
@@ -4440,10 +4443,8 @@ namespace AMMS.Application.Services
                     ct);
 
                 /*
-                 * Đúng yêu cầu mới:
-                 * - Nếu 0 method: không tạo production.
-                 * - Nếu 2+ method: không tạo production, đợi GM gọi start-ready.
-                 * - Nếu đúng 1 method: tự tạo production Pending.
+                 * Nếu 0 hoặc 2+ method thì không tạo production.
+                 * GM sẽ gọi start-ready.
                  */
                 if (availability.method_count != 1)
                 {
@@ -4469,12 +4470,6 @@ namespace AMMS.Application.Services
                     managerId: null,
                     ct);
 
-                /*
-                 * Chỉ fill field method.
-                 * Không tạo task.
-                 * Không lập lịch.
-                 * Không trừ NVL/BTP.
-                 */
                 await ApplyAutoProductionMethodAsync(
                     ord,
                     prod,
@@ -4484,10 +4479,26 @@ namespace AMMS.Application.Services
                     availability.matched_sub_product_id,
                     ct);
 
+                /*
+                 * Flow auto 1 method:
+                 * xem như GM đề xuất và Manager duyệt luôn.
+                 * Nhưng CHƯA lập lịch, CHƯA tạo task.
+                 */
                 prod.status = "Pending";
+                prod.prod_kind = "SINGLE";
                 prod.gm_proposed_method = method;
                 prod.prod_method = method;
                 prod.production_approval_flow = ProductionApprovalFlowHelper.AutoSingleOption;
+
+                prod.gm_note = "Hệ thống tự đề xuất vì chỉ có một phương thức sản xuất khả dụng.";
+                prod.mgr_note = "Hệ thống tự duyệt vì chỉ có một phương thức sản xuất khả dụng.";
+
+                prod.group_process_codes = await ResolveOrderRouteCsvAsync(orderId, ct);
+
+                prod.planned_start_date = null;
+                prod.planned_end_date = null;
+                prod.actual_start_date = null;
+                prod.end_date = null;
 
                 ord.status = "Pending";
                 ord.is_production_ready = true;
@@ -4508,6 +4519,93 @@ namespace AMMS.Application.Services
                     reason = "Chỉ có 1 method khả dụng nên hệ thống tự tạo production Pending và auto approve method."
                 };
             });
+        }
+
+        private async Task<string> ResolveOrderRouteCsvAsync(
+    int orderId,
+    CancellationToken ct)
+        {
+            var item = await _db.order_items
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderBy(x => x.item_id)
+                .Select(x => new
+                {
+                    x.product_type_id,
+                    x.production_process
+                })
+                .FirstOrDefaultAsync(ct);
+
+            var fromOrderItem = ParseProcessCodes(item?.production_process);
+
+            if (fromOrderItem.Count > 0)
+            {
+                return string.Join(",",
+                    fromOrderItem
+                        .Select(NormProcessCode)
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(FullRouteIndex));
+            }
+
+            if (item?.product_type_id == null || item.product_type_id.Value <= 0)
+                return "";
+
+            var fromMaster = await _db.product_type_processes
+                .AsNoTracking()
+                .Where(x =>
+                    x.product_type_id == item.product_type_id.Value &&
+                    (x.is_active ?? true))
+                .OrderBy(x => x.seq_num)
+                .Select(x => x.process_code)
+                .ToListAsync(ct);
+
+            return string.Join(",",
+                fromMaster
+                    .Select(NormProcessCode)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(FullRouteIndex));
+        }
+
+        private static readonly string[] FullRouteOrder =
+        {
+            "RALO", "CAT", "IN", "PHU", "CAN", "BOI", "BE", "DUT", "DAN"
+        };
+
+        private static string NormProcessCode(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+        }
+
+        private static int FullRouteIndex(string? value)
+        {
+            var code = NormProcessCode(value);
+
+            var idx = Array.FindIndex(
+                FullRouteOrder,
+                x => string.Equals(x, code, StringComparison.OrdinalIgnoreCase));
+
+            return idx < 0 ? 999 : idx;
+        }
+
+        private static List<string> ParseProcessCodes(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\', '\n', '\r', '\t' },
+                    StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
         }
 
         private async Task ApplyAutoProductionMethodFieldOnlyAsync(
