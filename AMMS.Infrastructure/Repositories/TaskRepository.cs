@@ -637,14 +637,6 @@ namespace AMMS.Infrastructure.Repositories
                 }
             }
 
-            /*
-             * FIX:
-             * Không lấy req.quantity trước nữa.
-             * Với SUB/BOTH downstream, số lượng report phải theo production đã được duyệt:
-             * - SUB  => prod.sub_product_used_qty
-             * - BOTH => prod.sub_product_used_qty + prod.nvl_qty
-             * - GROUP => prod.group_total_qty
-             */
             decimal productQty = policyProductQty > 0
                 ? policyProductQty
                 : Math.Max(
@@ -665,7 +657,56 @@ namespace AMMS.Infrastructure.Repositories
                 explicitSheetsBase: sheetsBase,
                 coatingType: est.coating_type);
 
+            var route = (routeCodes ?? Array.Empty<string?>())
+                .Select(NormPolicyCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            var stageIndex = route.FindIndex(x =>
+                string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase));
+
+            /*
+             * Base suggested là output_qty theo quy ước hao hụt.
+             */
             var suggested = Math.Max((int)Math.Ceiling(stageQty.output_qty), 1);
+
+            /*
+             * Nếu công đoạn trước đã có actual output, thì giới hạn không được vượt quá actual previous.
+             * Nhưng với BOTH ở công đoạn đầu sau boundary, actual previous chỉ là phần NVL,
+             * nên phải cộng thêm BTP đã dùng.
+             */
+            var previousActual = await ResolvePreviousActualQtyForPolicyAsync(
+                prod,
+                currentTask,
+                route,
+                stageIndex,
+                ct);
+
+            if (method == "SUB")
+            {
+                if (previousActual > 0)
+                    suggested = Math.Max((int)Math.Ceiling(previousActual), 1);
+            }
+
+            if (method == "BOTH")
+            {
+                var isFirstAfterSub = IsFirstStageAfterSubBoundaryForPolicy(
+                    currentCode,
+                    routeCodes,
+                    subCodes);
+
+                if (isFirstAfterSub)
+                {
+                    var combined = previousActual + Math.Max(prod.sub_product_used_qty, 0);
+
+                    if (combined > 0)
+                        suggested = Math.Max((int)Math.Ceiling(combined), 1);
+                }
+                else if (previousActual > 0)
+                {
+                    suggested = Math.Max((int)Math.Ceiling(previousActual), 1);
+                }
+            }
 
             return new TaskQtyPolicyDto
             {
@@ -689,11 +730,7 @@ namespace AMMS.Infrastructure.Repositories
                 n_up = nUp,
                 number_of_plates = req.number_of_plates ?? 0,
 
-                stage_index = routeCodes
-                    .Select(NormPolicyCode)
-                    .ToList()
-                    .FindIndex(x => string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase)),
-
+                stage_index = stageIndex,
                 stage_count = routeCodes.Count,
 
                 production_output_qty = suggested,
@@ -719,12 +756,120 @@ namespace AMMS.Infrastructure.Repositories
                 group_total_qty = prod.group_total_qty,
 
                 manual_input_hint =
-                    $"SUB/BOTH downstream: qty_good là output sau công đoạn {currentCode}. " +
-                    $"ProductQty={stageQty.product_qty}, " +
-                    $"CurrentWaste={stageQty.current_stage_waste_qty}, " +
-                    $"DownstreamWaste={stageQty.downstream_waste_qty}, " +
-                    $"InputQty={stageQty.input_qty}, OutputQty={stageQty.output_qty}."
+                    $"{method} downstream: suggested/max theo dữ liệu production và actual previous nếu đã có. " +
+                    $"ProductQty={stageQty.product_qty}, InputQty={stageQty.input_qty}, OutputQty={stageQty.output_qty}, " +
+                    $"PreviousActual={Math.Round(previousActual, 4)}."
             };
+        }
+
+        private async Task<decimal> ResolvePreviousActualQtyForPolicyAsync(
+    production prod,
+    task currentTask,
+    IReadOnlyList<string> normalizedRoute,
+    int currentStageIndex,
+    CancellationToken ct)
+        {
+            if (prod == null || currentTask == null)
+                return 0m;
+
+            if (currentStageIndex <= 0 || currentStageIndex >= normalizedRoute.Count)
+                return 0m;
+
+            var previousCode = normalizedRoute[currentStageIndex - 1];
+
+            if (string.IsNullOrWhiteSpace(previousCode))
+                return 0m;
+
+            /*
+             * Ưu tiên actual theo task trong cùng production.
+             */
+            if (currentTask.prod_id.HasValue)
+            {
+                var previousTaskIds = await (
+                    from t in _db.tasks.AsNoTracking()
+                    join pp0 in _db.product_type_processes.AsNoTracking()
+                        on t.process_id equals pp0.process_id into ppj
+                    from pp in ppj.DefaultIfEmpty()
+                    where t.prod_id == currentTask.prod_id.Value
+                          && t.task_id != currentTask.task_id
+                          && pp != null
+                          && pp.process_code != null
+                          && pp.process_code.Trim().ToUpper() == previousCode
+                    select t.task_id
+                )
+                .Distinct()
+                .ToListAsync(ct);
+
+                if (previousTaskIds.Count > 0)
+                {
+                    var qty = await _db.task_logs
+                        .AsNoTracking()
+                        .Where(x =>
+                            x.task_id.HasValue &&
+                            previousTaskIds.Contains(x.task_id.Value) &&
+                            x.action_type == "Finished")
+                        .SumAsync(x => x.qty_good ?? 0, ct);
+
+                    if (qty > 0)
+                        return qty;
+                }
+            }
+
+            /*
+             * Nếu previous là GROUP task, sản lượng nằm trong task_qtys.
+             */
+            if (prod.order_id.HasValue)
+            {
+                var groupQty = await _db.task_qtys
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.order_id == prod.order_id.Value &&
+                        x.process_code != null &&
+                        x.process_code.Trim().ToUpper() == previousCode &&
+                        x.qty_good > 0)
+                    .OrderByDescending(x => x.created_at)
+                    .Select(x => (decimal?)x.qty_good)
+                    .FirstOrDefaultAsync(ct);
+
+                if (groupQty.HasValue && groupQty.Value > 0)
+                    return groupQty.Value;
+            }
+
+            return 0m;
+        }
+
+        private static bool IsFirstStageAfterSubBoundaryForPolicy(
+            string? currentProcessCode,
+            IReadOnlyList<string?> routeCodes,
+            IReadOnlyList<string> subCodes)
+        {
+            var route = (routeCodes ?? Array.Empty<string?>())
+                .Select(NormPolicyCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            if (route.Count == 0 || subCodes == null || subCodes.Count == 0)
+                return false;
+
+            var current = NormPolicyCode(currentProcessCode);
+
+            var currentIndex = route.FindIndex(x =>
+                string.Equals(x, current, StringComparison.OrdinalIgnoreCase));
+
+            if (currentIndex < 0)
+                return false;
+
+            var subIndexes = subCodes
+                .Select(NormPolicyCode)
+                .Select(code => route.FindIndex(x =>
+                    string.Equals(x, code, StringComparison.OrdinalIgnoreCase)))
+                .Where(x => x >= 0)
+                .ToList();
+
+            if (subIndexes.Count == 0)
+                return false;
+
+            return currentIndex == subIndexes.Max() + 1;
         }
 
         private async Task<List<string>> ResolveSubProductProcessCodesForPolicyAsync(

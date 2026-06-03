@@ -1907,6 +1907,7 @@ public class TasksController : ControllerBase
         {
             return new GroupQrQtyPolicy
             {
+                IsGroupSub = false,
                 MinAllowed = 1,
                 MaxAllowed = 1,
                 SuggestedQty = 1,
@@ -1917,72 +1918,170 @@ public class TasksController : ControllerBase
             };
         }
 
-        var groupTotalQty = taskMeta.prod.group_total_qty > 0
-            ? taskMeta.prod.group_total_qty
+        var prod = taskMeta.prod;
+
+        var groupTotalQty = prod.group_total_qty > 0
+            ? prod.group_total_qty
             : 1;
 
-        var policy = new GroupQrQtyPolicy
-        {
-            IsGroupSub = false,
-            MinAllowed = 1,
-            MaxAllowed = groupTotalQty,
-            SuggestedQty = groupTotalQty,
-            HappyCaseQty = groupTotalQty,
-            QtyUnit = "sp",
-            Hint = "Task group cho phép nhập tay NVL, BTP input và output khi finish.",
-            ReferenceInputs = preparedReferenceInputs?.ToList() ?? new List<TaskReferenceInputDto>()
-        };
-
-        if (!IsGroupSubTask(taskMeta))
-            return policy;
+        var refs = preparedReferenceInputs?.ToList()
+            ?? new List<TaskReferenceInputDto>();
 
         /*
-         * FIX GROUP + SUB:
-         * Dùng planned input BTP, ví dụ 6290.
-         * Không dùng actual_qty_prev_stage 7674 lấy từ log IN.
+         * Nếu bundle truyền vào chưa có reference_inputs thì tự build lại.
          */
-        var plannedInputQtyDecimal = ResolveGroupSubPlannedInputQty(
-            preparedReferenceInputs);
-
-        if (plannedInputQtyDecimal <= 0)
+        if (refs.Count == 0)
         {
             var bundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
                 taskMeta.task_id,
                 ct);
 
-            plannedInputQtyDecimal = ResolveGroupSubPlannedInputQty(
-                bundle.reference_inputs);
-
-            preparedReferenceInputs = bundle.reference_inputs;
+            refs = bundle.reference_inputs?.ToList()
+                ?? new List<TaskReferenceInputDto>();
         }
 
-        var plannedInputQty = CeilPositive(plannedInputQtyDecimal);
-
-        if (plannedInputQty <= 0)
-            plannedInputQty = groupTotalQty;
-
-        policy.IsGroupSub = true;
+        /*
+         * FIX CHÍNH:
+         * Không chỉ xử lý GROUP + SUB nữa.
+         * Tất cả GROUP đều lấy chuẩn số lượng theo reference_inputs đã aggregate:
+         *
+         * - NVL-NVL: estimated_qty đã được set theo actual previous output của từng order NVL.
+         * - SUB-SUB: estimated_qty là BTP planned input của từng order SUB.
+         * - SUB-NVL/MIXED: estimated_qty = actual previous NVL + BTP planned SUB.
+         */
+        var preparedQty = ResolveGroupPreparedQtyForQrPolicy(refs);
 
         /*
-         * Với task 102:
-         * groupTotalQty = 6000
-         * plannedInputQty = 6290
+         * Nếu FE đang tạo QR và gửi reference_inputs_json thì ưu tiên số lượng FE gửi
+         * để token/report đồng bộ với input thực tế FE xác nhận.
+         *
+         * Nhưng chỉ dùng submitted khi > 0. Nếu không, dùng preparedQty.
          */
-        policy.MaxAllowed = plannedInputQty;
-        policy.SuggestedQty = plannedInputQty;
-        policy.HappyCaseQty = plannedInputQty;
+        var submittedQty = ResolveActualQtyFromSubmittedReferenceInputs(
+            submittedReferenceInputs);
 
-        policy.ReferenceInputs = NormalizeGroupSubReferenceInputs(
-            preparedReferenceInputs,
-            plannedInputQty);
+        var effectiveQtyDecimal = submittedQty > 0
+            ? submittedQty
+            : preparedQty;
 
-        policy.Hint =
-            $"GROUP + SUB: order_qty/group_total_qty = {groupTotalQty} sp; " +
-            $"BTP đầu vào dự kiến đã cộng hao phí sau SUB = {plannedInputQty} sp. " +
-            $"Hệ thống validate theo BTP đầu vào dự kiến, không dùng log actual IN cũ.";
+        var effectiveQty = CeilPositive(effectiveQtyDecimal);
 
-        return policy;
+        if (effectiveQty <= 0)
+            effectiveQty = groupTotalQty;
+
+        var normalizedRefs = NormalizeGroupReferenceInputsForQrPolicy(
+            refs,
+            effectiveQty);
+
+        var methodLabel = string.IsNullOrWhiteSpace(prod.prod_method)
+            ? "GROUP"
+            : prod.prod_method.Trim().ToUpperInvariant();
+
+        return new GroupQrQtyPolicy
+        {
+            /*
+             * Giữ field cũ.
+             * IsGroupSub giờ hiểu là group có reference input từ BTP/SUB/MIXED,
+             * không chỉ riêng prod_method = SUB.
+             */
+            IsGroupSub = refs.Count > 0,
+
+            MinAllowed = 1,
+            MaxAllowed = effectiveQty,
+            SuggestedQty = effectiveQty,
+            HappyCaseQty = effectiveQty,
+
+            QtyUnit = "sp",
+
+            ReferenceInputs = normalizedRefs,
+
+            Hint =
+                $"GROUP {methodLabel}: qty_good lấy theo tổng input thực tế/dự kiến của công đoạn ghép. " +
+                $"group_total_qty={groupTotalQty}; prepared_reference_qty={Math.Round(preparedQty, 4)}; " +
+                $"submitted_reference_qty={Math.Round(submittedQty, 4)}; effective_qty={effectiveQty}. " +
+                $"Case MIXED SUB-NVL: hệ thống cộng actual output từ order NVL và BTP planned input từ order SUB."
+        };
     }
+
+    private static decimal ResolveGroupPreparedQtyForQrPolicy(
+    IReadOnlyList<TaskReferenceInputDto>? referenceInputs)
+    {
+        if (referenceInputs == null || referenceInputs.Count == 0)
+            return 0m;
+
+        /*
+         * Ưu tiên estimated_qty vì sau khi sửa TaskScanService:
+         * - NVL link: estimated_qty = actual previous output nếu có.
+         * - SUB link: estimated_qty = BTP planned input.
+         * - MIXED: estimated_qty = SUM(NVL actual + SUB planned).
+         */
+        var estimated = referenceInputs
+            .Where(x => x != null)
+            .Sum(x => x.estimated_qty);
+
+        if (estimated > 0)
+            return estimated;
+
+        var actual = referenceInputs
+            .Where(x => x != null)
+            .Sum(x => x.actual_qty_prev_stage);
+
+        return actual > 0 ? actual : 0m;
+    }
+
+    private static List<TaskReferenceInputDto> NormalizeGroupReferenceInputsForQrPolicy(
+        IReadOnlyList<TaskReferenceInputDto>? referenceInputs,
+        int effectiveQty)
+    {
+        var refs = (referenceInputs ?? Array.Empty<TaskReferenceInputDto>())
+            .Where(x => x != null)
+            .Select(x =>
+            {
+                var estimated = x.estimated_qty > 0
+                    ? x.estimated_qty
+                    : x.actual_qty_prev_stage;
+
+                var actual = x.actual_qty_prev_stage > 0
+                    ? x.actual_qty_prev_stage
+                    : estimated;
+
+                return new TaskReferenceInputDto
+                {
+                    input_code = string.IsNullOrWhiteSpace(x.input_code)
+                        ? "REFERENCE_INPUT"
+                        : x.input_code,
+
+                    input_name = string.IsNullOrWhiteSpace(x.input_name)
+                        ? "Bán thành phẩm đầu vào"
+                        : x.input_name,
+
+                    unit = string.IsNullOrWhiteSpace(x.unit)
+                        ? "sp"
+                        : x.unit,
+
+                    estimated_qty = Math.Round(estimated, 4),
+                    actual_qty_prev_stage = Math.Round(actual, 4)
+                };
+            })
+            .ToList();
+
+        if (refs.Count > 0)
+            return refs;
+
+        return new List<TaskReferenceInputDto>
+    {
+        new TaskReferenceInputDto
+        {
+            input_code = "REFERENCE_INPUT",
+            input_name = "Bán thành phẩm đầu vào",
+            unit = "sp",
+            estimated_qty = effectiveQty,
+            actual_qty_prev_stage = effectiveQty
+        }
+    };
+    }
+
+
 
     private static readonly JsonSerializerOptions QrSubmittedJsonOptions = new()
     {
