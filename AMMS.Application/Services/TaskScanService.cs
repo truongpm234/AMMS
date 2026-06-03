@@ -1934,13 +1934,35 @@ namespace AMMS.Application.Services
                 return null;
             }
 
+            var rawBundle = await BuildRawGroupTaskQrMaterialBundleAsync(
+                groupTask,
+                ct);
+
+            /*
+             * FIX CHÍNH:
+             * Đồng bộ qr-prepare với groupProduction/detail.
+             *
+             * Ví dụ:
+             * - PHU Finished actual = 5090
+             * - QR prepare CAN phải trả 5090, không trả lại estimate riêng 4626.
+             */
+            return await NormalizeGroupQrBundleBySequentialFlowAsync(
+                groupTask,
+                rawBundle,
+                ct);
+        }
+
+        private async Task<TaskQrMaterialBundleDto> BuildRawGroupTaskQrMaterialBundleAsync(
+    task groupTask,
+    CancellationToken ct)
+        {
             var currentProcessCode = ProductionFlowHelper.Norm(
                 groupTask.process?.process_code);
 
             var links = await _db.task_links
                 .AsNoTracking()
                 .Where(x =>
-                    x.group_task_id == groupTaskId &&
+                    x.group_task_id == groupTask.task_id &&
                     (
                         x.status == null ||
                         x.status.ToUpper() != "CANCELLED"
@@ -1970,22 +1992,9 @@ namespace AMMS.Application.Services
                 if (singleCtx == null)
                     continue;
 
-                /*
-                 * FIX:
-                 * Không lấy đại diện 1 order.
-                 * Mỗi order trong group tự build NVL theo cost_estimate của nó.
-                 * Sau đó AggregateConsumableMaterials sẽ SUM theo material_id/material_code/unit.
-                 *
-                 * CAN/CAN_MANG:
-                 * estimated_input_qty = SUM(cost_estimate.lamination_weight_kg của từng order)
-                 *
-                 * PHU:
-                 * estimated_input_qty = SUM(coating_glue_weight_kg)
-                 *
-                 * BOI:
-                 * estimated_input_qty = SUM(wave_sheets_used + mounting_glue_weight_kg)
-                 */
-                var mats = await BuildConsumableMaterialsAsync(singleCtx, ct);
+                var mats = await BuildConsumableMaterialsAsync(
+                    singleCtx,
+                    ct);
 
                 var refs = await BuildReferenceInputsForGroupLinkAsync(
                     singleCtx,
@@ -2002,6 +2011,233 @@ namespace AMMS.Application.Services
                 consumable_materials = AggregateConsumableMaterials(allMaterials),
                 reference_inputs = AggregateReferenceInputs(allRefs)
             };
+        }
+
+        private async Task<TaskQrMaterialBundleDto> NormalizeGroupQrBundleBySequentialFlowAsync(
+    task currentGroupTask,
+    TaskQrMaterialBundleDto rawBundle,
+    CancellationToken ct)
+        {
+            rawBundle ??= new TaskQrMaterialBundleDto();
+
+            rawBundle.consumable_materials ??= new List<TaskConsumableMaterialDto>();
+            rawBundle.reference_inputs ??= new List<TaskReferenceInputDto>();
+
+            if (!currentGroupTask.prod_id.HasValue)
+                return rawBundle;
+
+            if (!currentGroupTask.seq_num.HasValue)
+                return rawBundle;
+
+            var currentCode = ProductionFlowHelper.Norm(
+                currentGroupTask.process?.process_code);
+
+            if (string.IsNullOrWhiteSpace(currentCode))
+                return rawBundle;
+
+            var previousGroupTask = await _db.tasks
+                .AsNoTracking()
+                .Include(x => x.process)
+                .Where(x =>
+                    x.prod_id == currentGroupTask.prod_id.Value &&
+                    x.task_id != currentGroupTask.task_id &&
+                    x.seq_num.HasValue &&
+                    x.seq_num.Value < currentGroupTask.seq_num.Value)
+                .OrderByDescending(x => x.seq_num)
+                .ThenByDescending(x => x.task_id)
+                .FirstOrDefaultAsync(ct);
+
+            /*
+             * Công đoạn đầu tiên của GROUP giữ raw estimate:
+             * Ví dụ PHU lấy tổng input từ IN/SUB/MIXED.
+             */
+            if (previousGroupTask == null)
+                return rawBundle;
+
+            var oldRawQty = ResolvePreparedReferenceQtyForQrBundle(
+                rawBundle.reference_inputs);
+
+            var previousOutputQty = await ResolveGroupTaskSequentialOutputQtyAsync(
+                previousGroupTask,
+                depth: 0,
+                ct);
+
+            if (previousOutputQty <= 0)
+                return rawBundle;
+
+            var newQty = RoundQty(previousOutputQty);
+
+            /*
+             * Override reference_inputs:
+             * CAN input = output PHU
+             * BOI input = output CAN
+             */
+            rawBundle.reference_inputs = BuildSequentialGroupReferenceInputs(
+                previousGroupTask,
+                newQty);
+
+            /*
+             * Scale NVL/vật tư tiêu hao theo qty mới.
+             * Ví dụ CAN: MANG_12MIC 28.8427 * 5090 / 4626 = 31.7357.
+             */
+            rawBundle.consumable_materials = ScaleConsumableMaterialsForSequentialQty(
+                rawBundle.consumable_materials,
+                oldRawQty,
+                newQty);
+
+            return rawBundle;
+        }
+
+        private async Task<decimal> ResolveGroupTaskSequentialOutputQtyAsync(
+    task groupTask,
+    int depth,
+    CancellationToken ct)
+        {
+            /*
+             * Chặn vòng lặp phòng khi data lỗi.
+             */
+            if (depth > 20)
+                return 0m;
+
+            var actualFromLog = await ResolveActualOutputQtyFromTaskLogsAsync(
+                new List<int> { groupTask.task_id },
+                ct);
+
+            if (actualFromLog > 0)
+                return actualFromLog;
+
+            if (groupTask.end_time.HasValue ||
+                string.Equals(groupTask.status, "Finished", StringComparison.OrdinalIgnoreCase))
+            {
+                var qtyGood = await _db.task_logs
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.task_id == groupTask.task_id &&
+                        x.action_type == "Finished" &&
+                        x.qty_good.HasValue &&
+                        x.qty_good.Value > 0)
+                    .OrderByDescending(x => x.log_time ?? DateTime.MinValue)
+                    .ThenByDescending(x => x.log_id)
+                    .Select(x => (decimal?)x.qty_good!.Value)
+                    .FirstOrDefaultAsync(ct);
+
+                if (qtyGood.HasValue && qtyGood.Value > 0)
+                    return qtyGood.Value;
+            }
+
+            if (!groupTask.prod_id.HasValue || !groupTask.seq_num.HasValue)
+                return 0m;
+
+            /*
+             * Nếu task trước chưa Finished thì lấy estimate tuần tự của task trước.
+             * Ví dụ BOI chưa chạy, CAN chưa Finished nhưng CAN estimated đã được normalize = 5090.
+             */
+            var rawBundle = await BuildRawGroupTaskQrMaterialBundleAsync(
+                groupTask,
+                ct);
+
+            var rawQty = ResolvePreparedReferenceQtyForQrBundle(
+                rawBundle.reference_inputs);
+
+            var previousGroupTask = await _db.tasks
+                .AsNoTracking()
+                .Include(x => x.process)
+                .Where(x =>
+                    x.prod_id == groupTask.prod_id.Value &&
+                    x.task_id != groupTask.task_id &&
+                    x.seq_num.HasValue &&
+                    x.seq_num.Value < groupTask.seq_num.Value)
+                .OrderByDescending(x => x.seq_num)
+                .ThenByDescending(x => x.task_id)
+                .FirstOrDefaultAsync(ct);
+
+            if (previousGroupTask == null)
+                return rawQty;
+
+            var prevSequentialQty = await ResolveGroupTaskSequentialOutputQtyAsync(
+                previousGroupTask,
+                depth + 1,
+                ct);
+
+            return prevSequentialQty > 0
+                ? prevSequentialQty
+                : rawQty;
+        }
+
+        private static decimal ResolvePreparedReferenceQtyForQrBundle(
+    IReadOnlyList<TaskReferenceInputDto>? refs)
+        {
+            if (refs == null || refs.Count == 0)
+                return 0m;
+
+            return refs
+                .Where(x => x != null)
+                .Sum(x =>
+                {
+                    var estimated = x.estimated_qty > 0 ? x.estimated_qty : 0m;
+                    var actual = x.actual_qty_prev_stage > 0 ? x.actual_qty_prev_stage : 0m;
+
+                    return Math.Max(estimated, actual);
+                });
+        }
+
+        private static List<TaskReferenceInputDto> BuildSequentialGroupReferenceInputs(
+            task previousGroupTask,
+            decimal qty)
+        {
+            var previousCode = ProductionFlowHelper.Norm(
+                previousGroupTask.process?.process_code);
+
+            var previousName = ResolveReferenceInputDisplayName(previousCode);
+
+            return new List<TaskReferenceInputDto>
+    {
+        new TaskReferenceInputDto
+        {
+            input_code = previousCode,
+            input_name = previousName,
+            unit = "sp",
+            estimated_qty = RoundQty(qty),
+            actual_qty_prev_stage = RoundQty(qty)
+        }
+    };
+        }
+
+        private static List<TaskConsumableMaterialDto> ScaleConsumableMaterialsForSequentialQty(
+            List<TaskConsumableMaterialDto>? materials,
+            decimal oldQty,
+            decimal newQty)
+        {
+            if (materials == null || materials.Count == 0)
+                return new List<TaskConsumableMaterialDto>();
+
+            if (oldQty <= 0 || newQty <= 0)
+                return materials;
+
+            if (Math.Abs(oldQty - newQty) < 0.0001m)
+                return materials;
+
+            var ratio = newQty / oldQty;
+
+            if (ratio <= 0)
+                return materials;
+
+            return materials.Select(x => new TaskConsumableMaterialDto
+            {
+                material_id = x.material_id,
+                material_code = x.material_code,
+                material_name = x.material_name,
+                unit = x.unit,
+
+                estimated_input_qty = RoundQty(x.estimated_input_qty * ratio),
+
+                is_mapped = x.is_mapped
+            }).ToList();
+        }
+
+        private static decimal RoundQty(decimal value)
+        {
+            return Math.Round(value, 4, MidpointRounding.AwayFromZero);
         }
 
         private async Task<TaskEstimateContext?> GetGroupLinkEstimateContextAsync(

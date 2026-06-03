@@ -639,15 +639,13 @@ namespace AMMS.Infrastructure.Repositories
 
             decimal productQty = policyProductQty > 0
                 ? policyProductQty
-                : Math.Max(
-                    (decimal)(prod.sub_product_used_qty + prod.nvl_qty),
-                    1m);
+                : Math.Max((decimal)(prod.sub_product_used_qty + prod.nvl_qty), 1m);
 
             var nUp = est.n_up > 0 ? est.n_up : 1;
 
             var sheetsBase = est.sheets_required > 0
                 ? est.sheets_required
-                : (int)Math.Ceiling(productQty / (decimal)nUp);
+                : (int)Math.Ceiling(productQty / nUp);
 
             var stageQty = SubProductionQuantityHelper.ResolveStageQty(
                 currentProcessCode: currentCode,
@@ -665,16 +663,10 @@ namespace AMMS.Infrastructure.Repositories
             var stageIndex = route.FindIndex(x =>
                 string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase));
 
-            /*
-             * Base suggested là output_qty theo quy ước hao hụt.
-             */
-            var suggested = Math.Max((int)Math.Ceiling(stageQty.output_qty), 1);
+            var suggestedDecimal = stageQty.output_qty > 0
+                ? stageQty.output_qty
+                : stageQty.input_qty;
 
-            /*
-             * Nếu công đoạn trước đã có actual output, thì giới hạn không được vượt quá actual previous.
-             * Nhưng với BOTH ở công đoạn đầu sau boundary, actual previous chỉ là phần NVL,
-             * nên phải cộng thêm BTP đã dùng.
-             */
             var previousActual = await ResolvePreviousActualQtyForPolicyAsync(
                 prod,
                 currentTask,
@@ -682,12 +674,21 @@ namespace AMMS.Infrastructure.Repositories
                 stageIndex,
                 ct);
 
+            /*
+             * SUB:
+             * Sau boundary BTP, nếu công đoạn trước đã có actual thì lấy actual.
+             */
             if (method == "SUB")
             {
                 if (previousActual > 0)
-                    suggested = Math.Max((int)Math.Ceiling(previousActual), 1);
+                    suggestedDecimal = previousActual;
             }
 
+            /*
+             * BOTH:
+             * Công đoạn đầu sau boundary = actual phần NVL trước đó + sub_product_used_qty.
+             * Các công đoạn sau = actual output của công đoạn trước nếu có.
+             */
             if (method == "BOTH")
             {
                 var isFirstAfterSub = IsFirstStageAfterSubBoundaryForPolicy(
@@ -700,13 +701,17 @@ namespace AMMS.Infrastructure.Repositories
                     var combined = previousActual + Math.Max(prod.sub_product_used_qty, 0);
 
                     if (combined > 0)
-                        suggested = Math.Max((int)Math.Ceiling(combined), 1);
+                        suggestedDecimal = combined;
                 }
                 else if (previousActual > 0)
                 {
-                    suggested = Math.Max((int)Math.Ceiling(previousActual), 1);
+                    suggestedDecimal = previousActual;
                 }
             }
+
+            var suggested = Math.Max(
+                (int)Math.Ceiling(suggestedDecimal),
+                1);
 
             return new TaskQtyPolicyDto
             {
@@ -756,7 +761,7 @@ namespace AMMS.Infrastructure.Repositories
                 group_total_qty = prod.group_total_qty,
 
                 manual_input_hint =
-                    $"{method} downstream: suggested/max theo dữ liệu production và actual previous nếu đã có. " +
+                    $"{method}: suggested/max lấy theo flow thực tế. " +
                     $"ProductQty={stageQty.product_qty}, InputQty={stageQty.input_qty}, OutputQty={stageQty.output_qty}, " +
                     $"PreviousActual={Math.Round(previousActual, 4)}."
             };
@@ -781,42 +786,41 @@ namespace AMMS.Infrastructure.Repositories
                 return 0m;
 
             /*
-             * Ưu tiên actual theo task trong cùng production.
+             * CASE 1:
+             * Previous là task trực tiếp trong production hiện tại.
              */
             if (currentTask.prod_id.HasValue)
             {
                 var previousTaskIds = await (
                     from t in _db.tasks.AsNoTracking()
+
                     join pp0 in _db.product_type_processes.AsNoTracking()
                         on t.process_id equals pp0.process_id into ppj
                     from pp in ppj.DefaultIfEmpty()
+
                     where t.prod_id == currentTask.prod_id.Value
                           && t.task_id != currentTask.task_id
                           && pp != null
                           && pp.process_code != null
                           && pp.process_code.Trim().ToUpper() == previousCode
+
                     select t.task_id
                 )
                 .Distinct()
                 .ToListAsync(ct);
 
-                if (previousTaskIds.Count > 0)
-                {
-                    var qty = await _db.task_logs
-                        .AsNoTracking()
-                        .Where(x =>
-                            x.task_id.HasValue &&
-                            previousTaskIds.Contains(x.task_id.Value) &&
-                            x.action_type == "Finished")
-                        .SumAsync(x => x.qty_good ?? 0, ct);
+                var directQty = await ResolveLatestFinishedQtyFromTaskIdsAsync(
+                    previousTaskIds,
+                    ct);
 
-                    if (qty > 0)
-                        return qty;
-                }
+                if (directQty > 0)
+                    return directQty;
             }
 
             /*
-             * Nếu previous là GROUP task, sản lượng nằm trong task_qtys.
+             * CASE 2:
+             * Previous là GROUP task, sản lượng phân bổ nằm ở task_qtys.
+             * Dùng cho SPLIT sau group.
              */
             if (prod.order_id.HasValue)
             {
@@ -836,6 +840,49 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             return 0m;
+        }
+
+        private async Task<decimal> ResolveLatestFinishedQtyFromTaskIdsAsync(
+    List<int> taskIds,
+    CancellationToken ct)
+        {
+            if (taskIds == null || taskIds.Count == 0)
+                return 0m;
+
+            var logs = await _db.task_logs
+                .AsNoTracking()
+                .Where(x =>
+                    x.task_id.HasValue &&
+                    taskIds.Contains(x.task_id.Value) &&
+                    x.action_type == "Finished" &&
+                    x.qty_good.HasValue &&
+                    x.qty_good.Value > 0)
+                .Select(x => new
+                {
+                    task_id = x.task_id!.Value,
+                    qty_good = x.qty_good!.Value,
+                    log_time = x.log_time,
+                    log_id = x.log_id,
+                    output_json = x.output_json
+                })
+                .ToListAsync(ct);
+
+            if (logs.Count == 0)
+                return 0m;
+
+            /*
+             * Mỗi task lấy log Finished mới nhất.
+             * Không cộng tất cả log cũ để tránh double khi test/recovery.
+             */
+            var latestPerTask = logs
+                .GroupBy(x => x.task_id)
+                .Select(g => g
+                    .OrderByDescending(x => x.log_time ?? DateTime.MinValue)
+                    .ThenByDescending(x => x.log_id)
+                    .First())
+                .ToList();
+
+            return latestPerTask.Sum(x => (decimal)x.qty_good);
         }
 
         private static bool IsFirstStageAfterSubBoundaryForPolicy(
@@ -1037,9 +1084,9 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         private async Task<int?> GetPreviousFinishedQtyGoodCapAsync(
-            List<task> route,
-            int currentIndex,
-            CancellationToken ct = default)
+    List<task> route,
+    int currentIndex,
+    CancellationToken ct = default)
         {
             if (route == null || route.Count == 0)
                 return null;
@@ -1062,17 +1109,14 @@ namespace AMMS.Infrastructure.Repositories
                 return null;
             }
 
-            var qty = await _db.task_logs
-                .AsNoTracking()
-                .Where(x =>
-                    x.task_id == previous.task_id &&
-                    x.action_type == "Finished")
-                .SumAsync(x => x.qty_good ?? 0, ct);
+            var qty = await ResolveLatestFinishedQtyFromTaskIdsAsync(
+                new List<int> { previous.task_id },
+                ct);
 
             if (qty <= 0)
                 return null;
 
-            return qty;
+            return (int)Math.Ceiling(qty);
         }
 
         private static int SafePositive(int value, int fallback = 1)

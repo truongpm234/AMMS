@@ -1783,14 +1783,6 @@ public class TasksController : ControllerBase
 
         public List<TaskReferenceInputDto> ReferenceInputs { get; set; } = new();
     }
-
-    private static int CeilPositive(decimal value)
-    {
-        return value <= 0
-            ? 0
-            : (int)Math.Ceiling(value);
-    }
-
     private static bool IsGroupSubTask(task taskMeta)
     {
         return taskMeta?.prod != null
@@ -1888,13 +1880,15 @@ public class TasksController : ControllerBase
         if (referenceInputs == null || referenceInputs.Count == 0)
             return 0m;
 
-        /*
-         * Khi FE submit CreateQr, reference_inputs_json thường gửi quantity_used.
-         * Với GROUP + SUB thì đây chính là input BTP thực tế user chọn.
-         */
         return referenceInputs
             .Where(x => x != null)
-            .Sum(x => x.quantity_used);
+            .Sum(x =>
+            {
+                var used = x.quantity_used > 0 ? x.quantity_used : 0m;
+                var left = x.quantity_left > 0 ? x.quantity_left : 0m;
+
+                return used + left;
+            });
     }
 
     private async Task<GroupQrQtyPolicy> ResolveGroupQrQtyPolicyAsync(
@@ -1927,9 +1921,6 @@ public class TasksController : ControllerBase
         var refs = preparedReferenceInputs?.ToList()
             ?? new List<TaskReferenceInputDto>();
 
-        /*
-         * Nếu bundle truyền vào chưa có reference_inputs thì tự build lại.
-         */
         if (refs.Count == 0)
         {
             var bundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
@@ -1941,22 +1932,13 @@ public class TasksController : ControllerBase
         }
 
         /*
-         * FIX CHÍNH:
-         * Không chỉ xử lý GROUP + SUB nữa.
-         * Tất cả GROUP đều lấy chuẩn số lượng theo reference_inputs đã aggregate:
-         *
-         * - NVL-NVL: estimated_qty đã được set theo actual previous output của từng order NVL.
-         * - SUB-SUB: estimated_qty là BTP planned input của từng order SUB.
-         * - SUB-NVL/MIXED: estimated_qty = actual previous NVL + BTP planned SUB.
+         * preparedQty lúc này đã được TaskScanService normalize theo flow:
+         * - PHU: tổng input từ IN/SUB/MIXED.
+         * - CAN: output PHU nếu PHU đã Finished, hoặc estimate PHU.
+         * - BOI: output CAN nếu CAN đã Finished, hoặc estimate CAN.
          */
         var preparedQty = ResolveGroupPreparedQtyForQrPolicy(refs);
 
-        /*
-         * Nếu FE đang tạo QR và gửi reference_inputs_json thì ưu tiên số lượng FE gửi
-         * để token/report đồng bộ với input thực tế FE xác nhận.
-         *
-         * Nhưng chỉ dùng submitted khi > 0. Nếu không, dùng preparedQty.
-         */
         var submittedQty = ResolveActualQtyFromSubmittedReferenceInputs(
             submittedReferenceInputs);
 
@@ -1979,12 +1961,7 @@ public class TasksController : ControllerBase
 
         return new GroupQrQtyPolicy
         {
-            /*
-             * Giữ field cũ.
-             * IsGroupSub giờ hiểu là group có reference input từ BTP/SUB/MIXED,
-             * không chỉ riêng prod_method = SUB.
-             */
-            IsGroupSub = refs.Count > 0,
+            IsGroupSub = normalizedRefs.Count > 0,
 
             MinAllowed = 1,
             MaxAllowed = effectiveQty,
@@ -1996,10 +1973,10 @@ public class TasksController : ControllerBase
             ReferenceInputs = normalizedRefs,
 
             Hint =
-                $"GROUP {methodLabel}: qty_good lấy theo tổng input thực tế/dự kiến của công đoạn ghép. " +
+                $"GROUP {methodLabel}: qty_good lấy theo flow tuần tự đã đồng bộ với groupProduction/detail. " +
                 $"group_total_qty={groupTotalQty}; prepared_reference_qty={Math.Round(preparedQty, 4)}; " +
                 $"submitted_reference_qty={Math.Round(submittedQty, 4)}; effective_qty={effectiveQty}. " +
-                $"Case MIXED SUB-NVL: hệ thống cộng actual output từ order NVL và BTP planned input từ order SUB."
+                $"Công đoạn sau lấy output công đoạn trước làm input chuẩn."
         };
     }
 
@@ -2009,24 +1986,17 @@ public class TasksController : ControllerBase
         if (referenceInputs == null || referenceInputs.Count == 0)
             return 0m;
 
-        /*
-         * Ưu tiên estimated_qty vì sau khi sửa TaskScanService:
-         * - NVL link: estimated_qty = actual previous output nếu có.
-         * - SUB link: estimated_qty = BTP planned input.
-         * - MIXED: estimated_qty = SUM(NVL actual + SUB planned).
-         */
-        var estimated = referenceInputs
+        var total = referenceInputs
             .Where(x => x != null)
-            .Sum(x => x.estimated_qty);
+            .Sum(x =>
+            {
+                var estimated = x.estimated_qty > 0 ? x.estimated_qty : 0m;
+                var actual = x.actual_qty_prev_stage > 0 ? x.actual_qty_prev_stage : 0m;
 
-        if (estimated > 0)
-            return estimated;
+                return Math.Max(estimated, actual);
+            });
 
-        var actual = referenceInputs
-            .Where(x => x != null)
-            .Sum(x => x.actual_qty_prev_stage);
-
-        return actual > 0 ? actual : 0m;
+        return total > 0 ? total : 0m;
     }
 
     private static List<TaskReferenceInputDto> NormalizeGroupReferenceInputsForQrPolicy(
@@ -2059,8 +2029,8 @@ public class TasksController : ControllerBase
                         ? "sp"
                         : x.unit,
 
-                    estimated_qty = Math.Round(estimated, 4),
-                    actual_qty_prev_stage = Math.Round(actual, 4)
+                    estimated_qty = Math.Round(estimated, 4, MidpointRounding.AwayFromZero),
+                    actual_qty_prev_stage = Math.Round(actual, 4, MidpointRounding.AwayFromZero)
                 };
             })
             .ToList();
@@ -2081,7 +2051,12 @@ public class TasksController : ControllerBase
     };
     }
 
-
+    private static int CeilPositive(decimal value)
+    {
+        return value <= 0
+            ? 0
+            : (int)Math.Ceiling(value);
+    }
 
     private static readonly JsonSerializerOptions QrSubmittedJsonOptions = new()
     {
