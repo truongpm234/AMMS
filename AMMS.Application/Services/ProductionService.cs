@@ -4026,9 +4026,10 @@ namespace AMMS.Application.Services
                 }
 
                 /*
-                 * CASE GROUP:
-                 * - Tạo phiếu xuất kho chung cho toàn bộ order trong group.
-                 * - Lưu file vào GROUP + SINGLE member + SPLIT member.
+                 * CASE 1: GROUP
+                 * - Tạo 1 phiếu xuất kho chung cho toàn bộ group.
+                 * - Lưu vào group production.
+                 * - Copy file sang SINGLE member và SPLIT member.
                  */
                 if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
                 {
@@ -4066,7 +4067,7 @@ namespace AMMS.Application.Services
                 }
 
                 /*
-                 * CASE SINGLE / SPLIT:
+                 * CASE 2: SINGLE / SPLIT
                  */
                 if (!prod.order_id.HasValue || prod.order_id.Value <= 0)
                     throw new InvalidOperationException("Production chưa gắn order.");
@@ -4081,6 +4082,12 @@ namespace AMMS.Application.Services
                 if (!order.is_production_ready)
                     throw new InvalidOperationException("Order chưa được duyệt phương thức sản xuất.");
 
+                /*
+                 * Tạo issue file trước.
+                 * Với SINGLE/SPLIT đã có task: lưu trực tiếp vào production hiện tại.
+                 * Với SINGLE chưa có task: lát nữa ScheduleTasksAfterMethodAsync tạo task,
+                 * rồi copy issue file sang production được schedule.
+                 */
                 var issueFileSingleOrSplit = await ConfirmSingleOrSplitProductionIssueAsync(
                     prod,
                     confirmedByUserId,
@@ -4096,11 +4103,8 @@ namespace AMMS.Application.Services
                     StringComparison.OrdinalIgnoreCase);
 
                 /*
-                 * SINGLE full path thường chưa có task tại thời điểm confirm schedule,
-                 * nên mới gọi ScheduleTasksAfterMethodAsync.
-                 *
-                 * SPLIT đã được tạo task từ flow create group,
-                 * không được gọi ScheduleTasksAfterMethodAsync nữa vì sẽ tạo sai full path.
+                 * SINGLE full path thường chưa có task tại thời điểm confirm schedule.
+                 * SPLIT thì task đã được tạo từ flow group, không gọi ScheduleTasksAfterMethodAsync nữa.
                  */
                 if (!hasTasks && !isSplit)
                 {
@@ -4113,11 +4117,19 @@ namespace AMMS.Application.Services
 
                     var scheduledProd = await _db.productions
                         .FirstOrDefaultAsync(x => x.prod_id == scheduledProdId, ct)
-                        ?? prod;
+                        ?? throw new InvalidOperationException(
+                            $"Không tìm thấy production sau khi lập lịch. prod_id={scheduledProdId}");
+
+                    /*
+                     * Nếu ScheduleTasksAfterMethodAsync trả về cùng production hoặc production mới,
+                     * vẫn bảo đảm file xuất kho được lưu vào production đang Scheduled.
+                     */
+                    if (string.IsNullOrWhiteSpace(scheduledProd.sub_product_issue_file))
+                    {
+                        scheduledProd.sub_product_issue_file = issueFileSingleOrSplit;
+                    }
 
                     scheduledProd.status = "Scheduled";
-
-                    scheduledProd.sub_product_issue_file ??= issueFileSingleOrSplit;
 
                     scheduledProd.planned_start_date ??= await ResolveProductionPlannedStartFromTasksAsync(
                         scheduledProd.prod_id,
@@ -4150,7 +4162,7 @@ namespace AMMS.Application.Services
                  * SPLIT hoặc SINGLE đã có task sẵn.
                  */
                 prod.status = "Scheduled";
-                prod.sub_product_issue_file ??= issueFileSingleOrSplit;
+                prod.sub_product_issue_file = issueFileSingleOrSplit;
 
                 prod.planned_start_date ??= await ResolveProductionPlannedStartFromTasksAsync(
                     prod.prod_id,
@@ -4802,7 +4814,8 @@ namespace AMMS.Application.Services
 
             /*
              * Idempotent:
-             * Nếu group đã có file rồi thì chỉ sync lại file cho member SINGLE/SPLIT.
+             * Nếu group đã có file rồi thì không trừ kho lại.
+             * Chỉ sync file sang SINGLE/SPLIT member.
              */
             if (!string.IsNullOrWhiteSpace(groupProd.sub_product_issue_file))
             {
@@ -4814,52 +4827,49 @@ namespace AMMS.Application.Services
                 return groupProd.sub_product_issue_file;
             }
 
-            var links = await _db.prod_orders
+            var members = await _db.prod_orders
                 .Where(x =>
                     x.prod_id == groupProd.prod_id &&
                     x.status == "Active")
                 .OrderBy(x => x.order_id)
                 .ToListAsync(ct);
 
-            if (links.Count == 0)
+            if (members.Count == 0)
                 throw new InvalidOperationException("Production ghép chưa có order active.");
 
             var issueLines = new List<ProductionIssueLine>();
 
-            foreach (var link in links)
+            foreach (var member in members)
             {
-                if (!link.single_prod_id.HasValue || link.single_prod_id.Value <= 0)
-                    throw new InvalidOperationException($"ProdOrder order_id={link.order_id} thiếu single_prod_id.");
+                if (!member.single_prod_id.HasValue || member.single_prod_id.Value <= 0)
+                    throw new InvalidOperationException($"ProdOrder order_id={member.order_id} thiếu single_prod_id.");
 
                 var singleProd = await _db.productions
-                    .FirstOrDefaultAsync(x => x.prod_id == link.single_prod_id.Value, ct)
+                    .FirstOrDefaultAsync(x => x.prod_id == member.single_prod_id.Value, ct)
                     ?? throw new InvalidOperationException(
-                        $"Không tìm thấy single production. single_prod_id={link.single_prod_id}");
+                        $"Không tìm thấy single production. single_prod_id={member.single_prod_id}");
 
                 var ord = await _db.orders
-                    .FirstOrDefaultAsync(x => x.order_id == link.order_id, ct)
-                    ?? throw new InvalidOperationException($"Không tìm thấy order_id={link.order_id}");
+                    .FirstOrDefaultAsync(x => x.order_id == member.order_id, ct)
+                    ?? throw new InvalidOperationException($"Không tìm thấy order_id={member.order_id}");
 
                 var req = await _db.order_requests
                     .AsNoTracking()
-                    .Where(x => x.order_id == link.order_id)
+                    .Where(x => x.order_id == member.order_id)
                     .OrderByDescending(x => x.order_request_id)
                     .FirstOrDefaultAsync(ct)
-                    ?? throw new InvalidOperationException($"Không tìm thấy order_request của order_id={link.order_id}");
+                    ?? throw new InvalidOperationException($"Không tìm thấy order_request của order_id={member.order_id}");
 
                 var estimate = await LoadAcceptedEstimateOrThrowAsync(req, ct);
 
-                var method = (singleProd.prod_method ?? groupProd.prod_method ?? "")
+                var method = (singleProd.prod_method ?? "")
                     .Trim()
                     .ToUpperInvariant();
 
-                if (string.IsNullOrWhiteSpace(method))
-                    throw new InvalidOperationException($"Order {link.order_id} chưa có production method.");
-
-                if (method == "BOTH")
+                if (method is not ("NVL" or "SUB"))
                 {
                     throw new InvalidOperationException(
-                        $"Order {link.order_id} đang dùng BOTH nên không được ghép production.");
+                        $"Order {member.order_id} trong group chỉ được dùng NVL hoặc SUB. Hiện tại method={method}");
                 }
 
                 var orderQty = await ResolveOrderQtyAsync(
@@ -4868,8 +4878,9 @@ namespace AMMS.Application.Services
                     ct);
 
                 /*
-                 * Xuất NVL/vật tư cho từng single member.
-                 * Hàm này idempotent: nếu đã có stock_move ref_doc thì không trừ lần nữa.
+                 * NVL/vật tư:
+                 * - NVL: xuất NVL cho flow tự sản xuất.
+                 * - SUB: vẫn xuất NVL/vật tư phụ cho các công đoạn sau BTP nếu BOM có.
                  */
                 var nvlLines = await IssueMaterialsForProductionOnScheduleAsync(
                     singleProd,
@@ -4883,7 +4894,9 @@ namespace AMMS.Application.Services
                 issueLines.AddRange(nvlLines);
 
                 /*
-                 * Nếu SUB thì xuất BTP.
+                 * BTP:
+                 * - SUB: xuất bán thành phẩm.
+                 * - NVL: không có BTP.
                  */
                 if (method == "SUB")
                 {
@@ -4903,7 +4916,8 @@ namespace AMMS.Application.Services
             }
 
             /*
-             * Tạo file xuất kho chung cho group.
+             * Luôn tạo file, kể cả khi không có dòng xuất kho.
+             * Điều này giúp sub_product_issue_file không bị null.
              */
             var issueFileUrl = await CreateAndUploadProductionIssueFileAsync(
                 groupProd,
@@ -4915,7 +4929,7 @@ namespace AMMS.Application.Services
             groupProd.status = "Scheduled";
 
             /*
-             * Gắn file chung vào:
+             * Copy chung file vào tất cả production liên quan:
              * - SINGLE member trước group
              * - SPLIT member sau group
              */
@@ -4967,9 +4981,9 @@ namespace AMMS.Application.Services
                     .Where(x => singleProdIds.Contains(x.prod_id))
                     .ToListAsync(ct);
 
-                foreach (var prod in singleProds)
+                foreach (var p in singleProds)
                 {
-                    prod.sub_product_issue_file = issueFileUrl;
+                    p.sub_product_issue_file = issueFileUrl;
                 }
             }
 
@@ -4986,9 +5000,9 @@ namespace AMMS.Application.Services
                         x.status != "Cancelled")
                     .ToListAsync(ct);
 
-                foreach (var prod in splitProds)
+                foreach (var p in splitProds)
                 {
-                    prod.sub_product_issue_file = issueFileUrl;
+                    p.sub_product_issue_file = issueFileUrl;
                 }
             }
         }
@@ -5012,8 +5026,8 @@ namespace AMMS.Application.Services
                 return prod.sub_product_issue_file;
 
             /*
-             * Nếu là SPLIT của order đã nằm trong GROUP và group đã có file,
-             * copy file group, không trừ kho thêm lần nữa.
+             * SPLIT thuộc group:
+             * Không trừ kho lần nữa, chỉ copy file group.
              */
             if (string.Equals(prod.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase))
             {
@@ -5055,6 +5069,12 @@ namespace AMMS.Application.Services
 
             var issueLines = new List<ProductionIssueLine>();
 
+            /*
+             * NVL/vật tư:
+             * - NVL: xuất NVL full path.
+             * - SUB: xuất NVL/vật tư phụ cho các công đoạn sau BTP nếu có.
+             * - BOTH: xuất NVL cho phần tự sản xuất + vật tư phụ nếu BOM có.
+             */
             var nvlLines = await IssueMaterialsForProductionOnScheduleAsync(
                 prod,
                 req,
@@ -5066,6 +5086,12 @@ namespace AMMS.Application.Services
 
             issueLines.AddRange(nvlLines);
 
+            /*
+             * BTP:
+             * - SUB: xuất BTP.
+             * - BOTH: xuất BTP theo sub_product_used_qty.
+             * - NVL: không xuất BTP.
+             */
             var btpLine = await IssueSubProductForProductionOnScheduleAsync(
                 prod,
                 ord,
@@ -5077,6 +5103,9 @@ namespace AMMS.Application.Services
             if (btpLine != null)
                 issueLines.Add(btpLine);
 
+            /*
+             * Luôn tạo file để sub_product_issue_file không null.
+             */
             var issueFileUrl = await CreateAndUploadProductionIssueFileAsync(
                 prod,
                 issueLines,
@@ -5131,8 +5160,8 @@ namespace AMMS.Application.Services
 
             /*
              * Idempotent:
-             * Nếu đã xuất NVL cho production này rồi, không trừ lần nữa.
-             * Chỉ build lại line từ stock_move cũ để tạo file nếu cần.
+             * Nếu đã có stock_move OUT cho NVL/vật tư của production này,
+             * chỉ build lại line từ stock_move cũ, không trừ kho nữa.
              */
             var existed = await _db.stock_moves
                 .AsNoTracking()
@@ -5178,6 +5207,22 @@ namespace AMMS.Application.Services
                 if (qty <= 0)
                     continue;
 
+                /*
+                 * BOTH:
+                 * Nếu bạn muốn chỉ xuất NVL theo phần nvl_qty,
+                 * scale BOM theo nvl_qty / orderQty.
+                 */
+                if (method == "BOTH" && orderQty > 0 && prod.nvl_qty > 0 && prod.nvl_qty < orderQty)
+                {
+                    qty = Math.Round(
+                        qty * ((decimal)prod.nvl_qty / orderQty),
+                        4,
+                        MidpointRounding.AwayFromZero);
+                }
+
+                if (qty <= 0)
+                    continue;
+
                 var material = await _db.materials
                     .FirstOrDefaultAsync(x => x.material_id == bom.material_id.Value, ct);
 
@@ -5205,7 +5250,7 @@ namespace AMMS.Application.Services
                     user_id = userId,
                     move_date = AppTime.NowVnUnspecified(),
                     note =
-                        $"Xuất NVL/vật tư khi xác nhận lập lịch. " +
+                        $"Xuất NVL/vật tư khi GM xác nhận lập lịch. " +
                         $"prod_id={prod.prod_id}, order_id={prod.order_id}, method={method}"
                 }, ct);
 
@@ -5309,7 +5354,7 @@ namespace AMMS.Application.Services
                 user_id = userId,
                 move_date = AppTime.NowVnUnspecified(),
                 note =
-                    $"Xuất bán thành phẩm khi xác nhận lập lịch. " +
+                    $"Xuất bán thành phẩm khi GM xác nhận lập lịch. " +
                     $"prod_id={prod.prod_id}, order_id={ord.order_id}, sub_id={sub.id}, method={method}"
             }, ct);
 
@@ -5399,8 +5444,28 @@ namespace AMMS.Application.Services
     string title,
     CancellationToken ct)
         {
-            if (lines == null || lines.Count == 0)
-                return null;
+            lines ??= new List<ProductionIssueLine>();
+
+            /*
+             * FIX:
+             * Luôn tạo file để production.sub_product_issue_file không null.
+             */
+            if (lines.Count == 0)
+            {
+                lines.Add(new ProductionIssueLine
+                {
+                    order_id = prod.order_id,
+                    prod_id = prod.prod_id,
+                    item_type = "NO_ISSUE",
+                    material_id = null,
+                    sub_product_id = null,
+                    code = "NO_ISSUE",
+                    name = "Không có NVL/BTP cần xuất kho",
+                    qty = 0m,
+                    unit = "",
+                    note = "Production đã xác nhận lập lịch nhưng không phát sinh dòng xuất kho."
+                });
+            }
 
             var now = AppTime.NowVnUnspecified();
 
@@ -5444,6 +5509,9 @@ namespace AMMS.Application.Services
                 "text/csv",
                 publicId);
 
+            if (string.IsNullOrWhiteSpace(url))
+                throw new InvalidOperationException("Upload phiếu xuất kho thất bại.");
+
             return url;
         }
 
@@ -5474,7 +5542,7 @@ namespace AMMS.Application.Services
         {
             value ??= "";
 
-            if (value.Contains(',') || value.Contains('"') || value.Contains('\n'))
+            if (value.Contains(',') || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
                 return "\"" + value.Replace("\"", "\"\"") + "\"";
 
             return value;
