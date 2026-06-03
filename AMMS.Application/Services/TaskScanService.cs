@@ -116,19 +116,11 @@ namespace AMMS.Application.Services
                     .FirstOrDefaultAsync(x => x.task_id == taskId, ct)
                     ?? throw new InvalidOperationException("Task not found.");
 
-                var maxAllowed = await ResolveMaxAllowedFinishQtyForTaskAsync(
-                    groupInfo,
-                    ct);
-
-                if (qtyGood <= 0)
-                    throw new ArgumentOutOfRangeException(nameof(req.token), "qty_good phải lớn hơn 0.");
-
-                if (maxAllowed > 0 && qtyGood > maxAllowed)
-                {
-                    throw new ArgumentOutOfRangeException(
-                        nameof(req.token),
-                        $"qty_good={qtyGood} vượt tổng số lượng production ghép ({maxAllowed}).");
-                }
+                await ValidateGroupFinishQtyAsync(
+                    groupTask: groupInfo,
+                    payload: payload,
+                    normalizedReferenceInputs: normalizedReferenceInputs,
+                    ct: ct);
             }
             else
             {
@@ -339,6 +331,409 @@ namespace AMMS.Application.Services
              */
             return result;
         }
+
+        private sealed class FinishQtyValidationPolicy
+        {
+            public int MinAllowed { get; set; } = 1;
+
+            public int MaxAllowed { get; set; } = 1;
+
+            public int SuggestedQty { get; set; } = 1;
+
+            public string QtyUnit { get; set; } = "sp";
+
+            public decimal DbStageOutputLimit { get; set; }
+
+            public decimal BundleReferenceLimit { get; set; }
+
+            public decimal TokenReferenceLimit { get; set; }
+
+            public decimal TokenOutputLimit { get; set; }
+
+            public decimal GroupTotalQty { get; set; }
+
+            public decimal TaskLinkPlanQty { get; set; }
+
+            public decimal TokenQtyGood { get; set; }
+
+            public string Source { get; set; } = "";
+        }
+
+        private async Task ValidateGroupFinishQtyAsync(
+            task groupTask,
+            TaskQrTokenPayloadDto payload,
+            IReadOnlyList<TaskReferenceUsageInputDto>? normalizedReferenceInputs,
+            CancellationToken ct)
+        {
+            if (payload == null)
+                throw new InvalidOperationException("Payload token không hợp lệ.");
+
+            var qtyGood = payload.qty_good;
+
+            if (qtyGood <= 0)
+                throw new ArgumentOutOfRangeException(nameof(payload), "qty_good phải lớn hơn 0.");
+
+            var policy = await ResolveGroupFinishQtyValidationPolicyAsync(
+                groupTask,
+                payload,
+                normalizedReferenceInputs,
+                ct);
+
+            if (policy.MaxAllowed <= 0)
+            {
+                throw new InvalidOperationException(
+                    $"Không xác định được số lượng hợp lệ cho group task_id={groupTask.task_id}.");
+            }
+
+            if (qtyGood < policy.MinAllowed)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(payload),
+                    $"qty_good={qtyGood} nhỏ hơn số lượng tối thiểu ({policy.MinAllowed}).");
+            }
+
+            if (qtyGood > policy.MaxAllowed)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(payload),
+                    $"qty_good={qtyGood} vượt số lượng cho phép của production ghép ({policy.MaxAllowed}). " +
+                    $"Chi tiết validate: " +
+                    $"DbStageOutput={policy.DbStageOutputLimit}, " +
+                    $"BundleReference={policy.BundleReferenceLimit}, " +
+                    $"TokenReference={policy.TokenReferenceLimit}, " +
+                    $"TokenOutput={policy.TokenOutputLimit}, " +
+                    $"GroupTotal={policy.GroupTotalQty}, " +
+                    $"TaskLinkPlan={policy.TaskLinkPlanQty}, " +
+                    $"TokenQtyGood={policy.TokenQtyGood}, " +
+                    $"Source={policy.Source}.");
+            }
+        }
+
+        private async Task<FinishQtyValidationPolicy> ResolveGroupFinishQtyValidationPolicyAsync(
+    task groupTask,
+    TaskQrTokenPayloadDto? payload,
+    IReadOnlyList<TaskReferenceUsageInputDto>? normalizedReferenceInputs,
+    CancellationToken ct)
+        {
+            if (!groupTask.prod_id.HasValue)
+            {
+                return new FinishQtyValidationPolicy
+                {
+                    MaxAllowed = 1,
+                    SuggestedQty = 1,
+                    Source = "Task không có prod_id"
+                };
+            }
+
+            var prod = groupTask.prod ?? await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.prod_id == groupTask.prod_id.Value, ct);
+
+            if (prod == null)
+            {
+                return new FinishQtyValidationPolicy
+                {
+                    MaxAllowed = 1,
+                    SuggestedQty = 1,
+                    Source = "Không tìm thấy production"
+                };
+            }
+
+            var currentCode = ProductionFlowHelper.Norm(
+                groupTask.process?.process_code);
+
+            /*
+             * 1. Công thức DB cũ.
+             * Có thể thấp hơn QR-prepare trong case SUB-NVL/MIXED.
+             */
+            var dbStageLimit = await ResolveDbStageOutputLimitForFinishAsync(
+                groupTask,
+                prod,
+                currentCode,
+                ct);
+
+            /*
+             * 2. Reference input từ QR token.
+             * Đây là data FE/BE đã nhúng trong token khi tạo QR.
+             */
+            var tokenReferenceLimit = ResolveTokenReferenceQtyForFinish(
+                normalizedReferenceInputs);
+
+            if (tokenReferenceLimit <= 0 && payload?.reference_inputs != null)
+            {
+                tokenReferenceLimit = ResolveTokenReferenceQtyForFinish(
+                    payload.reference_inputs);
+            }
+
+            /*
+             * 3. Output từ QR token.
+             * Nếu FE gửi outputs_json thì đây là output thực tế muốn báo cáo.
+             */
+            var tokenOutputLimit = ResolveTokenOutputQtyForFinish(
+                payload?.outputs);
+
+            /*
+             * 4. Bundle qr-prepare hiện tại.
+             * Đây là cách đồng bộ finish với qr-prepare.
+             */
+            var bundleReferenceLimit = await ResolvePreparedBundleReferenceQtyForFinishAsync(
+                groupTask.task_id,
+                ct);
+
+            /*
+             * 5. group_total_qty và task_links dùng làm fallback.
+             */
+            decimal groupTotalQty = prod.group_total_qty > 0 ? (decimal)prod.group_total_qty : 0m;
+
+            var taskLinkPlanQty = await ResolveTaskLinkPlanQtyForFinishAsync(
+                groupTask.task_id,
+                ct);
+
+            decimal tokenQtyGood = payload?.qty_good != null
+                ? (decimal)payload.qty_good
+                : 0m;
+
+            var candidates = new List<(string source, decimal qty)>
+    {
+        ("DB_STAGE_OUTPUT", dbStageLimit),
+        ("QR_PREPARE_REFERENCE", bundleReferenceLimit),
+        ("TOKEN_REFERENCE_INPUT", tokenReferenceLimit),
+        ("TOKEN_OUTPUT", tokenOutputLimit),
+        ("GROUP_TOTAL_QTY", groupTotalQty),
+        ("TASK_LINK_PLAN_QTY", taskLinkPlanQty),
+        ("SIGNED_TOKEN_QTY_GOOD", tokenQtyGood)
+    }
+            .Where(x => x.qty > 0)
+            .ToList();
+
+            if (candidates.Count == 0)
+            {
+                return new FinishQtyValidationPolicy
+                {
+                    MaxAllowed = 1,
+                    SuggestedQty = 1,
+                    Source = "Không có candidate số lượng hợp lệ"
+                };
+            }
+
+            var best = candidates
+                .OrderByDescending(x => x.qty)
+                .First();
+
+            var maxAllowed = CeilPositiveForFinish(best.qty);
+
+            return new FinishQtyValidationPolicy
+            {
+                MinAllowed = 1,
+                MaxAllowed = maxAllowed,
+                SuggestedQty = maxAllowed,
+                QtyUnit = "sp",
+
+                DbStageOutputLimit = Math.Round((decimal)dbStageLimit, 4),
+                BundleReferenceLimit = Math.Round((decimal)bundleReferenceLimit, 4),
+                TokenReferenceLimit = Math.Round((decimal)tokenReferenceLimit, 4),
+                TokenOutputLimit = Math.Round((decimal)tokenOutputLimit, 4),
+                GroupTotalQty = Math.Round((decimal)groupTotalQty, 4),
+                TaskLinkPlanQty = Math.Round((decimal)taskLinkPlanQty, 4),
+                TokenQtyGood = Math.Round((decimal)tokenQtyGood, 4),
+
+                Source = best.source
+            };
+        }
+
+        private static int CeilPositiveForFinish(decimal value)
+        {
+            if (value <= 0)
+                return 0;
+
+            return (int)Math.Ceiling(value);
+        }
+
+        private static decimal ResolveTokenReferenceQtyForFinish(
+            IReadOnlyList<TaskReferenceUsageInputDto>? refs)
+        {
+            if (refs == null || refs.Count == 0)
+                return 0m;
+
+            /*
+             * Với reference input:
+             * - quantity_used là số BTP/input thật sự dùng.
+             * - quantity_left là phần dư nếu có.
+             *
+             * max hợp lý nên không nhỏ hơn quantity_used.
+             * Dùng used + left để tránh reject khi FE gửi tổng input và có phần left.
+             */
+            return refs
+                .Where(x => x != null)
+                .Sum(x =>
+                {
+                    var used = x.quantity_used > 0 ? x.quantity_used : 0m;
+                    var left = x.quantity_left > 0 ? x.quantity_left : 0m;
+
+                    if (used + left > 0)
+                        return used + left;
+
+                    return used;
+                });
+        }
+
+        private static decimal ResolveTokenOutputQtyForFinish(
+            IReadOnlyList<TaskOutputReportDto>? outputs)
+        {
+            if (outputs == null || outputs.Count == 0)
+                return 0m;
+
+            return outputs
+                .Where(x => x != null)
+                .Sum(x => x.quantity_good > 0 ? x.quantity_good : 0m);
+        }
+
+        private async Task<decimal> ResolvePreparedBundleReferenceQtyForFinishAsync(
+            int taskId,
+            CancellationToken ct)
+        {
+            var bundle = await GetTaskQrMaterialBundleAsync(
+                taskId,
+                ct);
+
+            if (bundle?.reference_inputs == null || bundle.reference_inputs.Count == 0)
+                return 0m;
+
+            /*
+             * Bundle reference_inputs là output của qr-prepare.
+             * Với case SUB-NVL/MIXED, estimated_qty nên là:
+             * actual IN của NVL + BTP planned của SUB.
+             */
+            return bundle.reference_inputs
+                .Where(x => x != null)
+                .Sum(x =>
+                {
+                    var estimated = x.estimated_qty > 0 ? x.estimated_qty : 0m;
+                    var actual = x.actual_qty_prev_stage > 0 ? x.actual_qty_prev_stage : 0m;
+
+                    return Math.Max(estimated, actual);
+                });
+        }
+
+        private async Task<decimal> ResolveTaskLinkPlanQtyForFinishAsync(
+            int groupTaskId,
+            CancellationToken ct)
+        {
+            return await _db.task_links
+                .AsNoTracking()
+                .Where(x =>
+                    x.group_task_id == groupTaskId &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
+                .SumAsync(x => (decimal)x.qty_plan, ct);
+        }
+
+        private async Task<decimal> ResolveDbStageOutputLimitForFinishAsync(
+    task currentTask,
+    production prod,
+    string currentCode,
+    CancellationToken ct)
+        {
+            /*
+             * GROUP:
+             * Tính theo output_qty từng link nếu có context.
+             * Đây là logic cũ, nhưng trong case SUB-NVL/MIXED có thể thấp hơn QR reference.
+             */
+            if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
+            {
+                var links = await _db.task_links
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.group_task_id == currentTask.task_id &&
+                        (
+                            x.status == null ||
+                            x.status.ToUpper() != "CANCELLED"
+                        ))
+                    .OrderBy(x => x.id)
+                    .ToListAsync(ct);
+
+                if (links.Count == 0)
+                    return Math.Max(prod.group_total_qty, 1);
+
+                decimal total = 0m;
+
+                foreach (var link in links)
+                {
+                    var ctx = await GetGroupLinkEstimateContextAsync(
+                        currentTask,
+                        link,
+                        ct);
+
+                    if (ctx == null)
+                    {
+                        total += Math.Max(link.qty_plan, 1);
+                        continue;
+                    }
+
+                    var route = await ResolveRouteProcessCodesForOrderAsync(
+                        link.order_id,
+                        ct);
+
+                    var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
+                        ctx,
+                        link.process_code ?? currentCode,
+                        route,
+                        link.qty_plan,
+                        ct);
+
+                    total += stageQty?.output_qty ?? Math.Max(link.qty_plan, 1);
+                }
+
+                return Math.Max(total, 1m);
+            }
+
+            /*
+             * SINGLE / SPLIT:
+             * Giữ logic cũ.
+             */
+            var singleCtx = await GetTaskEstimateContextAsync(
+                currentTask.task_id,
+                ct);
+
+            if (singleCtx != null)
+            {
+                var route = await ResolveRouteProcessCodesForProductionAsync(
+                    singleCtx.Production,
+                    singleCtx.Task,
+                    ct);
+
+                var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
+                    singleCtx,
+                    currentCode,
+                    route,
+                    linkQtyPlan: null,
+                    ct);
+
+                if (stageQty != null)
+                    return Math.Max(stageQty.output_qty, 1m);
+            }
+
+            if (prod.group_total_qty > 0)
+                return prod.group_total_qty;
+
+            if (prod.order_id.HasValue)
+            {
+                var qty = await _db.order_items
+                    .AsNoTracking()
+                    .Where(x => x.order_id == prod.order_id.Value)
+                    .OrderBy(x => x.item_id)
+                    .Select(x => x.quantity)
+                    .FirstOrDefaultAsync(ct);
+
+                if (qty > 0)
+                    return qty;
+            }
+
+            return 1m;
+        }
+
         private async Task<int> ResolveGroupSubPlannedInputQtyForScanAsync(
     task currentTask,
     production prod,
@@ -381,103 +776,24 @@ namespace AMMS.Application.Services
             var currentCode = ProductionFlowHelper.Norm(
                 currentTask.process?.process_code);
 
-            /*
-             * GROUP / MIXED:
-             * Không dùng groupProd.prod_method để tính max.
-             * Mỗi link dùng singleProd.prod_method riêng:
-             * - NVL: fallback qty_plan hoặc estimate thường.
-             * - SUB: tính downstream input/output theo BTP boundary.
-             */
             if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
             {
-                var links = await _db.task_links
-                    .AsNoTracking()
-                    .Where(x =>
-                        x.group_task_id == currentTask.task_id &&
-                        (
-                            x.status == null ||
-                            x.status.ToUpper() != "CANCELLED"
-                        ))
-                    .OrderBy(x => x.id)
-                    .ToListAsync(ct);
+                var policy = await ResolveGroupFinishQtyValidationPolicyAsync(
+                    currentTask,
+                    payload: null,
+                    normalizedReferenceInputs: null,
+                    ct: ct);
 
-                if (links.Count == 0)
-                    return Math.Max(prod.group_total_qty, 1);
-
-                decimal total = 0;
-
-                foreach (var link in links)
-                {
-                    var ctx = await GetGroupLinkEstimateContextAsync(
-                        currentTask,
-                        link,
-                        ct);
-
-                    if (ctx == null)
-                    {
-                        total += Math.Max(link.qty_plan, 1);
-                        continue;
-                    }
-
-                    var route = await ResolveRouteProcessCodesForOrderAsync(
-                        link.order_id,
-                        ct);
-
-                    var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
-                        ctx,
-                        link.process_code ?? currentCode,
-                        route,
-                        link.qty_plan,
-                        ct);
-
-                    total += stageQty?.output_qty ?? Math.Max(link.qty_plan, 1);
-                }
-
-                return Math.Max((int)Math.Ceiling(total), 1);
+                return Math.Max(policy.MaxAllowed, 1);
             }
 
-            /*
-             * SINGLE/SPLIT giữ logic cũ.
-             */
-            var singleCtx = await GetTaskEstimateContextAsync(
-                currentTask.task_id,
+            var dbLimit = await ResolveDbStageOutputLimitForFinishAsync(
+                currentTask,
+                prod,
+                currentCode,
                 ct);
 
-            if (singleCtx != null)
-            {
-                var route = await ResolveRouteProcessCodesForProductionAsync(
-                    singleCtx.Production,
-                    singleCtx.Task,
-                    ct);
-
-                var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
-                    singleCtx,
-                    currentCode,
-                    route,
-                    linkQtyPlan: null,
-                    ct);
-
-                if (stageQty != null)
-                    return Math.Max((int)Math.Ceiling(stageQty.output_qty), 1);
-            }
-
-            if (prod.group_total_qty > 0)
-                return prod.group_total_qty;
-
-            if (prod.order_id.HasValue)
-            {
-                var qty = await _db.order_items
-                    .AsNoTracking()
-                    .Where(x => x.order_id == prod.order_id.Value)
-                    .OrderBy(x => x.item_id)
-                    .Select(x => x.quantity)
-                    .FirstOrDefaultAsync(ct);
-
-                if (qty > 0)
-                    return qty;
-            }
-
-            return 1;
+            return Math.Max(CeilPositiveForFinish(dbLimit), 1);
         }
 
         private async Task CreatePendingSubProductsFromReferenceLeftoverAsync(
