@@ -6360,12 +6360,36 @@ namespace AMMS.Infrastructure.Repositories
                 if (string.IsNullOrWhiteSpace(previousCode))
                     continue;
 
+                /*
+                 * FIX 1:
+                 * Với production SUB dùng BTP có sẵn, previous có thể đã được đáp ứng
+                 * bởi sub_product.product_process.
+                 *
+                 * Ví dụ:
+                 * order route = RALO,CAT,IN,PHU,CAN,BOI,BE,DUT,DAN
+                 * sub_product = RALO,CAT,IN
+                 * current = PHU
+                 * previous = IN
+                 *
+                 * Trường hợp này PHU được phép start nếu production đã Scheduled
+                 * và các điều kiện khác OK, không cần tìm production IN khác.
+                 */
+                var previousSatisfiedBySub = await IsPreviousStageSatisfiedByExternalSubProductForCanStartAsync(
+                    currentProd,
+                    currentCode,
+                    previousCode,
+                    route,
+                    ct);
+
+                if (previousSatisfiedBySub)
+                    continue;
+
                 var previous = await FindPreviousStageForOrderForCanStartAsync(
-    orderId: orderId,
-    previousCode: previousCode,
-    currentTaskId: currentTask.task_id,
-    currentProdId: currentProd.prod_id,
-    ct: ct);
+                    orderId: orderId,
+                    previousCode: previousCode,
+                    currentTaskId: currentTask.task_id,
+                    currentProdId: currentProd.prod_id,
+                    ct: ct);
 
                 if (previous == null)
                 {
@@ -6505,10 +6529,12 @@ namespace AMMS.Infrastructure.Repositories
                 return null;
 
             /*
-             * 1. Nếu công đoạn trước cũng là GROUP task,
+             * 1. Nếu công đoạn trước là GROUP task,
              * tìm theo task_links của chính order đó.
              *
-             * Ví dụ CAN group phải đợi PHU group.
+             * Ví dụ:
+             * - GROUP CAN phải đợi GROUP PHU.
+             * - SPLIT BE phải đợi GROUP CAN.
              */
             var groupPrevious = await (
                 from tl in _db.task_links.AsNoTracking()
@@ -6549,15 +6575,8 @@ namespace AMMS.Infrastructure.Repositories
                 return groupPrevious;
 
             /*
-             * 2. FIX CHÍNH:
-             * Nếu current task là GROUP task, phải ưu tiên tìm previous task
-             * trong đúng single_prod_id đã link với order đó.
-             *
-             * Ví dụ:
-             * current group PHU task_id=102.
-             * Order A có single_prod_id=4.
-             * previousCode=IN.
-             * => phải tìm IN trong production 4, không tìm lung tung theo order_id.
+             * 2. Nếu current task là GROUP task, ưu tiên tìm previous trong single_prod_id
+             * đã link với đúng order đó.
              */
             var linkedSingleProdId = await _db.task_links
                 .AsNoTracking()
@@ -6584,9 +6603,19 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             /*
-             * 3. Fallback:
-             * Tìm theo order_id như logic cũ,
-             * nhưng không lấy chính current production nếu current production cũng có order_id.
+             * 3. FIX CHÍNH:
+             * Tìm direct task theo order_id, BAO GỒM cả current production.
+             *
+             * Code cũ có:
+             *     p.prod_id != currentProdId
+             *
+             * Lỗi này làm production 42 không tìm thấy IN,
+             * dù task IN nằm ngay trong production 42 và đã Finished.
+             *
+             * Vì đã có:
+             *     t.task_id != currentTaskId
+             *
+             * nên không sợ lấy nhầm chính task hiện tại.
              */
             var directPrevious = await (
                 from t in _db.tasks.AsNoTracking()
@@ -6599,7 +6628,6 @@ namespace AMMS.Infrastructure.Repositories
                 from pp in ppj.DefaultIfEmpty()
 
                 where p.order_id == orderId
-                      && p.prod_id != currentProdId
                       && t.task_id != currentTaskId
                       && pp != null
                       && pp.process_code != null
@@ -6609,7 +6637,14 @@ namespace AMMS.Infrastructure.Repositories
                             p.status.ToUpper() != "CANCELLED"
                          )
 
-                orderby t.seq_num descending, t.task_id descending
+                orderby
+                    /*
+                     * Ưu tiên task đã Finished trước.
+                     */
+                    (t.status != null && t.status.ToUpper() == "FINISHED") descending,
+                    t.end_time descending,
+                    t.seq_num descending,
+                    t.task_id descending
 
                 select new PreviousStageForCanStart
                 {
@@ -6623,6 +6658,134 @@ namespace AMMS.Infrastructure.Repositories
             ).FirstOrDefaultAsync(ct);
 
             return directPrevious;
+        }
+
+        private async Task<bool> IsPreviousStageSatisfiedByExternalSubProductForCanStartAsync(
+    production currentProd,
+    string currentProcessCode,
+    string previousProcessCode,
+    IReadOnlyList<string> orderRouteCodes,
+    CancellationToken ct)
+        {
+            if (!await IsPureExternalSubProductionForCanStartAsync(currentProd, ct))
+                return false;
+
+            if (!currentProd.sub_product_id.HasValue || currentProd.sub_product_id.Value <= 0)
+                return false;
+
+            var subCodes = await GetSubProductProcessCodesForCanStartAsync(
+                currentProd.sub_product_id.Value,
+                ct);
+
+            var previousCode = NormCanStartCode(previousProcessCode);
+            var currentCode = NormCanStartCode(currentProcessCode);
+
+            /*
+             * Nếu không đọc được product_process của sub_product,
+             * không tự suy đoán quá mạnh. Khi đó để hàm FindPreviousStage...
+             * tìm task thật trong DB.
+             */
+            if (subCodes.Count == 0)
+                return false;
+
+            /*
+             * previousCode phải nằm trong BTP.
+             * Ví dụ sub_product.product_process = RALO,CAT,IN
+             * previousCode = IN => OK.
+             */
+            if (!subCodes.Contains(previousCode, StringComparer.OrdinalIgnoreCase))
+                return false;
+
+            /*
+             * currentCode không được nằm trong BTP.
+             * Nếu current cũng nằm trong BTP thì không nên start task đó nữa.
+             */
+            if (subCodes.Contains(currentCode, StringComparer.OrdinalIgnoreCase))
+                return false;
+
+            /*
+             * Check current phải nằm sau boundary cuối cùng của sub_product trên route order.
+             */
+            if (orderRouteCodes != null && orderRouteCodes.Count > 0)
+            {
+                var route = orderRouteCodes
+                    .Select(NormCanStartCode)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .ToList();
+
+                var currentIndex = route.FindIndex(x =>
+                    string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase));
+
+                var subIndexes = subCodes
+                    .Select(code => route.FindIndex(x =>
+                        string.Equals(x, code, StringComparison.OrdinalIgnoreCase)))
+                    .Where(index => index >= 0)
+                    .ToList();
+
+                if (currentIndex >= 0 && subIndexes.Count > 0)
+                {
+                    var subLastIndex = subIndexes.Max();
+
+                    return currentIndex > subLastIndex;
+                }
+            }
+
+            /*
+             * Fallback:
+             * previous nằm trong BTP và current không nằm trong BTP
+             * thì xem previous đã được thỏa bởi BTP.
+             */
+            return true;
+        }
+
+        private async Task<bool> IsPureExternalSubProductionForCanStartAsync(
+            production prod,
+            CancellationToken ct)
+        {
+            if (prod == null)
+                return false;
+
+            var method = NormCanStartCode(prod.prod_method);
+
+            if (method != "SUB")
+                return false;
+
+            if (!prod.sub_product_id.HasValue || prod.sub_product_id.Value <= 0)
+                return false;
+
+            if (prod.sub_product_used_qty <= 0)
+                return false;
+
+            /*
+             * Pure SUB: toàn bộ input đầu vào đến từ BTP.
+             * Nếu nvl_qty > 0 thì đó là BOTH hoặc case có NVL bổ sung.
+             */
+            if (prod.nvl_qty > 0)
+                return false;
+
+            /*
+             * Không check sub_product.quantity tại đây vì khi GM xác nhận lập lịch,
+             * BTP có thể đã bị xuất kho/trừ tồn.
+             */
+            return await _db.sub_products
+                .AsNoTracking()
+                .AnyAsync(x => x.id == prod.sub_product_id.Value, ct);
+        }
+
+        private async Task<List<string>> GetSubProductProcessCodesForCanStartAsync(
+            int subProductId,
+            CancellationToken ct)
+        {
+            if (subProductId <= 0)
+                return new List<string>();
+
+            var processCsv = await _db.sub_products
+                .AsNoTracking()
+                .Where(x => x.id == subProductId)
+                .Select(x => x.product_process)
+                .FirstOrDefaultAsync(ct);
+
+            return ParseCanStartRoute(processCsv);
         }
 
         private async Task<PreviousStageForCanStart?> FindDirectPreviousStageByProdIdForCanStartAsync(
