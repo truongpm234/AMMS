@@ -9015,5 +9015,132 @@ namespace AMMS.Infrastructure.Repositories
 
             return productions.Count;
         }
+
+        public async Task<List<int>> GetImportReceiveRelatedProdIdsAsync(
+    int orderId,
+    List<int> baseProdIds,
+    CancellationToken ct = default)
+        {
+            baseProdIds = baseProdIds?
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList() ?? new List<int>();
+
+            var resultProdIds = new HashSet<int>();
+
+            foreach (var id in baseProdIds)
+                resultProdIds.Add(id);
+
+            if (orderId <= 0 && baseProdIds.Count == 0)
+                return resultProdIds.OrderBy(x => x).ToList();
+
+            /*
+             * 1. Lấy các dòng prod_order liên quan trực tiếp:
+             * - order_id được nhập vào
+             * - production trong file hiện tại là group prod_id
+             * - production trong file hiện tại là single_prod_id
+             */
+            var directProdOrderRows = await _db.prod_orders
+                .AsNoTracking()
+                .Where(po =>
+                    (
+                        po.order_id == orderId ||
+                        baseProdIds.Contains(po.prod_id) ||
+                        (
+                            po.single_prod_id != null &&
+                            baseProdIds.Contains(po.single_prod_id.Value)
+                        )
+                    )
+                    &&
+                    (
+                        po.status == null ||
+                        po.status == "Active"
+                    ))
+                .Select(po => new
+                {
+                    po.prod_id,
+                    po.order_id,
+                    po.single_prod_id
+                })
+                .ToListAsync(ct);
+
+            foreach (var row in directProdOrderRows)
+            {
+                if (row.prod_id > 0)
+                    resultProdIds.Add(row.prod_id);
+
+                if (row.single_prod_id.HasValue && row.single_prod_id.Value > 0)
+                    resultProdIds.Add(row.single_prod_id.Value);
+            }
+
+            /*
+             * 2. Nếu tìm được group_prod_id,
+             * lấy toàn bộ member trong group đó.
+             * Ví dụ:
+             * order 83 và 84 cùng group prod_id = 120.
+             * Nhập order_id = 83 thì vẫn lưu file vào:
+             * - group production 120
+             * - single production của order 83
+             * - single production của order 84
+             */
+            var groupProdIds = directProdOrderRows
+                .Select(x => x.prod_id)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            if (groupProdIds.Count > 0)
+            {
+                var allGroupMemberRows = await _db.prod_orders
+                    .AsNoTracking()
+                    .Where(po =>
+                        groupProdIds.Contains(po.prod_id)
+                        &&
+                        (
+                            po.status == null ||
+                            po.status == "Active"
+                        ))
+                    .Select(po => new
+                    {
+                        po.prod_id,
+                        po.order_id,
+                        po.single_prod_id
+                    })
+                    .ToListAsync(ct);
+
+                foreach (var row in allGroupMemberRows)
+                {
+                    if (row.prod_id > 0)
+                        resultProdIds.Add(row.prod_id);
+
+                    if (row.single_prod_id.HasValue && row.single_prod_id.Value > 0)
+                        resultProdIds.Add(row.single_prod_id.Value);
+                }
+            }
+
+            /*
+             * 3. Lấy thêm production trực tiếp theo order_id để tránh thiếu.
+             */
+            if (orderId > 0)
+            {
+                var directOrderProductionIds = await _db.productions
+                    .AsNoTracking()
+                    .Where(x => x.order_id == orderId)
+                    .Select(x => x.prod_id)
+                    .ToListAsync(ct);
+
+                foreach (var prodId in directOrderProductionIds)
+                {
+                    if (prodId > 0)
+                        resultProdIds.Add(prodId);
+                }
+            }
+
+            return resultProdIds
+                .Where(x => x > 0)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToList();
+        }
     }
 }
