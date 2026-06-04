@@ -8985,5 +8985,35 @@ namespace AMMS.Infrastructure.Repositories
 
             return productions;
         }
+
+        public async Task<int> SaveImportReceivePathForProdIdsAsync(
+    List<int> prodIds,
+    string path,
+    CancellationToken ct = default)
+        {
+            prodIds = prodIds?
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList() ?? new List<int>();
+
+            if (prodIds.Count == 0 || string.IsNullOrWhiteSpace(path))
+                return 0;
+
+            var productions = await _db.productions
+                .Where(x => prodIds.Contains(x.prod_id))
+                .ToListAsync(ct);
+
+            if (productions.Count == 0)
+                return 0;
+
+            foreach (var prod in productions)
+            {
+                prod.import_recieve_path = path;
+            }
+
+            await _db.SaveChangesAsync(ct);
+
+            return productions.Count;
+        }
     }
 }
