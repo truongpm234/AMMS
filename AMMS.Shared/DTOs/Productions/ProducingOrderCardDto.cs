@@ -9,6 +9,7 @@
         public int quantity { get; set; }
         public DateTime? delivery_date { get; set; }
         public decimal progress_percent { get; set; }
+        public bool is_priority { get; set; }
         public string? current_stage { get; set; }
         public string? status { get; set; }
         public string? production_status { get; set; }

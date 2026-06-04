@@ -13,7 +13,7 @@ namespace AMMS.Shared.DTOs.Productions.Groups
         // Ví dụ: ["PHU", "CAN", "BOI", "BE", "DUT", "DAN"]
         public List<string> process_codes { get; set; } = new();
 
-        public DateTime? planned_start_date { get; set; }
+        public bool? is_priority { get; set; } = false;
 
         public string? note { get; set; }
     }

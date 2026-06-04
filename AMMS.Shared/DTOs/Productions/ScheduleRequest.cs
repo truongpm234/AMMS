@@ -12,6 +12,7 @@ namespace AMMS.Shared.DTOs.Productions
         public int product_type_id { get; set; }
         public string? production_processes { get; set; }
         public int? manager_id { get; set; }
+        public bool? is_priority { get; set; } = false;
     }
 }
 

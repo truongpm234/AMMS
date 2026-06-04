@@ -51,22 +51,49 @@ namespace AMMS.Application.Services
         {
             var hours = await _db.estimate_config
                 .AsNoTracking()
-                .Where(x => x.config_group == "planning" && x.config_key == "min_start_wait_hours")
+                .Where(x =>
+                    x.config_group == "planning" &&
+                    x.config_key == "min_start_wait_hours")
                 .OrderByDescending(x => x.updated_at)
                 .Select(x => (decimal?)x.value_num)
                 .FirstOrDefaultAsync(ct);
 
-            var resolvedHours = (hours.HasValue && hours.Value > 0m) ? hours.Value : 6m;
-            return (int)Math.Ceiling(resolvedHours * 60m);
+            var resolvedHours = hours.HasValue && hours.Value > 0m
+                ? hours.Value
+                : 24m;
+
+            return Math.Max(24 * 60, (int)Math.Ceiling(resolvedHours * 60m));
         }
 
-        public async Task<int> ScheduleOrderAsync(int orderId, int productTypeId, string? productionProcessCsv, int? managerId = 3)
+        private DateTime EnsurePlanStartNotSameDay(
+    DateTime now,
+    DateTime proposedStart)
+        {
+            /*
+             * Nếu proposedStart vẫn rơi vào ngày tạo / ngày hiện tại,
+             * đẩy sang ngày kế tiếp lúc bắt đầu ca làm.
+             */
+            if (proposedStart.Date <= now.Date)
+            {
+                return _cal.NormalizeStart(now.Date.AddDays(1));
+            }
+
+            return _cal.NormalizeStart(proposedStart);
+        }
+
+        public async Task<int> ScheduleOrderAsync(
+    int orderId,
+    int productTypeId,
+    string? productionProcessCsv,
+    int? managerId = 3,
+    bool isPriority = false,
+    CancellationToken ct = default)
         {
             var strategy = _db.Database.CreateExecutionStrategy();
 
             return await strategy.ExecuteAsync(async () =>
             {
-                await using var tx = await _db.Database.BeginTransactionAsync();
+                await using var tx = await _db.Database.BeginTransactionAsync(ct);
 
                 try
                 {
@@ -76,35 +103,47 @@ namespace AMMS.Application.Services
                         orderId,
                         productTypeId,
                         productionProcessCsv,
-                        CancellationToken.None)
+                        ct)
                         ?? throw new InvalidOperationException(
                             $"Cannot build planning context for order {orderId}. productTypeId={productTypeId}, csv={productionProcessCsv}");
 
                     _logger.LogInformation(
                         "ScheduleOrder start. OrderId={OrderId}, ProductTypeId={ProductTypeId}, RawCsv={RawCsv}, Qty={Qty}, SheetsTotal={SheetsTotal}, SheetsRequired={SheetsRequired}",
-                        orderId, productTypeId, ctx.RawProductionProcessCsv, ctx.OrderQty, ctx.SheetsTotal, ctx.SheetsRequired);
+                        orderId,
+                        productTypeId,
+                        ctx.RawProductionProcessCsv,
+                        ctx.OrderQty,
+                        ctx.SheetsTotal,
+                        ctx.SheetsRequired);
 
-                    var plan = await BuildStagePlansAsync(ctx, now, CancellationToken.None);
+                    var plan = await BuildStagePlansAsync(ctx, now, ct);
 
                     if (plan.Stages.Count == 0)
+                    {
                         throw new InvalidOperationException(
                             $"No stage plan generated for order {orderId}. RawCsv={ctx.RawProductionProcessCsv}");
+                    }
 
-                    var prod = await GetOrCreateProductionAsync(orderId, productTypeId, managerId, now);
+                    var prod = await GetOrCreateProductionAsync(
+                        orderId,
+                        productTypeId,
+                        managerId,
+                        now);
 
                     if (prod.created_at == null)
                         prod.created_at = now;
 
+                    prod.is_priority = isPriority;
+
                     prod.planned_start_date = plan.Stages.Min(x => x.PlannedStart);
                     prod.planned_end_date = plan.Stages.Max(x => x.PlannedEnd);
-
                     prod.group_process_codes = plan.NormalizedProcessCsv;
 
-                    await _db.SaveChangesAsync();
+                    await _db.SaveChangesAsync(ct);
 
                     var order = await _db.orders
                         .AsTracking()
-                        .FirstOrDefaultAsync(o => o.order_id == orderId);
+                        .FirstOrDefaultAsync(o => o.order_id == orderId, ct);
 
                     if (order == null)
                         throw new InvalidOperationException($"Order {orderId} not found when updating production_id");
@@ -112,137 +151,72 @@ namespace AMMS.Application.Services
                     if (order.production_id != prod.prod_id)
                     {
                         order.production_id = prod.prod_id;
-                        await _db.SaveChangesAsync();
+                        await _db.SaveChangesAsync(ct);
                     }
 
+                    /*
+                     * Nếu production mới chỉ là shell Pending, chưa có method,
+                     * chỉ lưu planned preview và priority, chưa tạo task.
+                     */
                     if (string.IsNullOrWhiteSpace(prod.prod_method))
                     {
-                        _logger.LogInformation(
-                            "Production method is not selected yet. Create production shell only. OrderId={OrderId}, ProdId={ProdId}",
-                            orderId,
-                            prod.prod_id);
-
-                        await tx.CommitAsync();
+                        await tx.CommitAsync(ct);
                         return prod.prod_id;
                     }
 
                     var existingTasks = await _db.tasks
-    .Where(t => t.prod_id == prod.prod_id)
-    .OrderBy(t => t.seq_num)
-    .ThenBy(t => t.task_id)
-    .ToListAsync();
+                        .Where(t => t.prod_id == prod.prod_id)
+                        .OrderBy(t => t.seq_num)
+                        .ThenBy(t => t.task_id)
+                        .ToListAsync(ct);
 
                     if (existingTasks.Count > 0)
                     {
-                        var hasProgressed = existingTasks.Any(t =>
-                            string.Equals(t.status, "Ready", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
-                            t.start_time != null ||
-                            t.end_time != null);
-
-                        if (hasProgressed)
-                        {
-                            await tx.CommitAsync();
-                            return prod.prod_id;
-                        }
-
-                        var existingTaskIds = existingTasks.Select(x => x.task_id).ToList();
-
-                        var logs = await _db.task_logs
-                            .Where(x => x.task_id.HasValue && existingTaskIds.Contains(x.task_id.Value))
-                            .ToListAsync();
-
-                        _db.task_logs.RemoveRange(logs);
                         _db.tasks.RemoveRange(existingTasks);
-
-                        await _db.SaveChangesAsync();
+                        await _db.SaveChangesAsync(ct);
                     }
 
-                    var orderItems = await _db.order_items
-                        .Where(x => x.order_id == orderId)
-                        .ToListAsync();
-
-                    foreach (var item in orderItems)
-                        item.production_process = plan.NormalizedProcessCsv;
-
-                    await _db.SaveChangesAsync();
-
-                    var subProductContext = await ResolveSubProductCompletedContextAsync(
-    prod,
-    plan.Stages,
-    ctx,
-    now,
-    CancellationToken.None);
-
-                    var tasks = plan.Stages
+                    var taskRows = plan.Stages
                         .OrderBy(x => x.SeqNum)
-                        .Select(x =>
+                        .ThenBy(x => x.ProcessId)
+                        .Select(x => new task
                         {
-                            var isFinishedBySubProduct = subProductContext.finished_process_codes
-                                .Contains(NormProcessCode(x.ProcessCode));
-
-                            var finishedAt = isFinishedBySubProduct
-                                ? now
-                                : (DateTime?)null;
-
-                            return new task
-                            {
-                                prod_id = prod.prod_id,
-                                process_id = x.ProcessId,
-                                seq_num = x.SeqNum,
-                                name = x.ProcessName,
-
-                                status = isFinishedBySubProduct ? "Finished" : "Unassigned",
-
-                                machine = x.MachineCode,
-
-                                start_time = finishedAt,
-                                end_time = finishedAt,
-
-                                planned_start_time = x.PlannedStart,
-                                planned_end_time = x.PlannedEnd,
-
-                                reason = isFinishedBySubProduct
-                                    ? "Bán thành phẩm đã có sẵn trong kho"
-                                    : null,
-
-                                is_taken_sub_product = isFinishedBySubProduct
-                            };
+                            prod_id = prod.prod_id,
+                            process_id = x.ProcessId,
+                            seq_num = x.SeqNum,
+                            name = x.ProcessName,
+                            status = "Unassigned",
+                            machine = x.MachineCode,
+                            input_mode = "MANUAL",
+                            planned_start_time = x.PlannedStart,
+                            planned_end_time = x.PlannedEnd,
+                            reason = "Lập lịch sản xuất tự động."
                         })
                         .ToList();
 
+                    await _db.tasks.AddRangeAsync(taskRows, ct);
+
                     prod.status = "Scheduled";
-                    prod.planned_start_date = tasks.Min(x => x.planned_start_time);
-                    prod.planned_end_date = tasks.Max(x => x.planned_end_time);
                     prod.actual_start_date = null;
                     prod.end_date = null;
-                    prod.group_process_codes = plan.NormalizedProcessCsv;
 
-                    await _taskRepo.AddRangeAsync(tasks);
-                    await _taskRepo.SaveChangesAsync();
+                    order.status = "Scheduled";
 
-                    await CreateSubProductFinishedLogsAsync(
-                        tasks,
-                        plan.Stages,
-                        subProductContext,
-                        ctx,
-                        now,
-                        CancellationToken.None);
+                    await _db.SaveChangesAsync(ct);
+                    await tx.CommitAsync(ct);
 
-                    _logger.LogInformation(
-                        "ScheduleOrder success. OrderId={OrderId}, ProdId={ProdId}, TaskCount={TaskCount}, Csv={Csv}",
-                        orderId, prod.prod_id, tasks.Count, plan.NormalizedProcessCsv);
-
-                    await tx.CommitAsync();
                     return prod.prod_id;
                 }
                 catch (Exception ex)
                 {
-                    await tx.RollbackAsync();
+                    await tx.RollbackAsync(ct);
 
-                    _logger.LogError(ex,
+                    _logger.LogError(
+                        ex,
                         "ScheduleOrderAsync FAILED. OrderId={OrderId}, ProductTypeId={ProductTypeId}, ProductionProcessCsv={ProductionProcessCsv}",
-                        orderId, productTypeId, productionProcessCsv);
+                        orderId,
+                        productTypeId,
+                        productionProcessCsv);
 
                     throw;
                 }
@@ -559,6 +533,8 @@ namespace AMMS.Application.Services
                 normalizedNow,
                 steps.Count,
                 minStartWaitMinutes);
+
+            baseAnchor = EnsurePlanStartNotSameDay(now, baseAnchor);
 
             /*
              * Không ép order mới chạy sau toàn bộ order cũ.

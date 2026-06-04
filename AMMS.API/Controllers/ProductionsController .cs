@@ -65,30 +65,57 @@ namespace AMMS.API.Controllers
         }
 
         [HttpPost("schedule")]
-        public async Task<IActionResult> Schedule([FromBody] ScheduleRequest req)
+        public async Task<IActionResult> Schedule(
+    [FromBody] ScheduleRequest req,
+    CancellationToken ct)
         {
+            if (req == null)
+                return BadRequest(new { message = "Request body is required." });
+
+            if (req.order_id <= 0)
+                return BadRequest(new { message = "order_id không hợp lệ." });
+
+            if (req.product_type_id <= 0)
+                return BadRequest(new { message = "product_type_id không hợp lệ." });
+
             var prodId = await _svc.ScheduleOrderAsync(
                 orderId: req.order_id,
                 productTypeId: req.product_type_id,
                 productionProcessCsv: req.production_processes,
-                managerId: req.manager_id
-            );
+                managerId: req.manager_id,
+                isPriority: req.is_priority ?? false,
+                ct: ct);
 
-            return Ok(new { prod_id = prodId });
+            return Ok(new
+            {
+                message = "Scheduled production successfully",
+                prod_id = prodId,
+                is_priority = req.is_priority ?? false
+            });
         }
 
         [HttpPost("confirm-schedule/{prodId:int}")]
         public async Task<IActionResult> ConfirmSchedule(
     int prodId,
+    [FromBody] ConfirmProductionScheduleRequest? req,
     CancellationToken ct)
         {
             try
             {
-                var userId = GetUserId();
+                int? userId = null;
+
+                var rawUserId =
+                    User.FindFirst("userid")?.Value ??
+                    User.FindFirst("user_id")?.Value ??
+                    User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+                if (int.TryParse(rawUserId, out var parsed))
+                    userId = parsed;
 
                 var result = await _service.ConfirmScheduleAsync(
                     prodId,
                     userId,
+                    req?.is_priority,
                     ct);
 
                 return Ok(result);
@@ -98,15 +125,6 @@ namespace AMMS.API.Controllers
                 return BadRequest(new
                 {
                     message = ex.Message,
-                    prod_id = prodId
-                });
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(StatusCodes.Status500InternalServerError, new
-                {
-                    message = "Confirm schedule failed",
-                    detail = ex.Message,
                     prod_id = prodId
                 });
             }

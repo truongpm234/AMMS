@@ -25,6 +25,8 @@ public partial class production
 
     public DateTime? end_date { get; set; }
 
+    public bool? is_priority { get; set; } = false;
+
     public string? status { get; set; }
 
     public int? product_type_id { get; set; }

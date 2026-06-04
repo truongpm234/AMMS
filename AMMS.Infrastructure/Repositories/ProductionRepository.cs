@@ -81,7 +81,7 @@ namespace AMMS.Infrastructure.Repositories
                     prod_id = pr.prod_id,
 
                     order_id = o != null ? o.order_id : null,
-
+                    is_priority = pr.is_priority ?? false,
                     code = o != null ? o.code : pr.code,
 
                     delivery_date = o != null ? o.delivery_date : null,
@@ -733,7 +733,7 @@ namespace AMMS.Infrastructure.Repositories
                     list_order_id = listOrderId,
                     order_id = r.order_id,
                     code = r.code,
-
+                    is_priority = r.is_priority ?? false,
                     customer_name = customerName,
                     product_name = productName,
                     quantity = quantity,

@@ -332,6 +332,7 @@ builder.Services.AddScoped<IGroupProductionService, GroupProductionService>();
 builder.Services.AddScoped<IStockMoveRepository, StockMoveRepository>();
 builder.Services.AddScoped<IStockMoveService, StockMoveService>();
 builder.Services.AddScoped<DeliveryHandoverEmailJob>();
+builder.Services.AddScoped<RemainingPaymentReminderJob>();
 // Logging
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();

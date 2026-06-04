@@ -15,7 +15,7 @@ namespace AMMS.Shared.DTOs.Productions
         public string? code { get; set; }
 
         public DateTime? delivery_date { get; set; }
-
+        public bool? is_priority { get; set; }
         public int? product_type_id { get; set; }
 
         public string? production_status { get; set; }

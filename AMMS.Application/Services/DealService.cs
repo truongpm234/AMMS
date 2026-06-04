@@ -9,6 +9,7 @@ using AMMS.Shared.DTOs.Exceptions.AMMS.Application.Exceptions;
 using AMMS.Shared.DTOs.PayOS;
 using AMMS.Shared.DTOs.Socket;
 using AMMS.Shared.Helpers;
+using Hangfire;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -35,6 +36,7 @@ namespace AMMS.Application.Services
         private readonly IHubContext<RealtimeHub> _hub;
         private readonly NotificationService _notificationService;
         private readonly IBaseConfigRepository _baseConfigRepo;
+        private readonly IBackgroundJobClient _backgroundJobClient;
         private static long _payosOrderCodeSeq = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() % 1000;
         public DealService(
     NotificationService notificationService,
@@ -53,26 +55,28 @@ namespace AMMS.Application.Services
     IUserRepository userRepo,
     IOrderRepository orderRepository,
     IProductionRepository productionRepository,
-    IBaseConfigRepository baseConfigRepo)
-        {
-            _db = db;
-            _notificationService = notificationService;
-            _requestRepo = requestRepo;
-            _estimateRepo = estimateRepo;
-            _config = config;
-            _emailService = emailService;
-            _quoteRepo = quoteRepo;
-            _payOs = payOs;
-            _paymentRepo = paymentRepo;
-            _rt = rt;
-            _logger = logger;
-            _emailQueue = emailQueue;
-            _userRepo = userRepo;
-            _orderRepo = orderRepository;
-            _prodRepo = productionRepository;
-            _hub = hub;
-            _baseConfigRepo = baseConfigRepo;
-        }
+    IBaseConfigRepository baseConfigRepo,
+    IBackgroundJobClient backgroundJobClient)
+    {
+        _db = db;
+        _notificationService = notificationService;
+        _requestRepo = requestRepo;
+        _estimateRepo = estimateRepo;
+        _config = config;
+        _emailService = emailService;
+        _quoteRepo = quoteRepo;
+        _payOs = payOs;
+        _paymentRepo = paymentRepo;
+        _rt = rt;
+        _logger = logger;
+        _emailQueue = emailQueue;
+        _userRepo = userRepo;
+        _orderRepo = orderRepository;
+        _prodRepo = productionRepository;
+        _hub = hub;
+        _baseConfigRepo = baseConfigRepo;
+        _backgroundJobClient = backgroundJobClient;
+    }
 
         public async Task SendDealAndEmailAsync(int orderRequestId, int? estimateId = null)
         {
@@ -935,9 +939,7 @@ namespace AMMS.Application.Services
                 ct);
 
             if (latestRemaining != null && IsPaidStatus(latestRemaining.status))
-            {
                 return;
-            }
 
             if (string.IsNullOrWhiteSpace(req.customer_email))
                 throw new InvalidOperationException("Customer email missing");
@@ -961,7 +963,7 @@ namespace AMMS.Application.Services
 
             await _emailQueue.QueueAsync(new EmailQueueItem(
                 req.customer_email!,
-                $"[MES] Đơn hàng {ord.code} đã hoàn thành - Vui lòng thanh toán phần còn lại",
+                $"[MES] Đơn hàng {ord.code} đã hoàn thành - Vui lòng thanh toán phần còn lại trong 07 ngày",
                 html));
 
             ord.status = "PendingPaid";
@@ -970,11 +972,20 @@ namespace AMMS.Application.Services
 
             await _db.SaveChangesAsync(ct);
 
+            /*
+             * Không thêm DB mới.
+             * Sau 7 ngày Hangfire sẽ kiểm tra lại status.
+             * Nếu vẫn PendingPaid và chưa paid thì gửi mail nhắc + signalR cho consultant.
+             */
+            _backgroundJobClient.Schedule<RemainingPaymentReminderJob>(
+                job => job.RemindRemainingPaymentIfStillPendingAsync(id),
+                TimeSpan.FromDays(7));
+
             await _hub.Clients.Group(RealtimeGroups.ByRole("consultant, warehouse manager")).SendAsync(
                 "pending-paid",
                 new
                 {
-                    message = $"Đơn hàng {ord.code} đã được gửi email yêu cầu thanh toán phần còn lại.",
+                    message = $"Đơn hàng {ord.code} đã được gửi email yêu cầu thanh toán phần còn lại trong 07 ngày.",
                     order_id = id,
                     request_id = req.order_request_id
                 },
@@ -990,7 +1001,67 @@ namespace AMMS.Application.Services
                 },
                 ct);
 
-            await _hub.Clients.All.SendAsync("update-ui", new { message = "Đã gửi yêu cầu thành toán phần còn lại đơn hàng." }, ct);
+            await _hub.Clients.All.SendAsync(
+                "update-ui",
+                new
+                {
+                    message = "Đã gửi yêu cầu thanh toán phần còn lại. Khách cần thanh toán trong vòng 07 ngày."
+                },
+                ct);
+        }
+
+        public async Task SendRemainingPaymentReminderEmailAsync(
+    int orderId,
+    CancellationToken ct = default)
+        {
+            var req = await _requestRepo.GetByOrderIdAsync(orderId, ct)
+                ?? throw new InvalidOperationException("Order request not found for order");
+
+            var ord = await _orderRepo.GetByIdAsync(orderId)
+                ?? throw new InvalidOperationException("Order not found");
+
+            var prod = await _prodRepo.GetLatestByOrderIdAsync(orderId, ct);
+
+            var latestRemaining = await _paymentRepo.GetLatestByRequestIdAndTypeAsync(
+                req.order_request_id,
+                PaymentTypes.Remaining,
+                ct);
+
+            if (latestRemaining != null && IsPaidStatus(latestRemaining.status))
+                return;
+
+            var stillPending =
+                string.Equals(req.process_status, "PendingPaid", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(ord.status, "PendingPaid", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(prod?.status, "PendingPaid", StringComparison.OrdinalIgnoreCase);
+
+            if (!stillPending)
+                return;
+
+            if (string.IsNullOrWhiteSpace(req.customer_email))
+                throw new InvalidOperationException("Customer email missing");
+
+            var est = await ResolveAcceptedEstimateAsync(req, ct);
+            var remainingAmount = PaymentAmountHelper.GetRemainingAmount(est);
+
+            if (remainingAmount <= 0)
+                return;
+
+            var feBase = (_config["Deal:BaseUrlFe"] ?? "https://daiphuchai.vercel.app").TrimEnd('/');
+            var paymentPageUrl = $"{feBase}/payment/{orderId}";
+
+            var html = RemainingPaymentEmailTemplates.BuildRemainingPaymentReminderEmail(
+                req,
+                ord,
+                prod,
+                est,
+                remainingAmount,
+                paymentPageUrl);
+
+            await _emailQueue.QueueAsync(new EmailQueueItem(
+                req.customer_email!,
+                $"[MES] Nhắc thanh toán phần còn lại cho đơn hàng {ord.code}",
+                html));
         }
 
         public async Task NotifyRemainingPaidAsync(
