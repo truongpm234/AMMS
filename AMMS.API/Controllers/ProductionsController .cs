@@ -682,17 +682,20 @@ namespace AMMS.API.Controllers
                     });
                 }
 
+                var notifyMessage =
+                    $"Đơn hàng {req.order_id} đã tạo 1 phiếu nhập kho chung cho {result.total_productions} production, chờ nhập kho";
+
                 await _hub.Clients.Group(RealtimeGroups.ByRole("warehouse manager")).SendAsync(
                     "Importing",
                     new
                     {
-                        message = $"Đơn hàng {req.order_id} đã tạo {result.generated_count} phiếu nhập kho, chờ nhập kho"
+                        message = notifyMessage
                     },
                     ct);
 
                 await _noti.CreateNotfi(
                     4,
-                    $"Đơn hàng {req.order_id} đã tạo {result.generated_count} phiếu nhập kho, chờ nhập kho",
+                    notifyMessage,
                     null,
                     req.order_id,
                     "Importing");
