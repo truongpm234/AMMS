@@ -47,6 +47,7 @@ namespace AMMS.Application.Services
             _noti = noti;
             _hub = hub;
         }
+
         private async Task<int> GetMinStartWaitMinutesAsync(CancellationToken ct = default)
         {
             var hours = await _db.estimate_config
@@ -424,7 +425,7 @@ namespace AMMS.Application.Services
                             ? row.first_item_process
                             : est?.production_processes),
                 DesiredDeliveryDate = row.request_delivery_date ?? row.order_delivery_date ?? est?.desired_delivery_date,
-
+                
                 QueueDateTime = row.order_date ?? AppTime.NowVnUnspecified(),
                 QueueOrderKey = row.order_id,
                 WaveSheetsRequired = est?.wave_sheets_required ?? 0,
@@ -509,60 +510,79 @@ namespace AMMS.Application.Services
     DateTime now,
     CancellationToken ct)
         {
-            var allSteps = await _db.product_type_processes
-                .AsNoTracking()
-                .Where(x => x.product_type_id == ctx.ProductTypeId && (x.is_active ?? true))
-                .OrderBy(x => x.seq_num)
-                .ToListAsync(ct);
-
-            if (allSteps.Count == 0)
-                throw new Exception($"No active routing for product_type_id={ctx.ProductTypeId}");
-
-            var steps = ProductionProcessSelectionHelper.ResolveFixedRoute(
-                allSteps,
-                x => x.process_code,
-                ctx.RawProductionProcessCsv);
-
-            var normalizedCsv = ProductionProcessSelectionHelper.BuildCsv(steps, x => x.process_code);
-            var normalizedNow = _cal.NormalizeStart(now);
-
             var minStartWaitMinutes = await GetMinStartWaitMinutesAsync(ct);
 
-            var baseAnchor = EstimateInitialPlanningAnchor(
-                ctx,
-                normalizedNow,
-                steps.Count,
-                minStartWaitMinutes);
-
-            baseAnchor = EnsurePlanStartNotSameDay(now, baseAnchor);
+            var anchor = now.AddMinutes(minStartWaitMinutes);
 
             /*
-             * Không ép order mới chạy sau toàn bộ order cũ.
-             * Scheduler sẽ tự tìm slot trống theo từng máy.
+             * Không cho plan start cùng ngày xác nhận.
              */
-            var plan = await BuildStagePlansFromAnchorAsync(
-                ctx,
-                baseAnchor,
-                steps,
-                normalizedCsv,
-                ct);
+            if (anchor.Date <= now.Date)
+                anchor = now.Date.AddDays(1);
 
-            if (ctx.DesiredDeliveryDate.HasValue && plan.Stages.Count > 0)
+            anchor = _cal.NormalizeStart(anchor);
+
+            var processCodes = ParseProcessRouteForScheduling(
+                ctx.RawProductionProcessCsv);
+
+            if (processCodes.Count == 0)
             {
-                var finishDeadline = ResolveFinishDeadline(ctx.DesiredDeliveryDate.Value);
-                var estimatedFinish = plan.Stages.Max(x => x.PlannedEnd);
+                processCodes = await _db.product_type_processes
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.product_type_id == ctx.ProductTypeId &&
+                        (x.is_active ?? true))
+                    .OrderBy(x => x.seq_num)
+                    .Select(x => x.process_code ?? "")
+                    .ToListAsync(ct);
 
-                if (estimatedFinish > finishDeadline)
-                {
-                    throw new InvalidOperationException(
-                        $"Không thể lập lịch kịp ngày giao. " +
-                        $"OrderId={ctx.OrderId}, estimated_finish={estimatedFinish:yyyy-MM-dd HH:mm}, " +
-                        $"deadline={finishDeadline:yyyy-MM-dd HH:mm}. " +
-                        $"Cần đợi xưởng rãnh.");
-                }
+                processCodes = processCodes
+                    .Select(NormScheduleCode)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(FullRouteIndexForScheduling)
+                    .ToList();
             }
 
-            return plan;
+            var requiredUnits = BuildRequiredUnitsForSingleSchedule(ctx, processCodes);
+
+            var machinePlans = await ProductionMachinePlanHelper.BuildMachinePlanAsync(
+                db: _db,
+                cal: _cal,
+                productTypeId: ctx.ProductTypeId,
+                processCodes: processCodes,
+                quantity: ctx.OrderQty > 0 ? ctx.OrderQty : 1,
+                earliestStart: anchor,
+                inMemoryReservations: new List<MachineReservationDto>(),
+                requiredUnitsByProcessCode: requiredUnits,
+                ct: ct);
+
+            var stages = machinePlans
+                .Select(x => new StagePlanDraft
+                {
+                    ProcessId = x.process_id,
+                    SeqNum = x.seq_num,
+                    ProcessName = x.process_name,
+                    ProcessCode = x.process_code,
+                    MachineCode = x.machine_code,
+                    MachineEntity = null!,
+                    LaneIndex = 0,
+                    Unit = "sp",
+                    RequiredUnits = x.required_units,
+                    EffectiveCapacityPerHour = x.effective_capacity_per_hour,
+                    SetupMinutes = 0,
+                    HandoffMinutes = 0,
+                    PlannedStart = x.planned_start_time,
+                    PlannedEnd = x.planned_end_time
+                })
+                .ToList();
+
+            return new PlanBuildResult
+            {
+                PlanningAnchor = anchor,
+                NormalizedProcessCsv = string.Join(",", processCodes),
+                Stages = stages
+            };
         }
 
         private async Task<List<machine>> GetCandidateMachinesAsync(
@@ -1479,6 +1499,94 @@ namespace AMMS.Application.Services
 
             throw new InvalidOperationException(
                 $"Không tìm được slot trống cho máy {machine.machine_code}, process={processCode}.");
+        }
+
+        private static List<string> ParseProcessRouteForScheduling(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormScheduleCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndexForScheduling)
+                .ToList();
+        }
+
+        private static string NormScheduleCode(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+        }
+
+        private static int FullRouteIndexForScheduling(string? code)
+        {
+            return NormScheduleCode(code) switch
+            {
+                "RALO" => 1,
+                "CAT" => 2,
+                "IN" => 3,
+                "PHU" => 4,
+                "CAN" => 5,
+                "CAN_MANG" => 5,
+                "BOI" => 6,
+                "BE" => 7,
+                "DUT" => 8,
+                "DAN" => 9,
+                _ => 999
+            };
+        }
+
+        private static Dictionary<string, decimal> BuildRequiredUnitsForSingleSchedule(
+            PlanningContext ctx,
+            List<string> processCodes)
+        {
+            var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+            var orderQty = ctx.OrderQty > 0 ? ctx.OrderQty : 1;
+            var sheetsRequired = ctx.SheetsRequired > 0 ? ctx.SheetsRequired : orderQty;
+            var sheetsTotal = ctx.SheetsTotal > 0 ? ctx.SheetsTotal : sheetsRequired;
+
+            foreach (var codeRaw in processCodes)
+            {
+                var code = NormScheduleCode(codeRaw);
+
+                decimal units = code switch
+                {
+                    /*
+                     * RALO chạy theo số bản kẽm.
+                     * Nếu ctx không có NumberOfPlates thì fallback 1.
+                     */
+                    "RALO" => ctx.NumberOfPlates > 0 ? ctx.NumberOfPlates : 1,
+
+                    /*
+                     * CAT/IN/PHU/CAN/BOI/BE/DUT thường chạy theo số tờ/sheet.
+                     */
+                    "CAT" => sheetsTotal,
+                    "IN" => sheetsTotal,
+                    "PHU" => sheetsTotal,
+                    "CAN" => sheetsTotal,
+                    "BOI" => sheetsTotal,
+                    "BE" => sheetsTotal,
+                    "DUT" => sheetsTotal,
+
+                    /*
+                     * DAN có thể theo thành phẩm/sp.
+                     */
+                    "DAN" => orderQty,
+
+                    _ => orderQty
+                };
+
+                result[code] = Math.Max(1, units);
+            }
+
+            return result;
         }
 
         private sealed class StagePlanDraft

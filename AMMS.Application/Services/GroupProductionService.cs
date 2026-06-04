@@ -9,6 +9,7 @@ using AMMS.Shared.Helpers;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
+using Twilio.Annotations;
 
 namespace AMMS.Application.Services
 {
@@ -18,6 +19,7 @@ namespace AMMS.Application.Services
         private readonly NotificationService _noti;
         private readonly IHubContext<RealtimeHub> _hub;
         private readonly ITaskScanService _scanSvc;
+        private readonly WorkCalendar _cal;
         private static readonly string[] Dept1Codes = { "RALO", "CAT", "IN" };
         private static readonly string[] Dept2Codes = { "PHU", "CAN", "BOI" };
         private static readonly string[] Dept3Codes = { "BE", "DUT", "DAN" };
@@ -46,12 +48,13 @@ namespace AMMS.Application.Services
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         };
 
-        public GroupProductionService(AppDbContext db, NotificationService noti, IHubContext<RealtimeHub> hub, ITaskScanService scanSvc)
+        public GroupProductionService(AppDbContext db, NotificationService noti, IHubContext<RealtimeHub> hub, ITaskScanService scanSvc, WorkCalendar cal)
         {
             _db = db;
             _noti = noti;
             _hub = hub;
             _scanSvc = scanSvc;
+            _cal = cal;
         }
 
         public async Task<List<GroupProductionCandidateDto>> GetCandidatesAsync(
@@ -313,6 +316,9 @@ namespace AMMS.Application.Services
             if (req == null)
                 throw new InvalidOperationException("Request body is required.");
 
+            req.order_ids ??= new List<int>();
+            req.process_codes ??= new List<string>();
+
             var isPriority = req.is_priority ?? false;
 
             var orderIds = req.order_ids
@@ -336,13 +342,18 @@ namespace AMMS.Application.Services
                 selectedCodes,
                 ct);
 
+            /*
+             * Preview này đã được ApplyMachineScheduleToPreviewAsync ở PreviewAsync.
+             */
             var preview = await PreviewAsync(req, ct);
 
-            if (preview.suggestion_type == "SINGLE_PREVIEW")
+            if (string.Equals(preview.suggestion_type, "SINGLE_PREVIEW", StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidOperationException(
                     "API tạo lệnh ghép không dùng cho sản xuất đơn. Cần chọn ít nhất 2 order đủ điều kiện ghép.");
             }
+
+            preview.batches ??= new List<SuggestionBatchPreviewDto>();
 
             var strategy = _db.Database.CreateExecutionStrategy();
 
@@ -427,6 +438,10 @@ namespace AMMS.Application.Services
                     .OrderBy(x => x.seq_num)
                     .ToListAsync(ct);
 
+                /*
+                 * Tạo task SINGLE_PRIVATE cho từng order trước công đoạn ghép.
+                 * Hàm này dùng preview.private_stages đã được scheduler tính lại.
+                 */
                 await EnsureSinglePrivateTasksBeforeGroupAsync(
                     rows,
                     plan,
@@ -437,41 +452,98 @@ namespace AMMS.Application.Services
                 var createdGroupProdIds = new List<int>();
                 var createdSplitProdIds = new List<int>();
 
-                foreach (var segment in plan)
+                var groupBatches = preview.batches
+                    .Where(x =>
+                        string.Equals(x.batch_type, "GROUP", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(x.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(x => x.planned_start_date)
+                    .ThenBy(x => x.process_codes == null || x.process_codes.Count == 0
+                        ? int.MaxValue
+                        : x.process_codes.Select(FullRouteIndex).Min())
+                    .ToList();
+
+                if (groupBatches.Count == 0)
                 {
-                    var segmentStart = ResolveStageStart(preview, segment);
-                    var segmentEnd = ResolveStageEnd(preview, segment);
+                    throw new InvalidOperationException(
+                        "Preview không có batch GROUP nên không thể tạo production ghép.");
+                }
 
-                    if (segment.IsGroup)
+                foreach (var groupBatch in groupBatches)
+                {
+                    groupBatch.order_ids ??= new List<int>();
+
+                    var memberOrderIdSet = groupBatch.order_ids
+                        .Where(x => x > 0)
+                        .Distinct()
+                        .ToHashSet();
+
+                    if (memberOrderIdSet.Count < 2)
                     {
-                        var groupProd = await CreateDepartmentGroupProductionAsync(
-                            segment,
-                            productTypeId,
-                            managerUserId,
-                            segmentStart,
-                            segmentEnd,
-                            req.note,
-                            allSteps,
-                            isPriority,
-                            ct);
-
-                        createdGroupProdIds.Add(groupProd.prod_id);
+                        throw new InvalidOperationException(
+                            "Batch GROUP cần ít nhất 2 order.");
                     }
-                    else
+
+                    var members = rows
+                        .Where(x => memberOrderIdSet.Contains(x.Order.order_id))
+                        .OrderBy(x => x.Order.delivery_date)
+                        .ThenBy(x => x.Order.order_id)
+                        .ToList();
+
+                    if (members.Count < 2)
                     {
-                        var splitProd = await CreateSplitProductionAsync(
-                            segment,
-                            productTypeId,
-                            managerUserId,
-                            segmentStart,
-                            segmentEnd,
-                            req.note,
-                            allSteps,
-                            isPriority,
-                            ct);
-
-                        createdSplitProdIds.Add(splitProd.prod_id);
+                        throw new InvalidOperationException(
+                            "Không tìm thấy đủ member rows để tạo batch GROUP.");
                     }
+
+                    var groupProd = await CreateDepartmentGroupProductionAsync(
+                        batch: groupBatch,
+                        members: members,
+                        productTypeId: productTypeId,
+                        managerUserId: managerUserId,
+                        note: req.note,
+                        isPriority: isPriority,
+                        ct: ct);
+
+                    createdGroupProdIds.Add(groupProd.prod_id);
+                }
+
+                var splitBatches = preview.batches
+                    .Where(x =>
+                        string.Equals(x.batch_type, "SPLIT", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(x.prod_kind, "SPLIT", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(x => x.planned_start_date)
+                    .ThenBy(x => x.order_ids == null || x.order_ids.Count == 0
+                        ? int.MaxValue
+                        : x.order_ids.Min())
+                    .ToList();
+
+                foreach (var splitBatch in splitBatches)
+                {
+                    splitBatch.order_ids ??= new List<int>();
+
+                    var orderId = splitBatch.order_ids
+                        .Where(x => x > 0)
+                        .Distinct()
+                        .FirstOrDefault();
+
+                    if (orderId <= 0)
+                        continue;
+
+                    var row = rows.FirstOrDefault(x => x.Order.order_id == orderId);
+
+                    if (row == null)
+                        continue;
+
+                    var splitProd = await CreateSplitProductionAsync(
+                        batch: splitBatch,
+                        row: row,
+                        productTypeId: productTypeId,
+                        managerUserId: managerUserId,
+                        note: req.note,
+                        isPriority: isPriority,
+                        ct: ct);
+
+                    createdSplitProdIds.Add(splitProd.prod_id);
                 }
 
                 await MarkGroupedOrdersAndSingleProductionsScheduledAsync(
@@ -999,33 +1071,30 @@ namespace AMMS.Application.Services
         }
 
         private async Task<production> CreateDepartmentGroupProductionAsync(
-    ProductionPlanSegment segment,
+    SuggestionBatchPreviewDto batch,
+    List<GroupOrderRow> members,
     int productTypeId,
     int? managerUserId,
-    DateTime plannedStart,
-    DateTime plannedEnd,
     string? note,
-    List<product_type_process> allSteps,
     bool isPriority,
     CancellationToken ct)
         {
             var now = AppTime.NowVnUnspecified();
 
-            var normalizedCodes = segment.ProcessCodes
+            var processCodes = batch.process_codes
                 .Select(NormProcessCode)
                 .Where(x => !string.IsNullOrWhiteSpace(x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(FullRouteIndex)
                 .ToList();
 
-            if (normalizedCodes.Count == 0)
-                throw new InvalidOperationException("Group segment không có process_codes.");
+            if (processCodes.Count == 0)
+                throw new InvalidOperationException("Group batch không có process_codes.");
 
-            var groupTotalQty = segment.Members
-                .Sum(x => x.Item?.quantity ?? 0);
+            var groupTotalQty = members.Sum(x => x.Item?.quantity ?? 0);
 
             if (groupTotalQty <= 0)
-                groupTotalQty = segment.Members.Count;
+                groupTotalQty = members.Count;
 
             var groupProd = new production
             {
@@ -1034,15 +1103,16 @@ namespace AMMS.Application.Services
                 product_type_id = productTypeId,
                 manager_id = managerUserId,
                 status = "Scheduled",
+
                 prod_kind = "GROUP",
-                prod_method = ResolveGroupProductionMethodLabel(segment.Members),
+                prod_method = ResolveGroupProductionMethodLabel(members),
                 is_full_process = false,
 
-                group_process_codes = string.Join(",", normalizedCodes),
+                group_process_codes = string.Join(",", processCodes),
                 group_total_qty = groupTotalQty,
 
-                planned_start_date = plannedStart,
-                planned_end_date = plannedEnd,
+                planned_start_date = batch.planned_start_date,
+                planned_end_date = batch.planned_end_date,
                 actual_start_date = null,
                 end_date = null,
                 created_at = now,
@@ -1054,84 +1124,53 @@ namespace AMMS.Application.Services
             await _db.productions.AddAsync(groupProd, ct);
             await _db.SaveChangesAsync(ct);
 
-            var groupSteps = allSteps
-                .Where(x => normalizedCodes.Contains(
-                    NormProcessCode(x.process_code),
-                    StringComparer.OrdinalIgnoreCase))
+            await CreateTasksFromPreviewBatchAsync(
+                prodId: groupProd.prod_id,
+                productTypeId: productTypeId,
+                batch: batch,
+                reason: "Công đoạn ghép nhóm.",
+                ct: ct);
+
+            await _db.SaveChangesAsync(ct);
+
+            var groupTasks = await _db.tasks
+                .AsNoTracking()
+                .Include(x => x.process)
+                .Where(x => x.prod_id == groupProd.prod_id)
                 .OrderBy(x => x.seq_num)
-                .ThenBy(x => FullRouteIndex(x.process_code))
-                .ToList();
+                .ThenBy(x => x.task_id)
+                .ToListAsync(ct);
 
-            if (groupSteps.Count != normalizedCodes.Count)
+            foreach (var row in members)
             {
-                var found = groupSteps
-                    .Select(x => NormProcessCode(x.process_code))
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-                var missing = normalizedCodes
-                    .Where(x => !found.Contains(x))
-                    .ToList();
-
-                throw new InvalidOperationException(
-                    $"Thiếu product_type_process cho group: {string.Join(",", missing)}");
-            }
-
-            var totalMinutes = Math.Max(
-                1,
-                (int)(plannedEnd - plannedStart).TotalMinutes);
-
-            var minutesPerTask = Math.Max(
-                1,
-                totalMinutes / Math.Max(1, groupSteps.Count));
-
-            for (var i = 0; i < groupSteps.Count; i++)
-            {
-                var step = groupSteps[i];
-
-                var taskStart = plannedStart.AddMinutes(minutesPerTask * i);
-
-                var taskEnd = i == groupSteps.Count - 1
-                    ? plannedEnd
-                    : plannedStart.AddMinutes(minutesPerTask * (i + 1));
-
-                var groupTask = new task
+                await _db.prod_orders.AddAsync(new prod_order
                 {
                     prod_id = groupProd.prod_id,
-                    process_id = step.process_id,
-                    seq_num = step.seq_num,
-                    name = step.process_name ?? step.process_code,
-                    status = "Unassigned",
-                    machine = ResolveTaskMachineFromProcess(step),
-                    input_mode = "MANUAL",
-                    planned_start_time = taskStart,
-                    planned_end_time = taskEnd,
-                    reason = "Công đoạn ghép nhóm."
-                };
+                    order_id = row.Order.order_id,
+                    single_prod_id = row.SingleProd.prod_id,
+                    qty = row.Item?.quantity ?? 0,
+                    product_type_id = productTypeId,
+                    product_process = string.Join(",", processCodes),
+                    status = "Active",
+                    created_at = now
+                }, ct);
+            }
 
-                await _db.tasks.AddAsync(groupTask, ct);
-                await _db.SaveChangesAsync(ct);
+            await _db.SaveChangesAsync(ct);
 
-                foreach (var row in segment.Members)
+            foreach (var groupTask in groupTasks)
+            {
+                var taskProcessCode = NormProcessCode(groupTask.process?.process_code);
+
+                foreach (var row in members)
                 {
-                    await _db.prod_orders.AddAsync(new prod_order
-                    {
-                        prod_id = groupProd.prod_id,
-                        order_id = row.Order.order_id,
-                        single_prod_id = row.SingleProd.prod_id,
-                        qty = row.Item?.quantity ?? 0,
-                        product_type_id = productTypeId,
-                        product_process = string.Join(",", normalizedCodes),
-                        status = "Active",
-                        created_at = now
-                    }, ct);
-
                     await _db.task_links.AddAsync(new task_link
                     {
                         group_task_id = groupTask.task_id,
                         single_task_id = null,
                         single_prod_id = row.SingleProd.prod_id,
                         order_id = row.Order.order_id,
-                        process_code = NormProcessCode(step.process_code),
+                        process_code = taskProcessCode,
                         qty_plan = row.Item?.quantity ?? 0,
                         status = "Active",
                         created_at = now
@@ -1156,32 +1195,25 @@ namespace AMMS.Application.Services
         }
 
         private async Task<production> CreateSplitProductionAsync(
-    ProductionPlanSegment segment,
+    SuggestionBatchPreviewDto batch,
+    GroupOrderRow row,
     int productTypeId,
     int? managerUserId,
-    DateTime plannedStart,
-    DateTime plannedEnd,
     string? note,
-    List<product_type_process> allSteps,
     bool isPriority,
     CancellationToken ct)
         {
             var now = AppTime.NowVnUnspecified();
 
-            if (segment.Members.Count != 1)
-                throw new InvalidOperationException("Split segment chỉ được chứa 1 order.");
-
-            var row = segment.Members.First();
-
-            var normalizedCodes = segment.ProcessCodes
+            var processCodes = batch.process_codes
                 .Select(NormProcessCode)
                 .Where(x => !string.IsNullOrWhiteSpace(x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(FullRouteIndex)
                 .ToList();
 
-            if (normalizedCodes.Count == 0)
-                throw new InvalidOperationException("Split segment không có process_codes.");
+            if (processCodes.Count == 0)
+                throw new InvalidOperationException("Split batch không có process_codes.");
 
             var splitProd = new production
             {
@@ -1190,6 +1222,7 @@ namespace AMMS.Application.Services
                 product_type_id = productTypeId,
                 manager_id = managerUserId,
                 status = "Scheduled",
+
                 prod_kind = "SPLIT",
                 prod_method = row.SingleProd.prod_method,
                 is_full_process = false,
@@ -1198,11 +1231,11 @@ namespace AMMS.Application.Services
                 sub_product_used_qty = row.SingleProd.sub_product_used_qty,
                 nvl_qty = row.SingleProd.nvl_qty,
 
-                group_process_codes = string.Join(",", normalizedCodes),
+                group_process_codes = string.Join(",", processCodes),
                 group_total_qty = row.Item?.quantity ?? 0,
 
-                planned_start_date = plannedStart,
-                planned_end_date = plannedEnd,
+                planned_start_date = batch.planned_start_date,
+                planned_end_date = batch.planned_end_date,
                 actual_start_date = null,
                 end_date = null,
                 created_at = now,
@@ -1214,60 +1247,12 @@ namespace AMMS.Application.Services
             await _db.productions.AddAsync(splitProd, ct);
             await _db.SaveChangesAsync(ct);
 
-            var splitSteps = allSteps
-                .Where(x => normalizedCodes.Contains(
-                    NormProcessCode(x.process_code),
-                    StringComparer.OrdinalIgnoreCase))
-                .OrderBy(x => x.seq_num)
-                .ThenBy(x => FullRouteIndex(x.process_code))
-                .ToList();
-
-            if (splitSteps.Count != normalizedCodes.Count)
-            {
-                var found = splitSteps
-                    .Select(x => NormProcessCode(x.process_code))
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-                var missing = normalizedCodes
-                    .Where(x => !found.Contains(x))
-                    .ToList();
-
-                throw new InvalidOperationException(
-                    $"Thiếu product_type_process cho split: {string.Join(",", missing)}");
-            }
-
-            var totalMinutes = Math.Max(
-                1,
-                (int)(plannedEnd - plannedStart).TotalMinutes);
-
-            var minutesPerTask = Math.Max(
-                1,
-                totalMinutes / Math.Max(1, splitSteps.Count));
-
-            for (var i = 0; i < splitSteps.Count; i++)
-            {
-                var step = splitSteps[i];
-
-                var taskStart = plannedStart.AddMinutes(minutesPerTask * i);
-
-                var taskEnd = i == splitSteps.Count - 1
-                    ? plannedEnd
-                    : plannedStart.AddMinutes(minutesPerTask * (i + 1));
-
-                await _db.tasks.AddAsync(new task
-                {
-                    prod_id = splitProd.prod_id,
-                    process_id = step.process_id,
-                    seq_num = step.seq_num,
-                    name = step.process_name ?? step.process_code,
-                    status = "Unassigned",
-                    machine = ResolveTaskMachineFromProcess(step),
-                    input_mode = "MANUAL",
-                    planned_start_time = taskStart,
-                    planned_end_time = taskEnd,
-                    reason = "Công đoạn tách riêng sau ghép nhóm."
-                }, ct);
-            }
+            await CreateTasksFromPreviewBatchAsync(
+                prodId: splitProd.prod_id,
+                productTypeId: productTypeId,
+                batch: batch,
+                reason: "Công đoạn tách riêng sau ghép nhóm.",
+                ct: ct);
 
             await _db.SaveChangesAsync(ct);
 
@@ -1530,11 +1515,7 @@ namespace AMMS.Application.Services
                 suggestion.preview = preview;
                 suggestion.preview_error = null;
 
-                suggestion.batches = await BuildBatchesFromGroupPreviewAsync(
-                    preview,
-                    suggestion.orders,
-                    productTypeId,
-                    ct);
+                suggestion.batches = preview.batches ?? new List<SuggestionBatchPreviewDto>();
 
                 suggestion.can_group = true;
                 suggestion.create_group_allowed = true;
@@ -4184,8 +4165,8 @@ namespace AMMS.Application.Services
             var suggestedStart = await ResolveSuggestedStartBySystemAsync(ct);
 
             /*
-             * Preview single vẫn dùng MinProductionDays hiện tại của bạn.
-             * Nếu muốn đồng bộ tuyệt đối với scheduler máy, có thể thay phần này bằng service planner dùng chung.
+             * Đây chỉ là mốc thô ban đầu.
+             * PreviewAsync sẽ gọi ApplyMachineScheduleToPreviewAsync để tính lại theo máy.
              */
             var plannedEnd = suggestedStart.AddDays(MinProductionDays);
 
@@ -4244,7 +4225,7 @@ namespace AMMS.Application.Services
                 0,
                 (plannedEnd.Date - commonDeadline.Date).Days);
 
-            return new GroupProductionConfirmPreviewResponse
+            var preview = new GroupProductionConfirmPreviewResponse
             {
                 suggestion_type = "SINGLE_PREVIEW",
                 can_group = false,
@@ -4283,17 +4264,30 @@ namespace AMMS.Application.Services
                 reason = NoteSinglePreview,
                 note = NoteSinglePreview
             };
+
+            return preview;
         }
 
         public async Task<GroupProductionConfirmPreviewResponse> PreviewAsync(
     CreateGroupProductionRequest req,
     CancellationToken ct = default)
         {
+            if (req == null)
+                throw new InvalidOperationException("Request body is required.");
 
-            return await PreviewCoreAsync(
+            req.order_ids ??= new List<int>();
+            req.process_codes ??= new List<string>();
+
+            var preview = await PreviewCoreAsync(
                 req,
                 validateAgainstSuggestion: true,
                 ct);
+
+            preview = await ApplyMachineScheduleToPreviewAsync(
+                preview,
+                ct);
+
+            return preview;
         }
 
         private static int StageOrder(string? stageType)
@@ -4306,6 +4300,65 @@ namespace AMMS.Application.Services
                 _ => 99
             };
         }
+        private async Task CreateTasksFromPreviewBatchAsync(
+    int prodId,
+    int productTypeId,
+    SuggestionBatchPreviewDto batch,
+    string reason,
+    CancellationToken ct)
+        {
+            if (batch.tasks == null || batch.tasks.Count == 0)
+                throw new InvalidOperationException("Preview batch không có tasks để tạo.");
+
+            var processCodes = batch.tasks
+                .Select(x => NormProcessCode(x.process_code))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var processRows = await _db.product_type_processes
+                .AsNoTracking()
+                .Where(x =>
+                    x.product_type_id == productTypeId &&
+                    (x.is_active ?? true))
+                .ToListAsync(ct);
+
+            foreach (var taskPlan in batch.tasks
+                         .OrderBy(x => x.seq_num)
+                         .ThenBy(x => FullRouteIndex(x.process_code)))
+            {
+                var code = NormProcessCode(taskPlan.process_code);
+
+                var process = processRows.FirstOrDefault(x =>
+                    string.Equals(
+                        NormProcessCode(x.process_code),
+                        code,
+                        StringComparison.OrdinalIgnoreCase));
+
+                if (process == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Không tìm thấy product_type_process cho product_type_id={productTypeId}, process={code}.");
+                }
+
+                await _db.tasks.AddAsync(new task
+                {
+                    prod_id = prodId,
+                    process_id = process.process_id,
+                    seq_num = process.seq_num,
+                    name = process.process_name ?? code,
+                    status = "Unassigned",
+                    machine = !string.IsNullOrWhiteSpace(taskPlan.machine)
+                        ? taskPlan.machine
+                        : process.machine,
+                    input_mode = "MANUAL",
+                    planned_start_time = taskPlan.planned_start_time,
+                    planned_end_time = taskPlan.planned_end_time,
+                    reason = reason
+                }, ct);
+            }
+        }
+
 
         private static List<string> BuildPrivateBeforeFirstGroupCodes(
     List<GroupOrderRow> rows,
@@ -6675,6 +6728,453 @@ namespace AMMS.Application.Services
             }
 
             return result;
+        }
+
+        private async Task<GroupProductionConfirmPreviewResponse> ApplyMachineScheduleToPreviewAsync(
+    GroupProductionConfirmPreviewResponse preview,
+    CancellationToken ct)
+        {
+            if (preview == null)
+                throw new InvalidOperationException("Preview is null.");
+
+            if (!preview.product_type_id.HasValue || preview.product_type_id.Value <= 0)
+                return preview;
+
+            preview.timeline ??= new List<GroupProductionScheduleStageDto>();
+            preview.batches ??= new List<SuggestionBatchPreviewDto>();
+            preview.orders ??= new List<SuggestionOrderPreviewDto>();
+            preview.order_ids ??= new List<int>();
+
+            if (preview.timeline.Count == 0)
+                return preview;
+
+            var productTypeId = preview.product_type_id.Value;
+
+            var anchor = await ProductionMachinePlanHelper.ResolveEarliestScheduleAnchorAsync(
+                _db,
+                _cal,
+                ct);
+
+            var reservations = new List<MachineReservationDto>();
+
+            /*
+             * Mỗi order có mốc sẵn sàng riêng.
+             * - SINGLE_PRIVATE chạy trước.
+             * - GROUP chỉ chạy sau khi các SINGLE_PRIVATE liên quan đã xong.
+             * - SPLIT chạy sau GROUP.
+             */
+            var allOrderIds = preview.order_ids
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            if (allOrderIds.Count == 0)
+            {
+                allOrderIds = preview.orders
+                    .Where(x => x.order_id > 0)
+                    .Select(x => x.order_id)
+                    .Distinct()
+                    .ToList();
+            }
+
+            var orderReadyAt = allOrderIds.ToDictionary(
+                x => x,
+                _ => anchor);
+
+            var orderedStages = preview.timeline
+                .OrderBy(x => StageOrder(x.stage_type))
+                .ThenBy(x => x.planned_start_date)
+                .ThenBy(x => x.order_ids == null || x.order_ids.Count == 0
+                    ? int.MaxValue
+                    : x.order_ids.Min())
+                .ToList();
+
+            foreach (var stage in orderedStages)
+            {
+                stage.process_codes ??= new List<string>();
+                stage.order_ids ??= new List<int>();
+
+                var processCodes = stage.process_codes
+                    .Select(NormProcessCode)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(FullRouteIndex)
+                    .ToList();
+
+                if (processCodes.Count == 0)
+                    continue;
+
+                var stageOrderIds = stage.order_ids
+                    .Where(x => x > 0)
+                    .Distinct()
+                    .ToList();
+
+                var earliestStart = anchor;
+
+                if (stageOrderIds.Count > 0)
+                {
+                    earliestStart = stageOrderIds
+                        .Select(orderId => orderReadyAt.TryGetValue(orderId, out var readyAt)
+                            ? readyAt
+                            : anchor)
+                        .DefaultIfEmpty(anchor)
+                        .Max();
+                }
+
+                var stageQty = ResolvePreviewStageQuantity(
+                    preview,
+                    stage);
+
+                var requiredUnits = BuildRequiredUnitsForGroupStage(
+                    preview,
+                    stage,
+                    stageQty);
+
+                var machinePlans = await ProductionMachinePlanHelper.BuildMachinePlanAsync(
+                    db: _db,
+                    cal: _cal,
+                    productTypeId: productTypeId,
+                    processCodes: processCodes,
+                    quantity: stageQty,
+                    earliestStart: earliestStart,
+                    inMemoryReservations: reservations,
+                    requiredUnitsByProcessCode: requiredUnits,
+                    ct: ct);
+
+                if (machinePlans.Count == 0)
+                    continue;
+
+                stage.planned_start_date = machinePlans.Min(x => x.planned_start_time);
+                stage.planned_end_date = machinePlans.Max(x => x.planned_end_time);
+                stage.duration_days = Math.Max(
+                    1,
+                    (int)Math.Ceiling((stage.planned_end_date - stage.planned_start_date).TotalDays));
+
+                foreach (var orderId in stageOrderIds)
+                {
+                    orderReadyAt[orderId] = stage.planned_end_date;
+                }
+
+                SyncPreviewBatchFromStageAndPlans(
+                    preview,
+                    stage,
+                    machinePlans);
+            }
+
+            preview.timeline = preview.timeline
+                .OrderBy(x => x.planned_start_date)
+                .ThenBy(x => StageOrder(x.stage_type))
+                .ThenBy(x => x.order_ids == null || x.order_ids.Count == 0
+                    ? int.MaxValue
+                    : x.order_ids.Min())
+                .ToList();
+
+            preview.private_stages = preview.timeline
+                .Where(x =>
+                    string.Equals(x.stage_type, "SINGLE", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(x.stage_type, "SINGLE_PRIVATE", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            preview.group_stages = preview.timeline
+                .Where(x => string.Equals(x.stage_type, "GROUP", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            preview.split_stages = preview.timeline
+                .Where(x => string.Equals(x.stage_type, "SPLIT", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            preview.dept1_private_stage = preview.private_stages.FirstOrDefault();
+
+            if (preview.timeline.Count > 0)
+            {
+                preview.suggested_planned_start_date = preview.timeline.Min(x => x.planned_start_date);
+                preview.estimated_finish_date = preview.timeline.Max(x => x.planned_end_date);
+                preview.total_duration_days = Math.Max(
+                    1,
+                    (int)Math.Ceiling((preview.estimated_finish_date - preview.suggested_planned_start_date).TotalDays));
+
+                preview.can_meet_common_deadline =
+                    preview.common_delivery_deadline == default ||
+                    preview.estimated_finish_date.Date <= preview.common_delivery_deadline.Date;
+
+                preview.days_late_if_any = preview.can_meet_common_deadline
+                    ? 0
+                    : Math.Max(0, (preview.estimated_finish_date.Date - preview.common_delivery_deadline.Date).Days);
+            }
+
+            return preview;
+        }
+
+        private void SyncPreviewBatchFromStageAndPlans(
+    GroupProductionConfirmPreviewResponse preview,
+    GroupProductionScheduleStageDto stage,
+    List<MachineTaskPlanDto> plans)
+        {
+            preview.batches ??= new List<SuggestionBatchPreviewDto>();
+            preview.orders ??= new List<SuggestionOrderPreviewDto>();
+
+            var batch = FindPreviewBatchByStage(
+                preview.batches,
+                stage);
+
+            if (batch == null)
+            {
+                batch = new SuggestionBatchPreviewDto
+                {
+                    batch_type = stage.stage_type,
+                    prod_kind = ResolveProdKindFromStageType(stage.stage_type),
+                    department_code = stage.dept_code,
+                    department_name = stage.dept_name,
+                    order_ids = stage.order_ids?.ToList() ?? new List<int>(),
+                    process_codes = stage.process_codes?.ToList() ?? new List<string>(),
+                    note = ResolveFixedBatchNote(stage.stage_type)
+                };
+
+                preview.batches.Add(batch);
+            }
+
+            batch.batch_type = stage.stage_type;
+            batch.prod_kind = ResolveProdKindFromStageType(stage.stage_type);
+            batch.department_code = stage.dept_code;
+            batch.department_name = stage.dept_name;
+
+            batch.order_ids = stage.order_ids?.ToList() ?? new List<int>();
+            batch.process_codes = stage.process_codes?
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList() ?? new List<string>();
+
+            var orderCodeMap = preview.orders
+                .Where(x => x.order_id > 0)
+                .GroupBy(x => x.order_id)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.First().order_code);
+
+            batch.order_codes = batch.order_ids
+                .Select(orderId => orderCodeMap.TryGetValue(orderId, out var code)
+                    ? code
+                    : null)
+                .ToList();
+
+            batch.planned_start_date = stage.planned_start_date;
+            batch.planned_end_date = stage.planned_end_date;
+            batch.duration_days = stage.duration_days;
+
+            batch.tasks = plans
+                .OrderBy(x => x.seq_num)
+                .ThenBy(x => FullRouteIndex(x.process_code))
+                .Select(x =>
+                {
+                    var deptCode = ResolveDepartmentCode(x.process_code);
+
+                    return new SuggestionTaskPreviewDto
+                    {
+                        process_code = x.process_code,
+                        process_name = x.process_name,
+                        department_code = deptCode,
+                        department_name = ResolveDepartmentName(deptCode),
+                        machine = x.machine_code,
+                        seq_num = x.seq_num,
+                        planned_start_time = x.planned_start_time,
+                        planned_end_time = x.planned_end_time
+                    };
+                })
+                .ToList();
+        }
+
+        private static decimal ResolvePreviewStageQuantity(
+    GroupProductionConfirmPreviewResponse preview,
+    GroupProductionScheduleStageDto stage)
+        {
+            if (preview.orders == null || preview.orders.Count == 0)
+                return 1m;
+
+            var orderIds = stage.order_ids?
+                .Where(x => x > 0)
+                .Distinct()
+                .ToHashSet() ?? new HashSet<int>();
+
+            var qty = preview.orders
+                .Where(x => orderIds.Count == 0 || orderIds.Contains(x.order_id))
+                .Sum(x => x.quantity);
+
+            if (qty <= 0)
+                qty = preview.orders.Sum(x => x.quantity);
+
+            return Math.Max(1m, qty);
+        }
+
+        private static Dictionary<string, decimal> BuildRequiredUnitsForGroupStage(
+            GroupProductionConfirmPreviewResponse preview,
+            GroupProductionScheduleStageDto stage,
+            decimal quantity)
+        {
+            var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+            var processCodes = stage.process_codes ?? new List<string>();
+
+            foreach (var codeRaw in processCodes)
+            {
+                var code = NormProcessCode(codeRaw);
+
+                if (string.IsNullOrWhiteSpace(code))
+                    continue;
+
+                /*
+                 * Tạm dùng quantity làm chuẩn chung.
+                 * Nếu sau này bạn muốn chính xác hơn:
+                 * - RALO dùng number_of_plates
+                 * - CAT/IN/PHU/CAN/BOI dùng sheets_total
+                 * - DAN dùng thành phẩm
+                 */
+                result[code] = Math.Max(1m, quantity);
+            }
+
+            return result;
+        }
+
+        private static SuggestionBatchPreviewDto? FindPreviewBatchByStage(
+            List<SuggestionBatchPreviewDto> batches,
+            GroupProductionScheduleStageDto stage)
+        {
+            if (batches == null || batches.Count == 0)
+                return null;
+
+            var stageType = NormProcessCode(stage.stage_type);
+
+            var stageOrders = stage.order_ids?
+                .Where(x => x > 0)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToList() ?? new List<int>();
+
+            var stageProcesses = stage.process_codes?
+                .Select(NormProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList() ?? new List<string>();
+
+            return batches.FirstOrDefault(batch =>
+            {
+                var batchType = NormProcessCode(batch.batch_type);
+
+                var batchOrders = batch.order_ids?
+                    .Where(x => x > 0)
+                    .Distinct()
+                    .OrderBy(x => x)
+                    .ToList() ?? new List<int>();
+
+                var batchProcesses = batch.process_codes?
+                    .Select(NormProcessCode)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(FullRouteIndex)
+                    .ToList() ?? new List<string>();
+
+                return string.Equals(batchType, stageType, StringComparison.OrdinalIgnoreCase)
+                       && SameIntList(batchOrders, stageOrders)
+                       && SameStringList(batchProcesses, stageProcesses);
+            });
+        }
+
+        private static bool SameIntList(List<int> a, List<int> b)
+        {
+            a ??= new List<int>();
+            b ??= new List<int>();
+
+            if (a.Count != b.Count)
+                return false;
+
+            for (var i = 0; i < a.Count; i++)
+            {
+                if (a[i] != b[i])
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static bool SameStringList(List<string> a, List<string> b)
+        {
+            a ??= new List<string>();
+            b ??= new List<string>();
+
+            if (a.Count != b.Count)
+                return false;
+
+            for (var i = 0; i < a.Count; i++)
+            {
+                if (!string.Equals(a[i], b[i], StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static string ResolveProdKindFromStageType(string? stageType)
+        {
+            var type = NormProcessCode(stageType);
+
+            return type switch
+            {
+                "GROUP" => "GROUP",
+                "SPLIT" => "SPLIT",
+                "SINGLE" => "SINGLE",
+                "SINGLE_PRIVATE" => "SINGLE",
+                _ => "SINGLE"
+            };
+        }
+
+        private static int StageTypeOrder(string? stageType)
+        {
+            var s = (stageType ?? "").Trim().ToUpperInvariant();
+
+            return s switch
+            {
+                "SINGLE" => 1,
+                "SINGLE_PRIVATE" => 1,
+                "GROUP" => 2,
+                "SPLIT" => 3,
+                _ => 99
+            };
+        }
+
+        private static bool SameString(string? a, string? b)
+        {
+            return string.Equals(
+                (a ?? "").Trim(),
+                (b ?? "").Trim(),
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string ResolveDepartmentCodeByProcess(string? processCode)
+        {
+            var code = NormProcessCode(processCode);
+
+            return code switch
+            {
+                "RALO" or "CAT" or "IN" => "DEPT_1",
+                "PHU" or "CAN" or "CAN_MANG" or "BOI" => "DEPT_2",
+                "BE" or "DUT" or "DAN" => "DEPT_3",
+                _ => "UNKNOWN"
+            };
+        }
+
+        private static string ResolveDepartmentNameByProcess(string? processCode)
+        {
+            var code = NormProcessCode(processCode);
+
+            return code switch
+            {
+                "RALO" or "CAT" or "IN" => "Ralo - Cắt - In",
+                "PHU" or "CAN" or "CAN_MANG" or "BOI" => "Phủ - Cán - Bồi",
+                "BE" or "DUT" or "DAN" => "Bế - Dứt - Dán",
+                _ => "Không xác định"
+            };
         }
     }
 }

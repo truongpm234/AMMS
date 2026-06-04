@@ -232,37 +232,71 @@ namespace AMMS.Infrastructure.Repositories
 
             var rows = await (
                 from t in _db.tasks.AsNoTracking()
-                join p in _db.productions.AsNoTracking() on t.prod_id equals p.prod_id into pj
+
+                join p0 in _db.productions.AsNoTracking()
+                    on t.prod_id equals p0.prod_id into pj
                 from p in pj.DefaultIfEmpty()
-                join o in _db.orders.AsNoTracking() on p.order_id equals o.order_id into oj
+
+                join o0 in _db.orders.AsNoTracking()
+                    on p.order_id equals o0.order_id into oj
                 from o in oj.DefaultIfEmpty()
-                join r in _db.order_requests.AsNoTracking() on o.order_id equals r.order_id into rj
+
+                join r0 in _db.order_requests.AsNoTracking()
+                    on o.order_id equals r0.order_id into rj
                 from r in rj.OrderByDescending(x => x.order_request_id).Take(1).DefaultIfEmpty()
+
                 where t.machine != null
                       && t.machine.Trim().ToUpper() == machineKey
                       && !(
-                            t.status != null
-                            && t.status.Trim().ToUpper() == "FINISHED"
-                            && t.end_time != null
-                            && t.end_time <= anchor)
+                            t.status != null &&
+                            t.status.Trim().ToUpper() == "FINISHED"
+                         )
+                      && (
+                            p == null ||
+                            p.status == null ||
+                            (
+                                p.status.ToUpper() != "CANCELLED" &&
+                                p.status.ToUpper() != "COMPLETED" &&
+                                p.status.ToUpper() != "FINISHED" &&
+                                p.status.ToUpper() != "IMPORTING" &&
+                                p.status.ToUpper() != "DELIVERY"
+                            )
+                         )
+
                 select new
                 {
-                    Start = t.planned_start_time ?? t.start_time ?? anchor,
-                    End = t.planned_end_time ?? t.end_time ?? ((t.planned_start_time ?? t.start_time ?? anchor).AddHours(1)),
+                    /*
+                     * FIX:
+                     * Ưu tiên actual trước.
+                     * Nếu order cũ xong sớm, slot máy được giải phóng theo end_time thật.
+                     */
+                    Start = t.start_time ?? t.planned_start_time ?? anchor,
+
+                    End = t.end_time
+                          ?? t.planned_end_time
+                          ?? ((t.start_time ?? t.planned_start_time ?? anchor).AddHours(1)),
+
                     DeliveryDate = r != null ? r.delivery_date : null
-                })
-                .ToListAsync(ct);
+                }
+            ).ToListAsync(ct);
 
             var reservations = rows
                 .Where(x => !ignoreOverdueOrders || !x.DeliveryDate.HasValue || x.DeliveryDate.Value >= anchor)
+                .Select(x => new
+                {
+                    Start = DateTime.SpecifyKind(x.Start, DateTimeKind.Unspecified),
+                    End = DateTime.SpecifyKind(x.End < x.Start ? x.Start : x.End, DateTimeKind.Unspecified)
+                })
+                .Where(x => x.End > anchor)
                 .OrderBy(x => x.Start)
                 .ToList();
 
             foreach (var r in reservations)
             {
-                var start = r.Start;
-                var end = r.End < start ? start : r.End;
-                MachineHelper.AssignReservationToLane(lanes, start, end);
+                MachineHelper.AssignReservationToLane(
+                    lanes,
+                    r.Start,
+                    r.End);
             }
 
             return lanes;
