@@ -35,5 +35,16 @@ namespace AMMS.Application.Interfaces
         Task<ForceSetProductionImportingByProdIdResponse?> ForceSetProductionImportingByProdIdAsync(
     int prodId,
     CancellationToken ct = default);
+
+        Task<GenerateImportReceiveFileResultDto?> GenerateImportReceiveFileAsync(
+            int orderId,
+            CancellationToken ct = default);
+
+        Task<UploadImportReceiveFileResponse?> UploadImportReceiveFileAsync(
+            int orderId,
+            Stream fileStream,
+            string fileName,
+            string contentType,
+            CancellationToken ct = default);
     }
 }
