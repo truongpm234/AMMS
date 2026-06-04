@@ -11,6 +11,7 @@ using Hangfire;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
+using System.ComponentModel.DataAnnotations;
 using System.Security.Claims;
 
 namespace AMMS.API.Controllers
@@ -554,6 +555,131 @@ namespace AMMS.API.Controllers
             }
         }
 
+        [HttpPost("generate-import-receive")]
+        public async Task<IActionResult> GenerateImportReceive(
+    [FromBody] GenerateImportReceiveRequest req,
+    CancellationToken ct)
+        {
+            if (req == null || req.order_id <= 0)
+            {
+                return BadRequest(new
+                {
+                    message = "order_id is required"
+                });
+            }
+
+            try
+            {
+                var result = await _service.GenerateImportReceiveFileAsync(
+                    req.order_id,
+                    ct);
+
+                if (result == null)
+                {
+                    return NotFound(new
+                    {
+                        message = "Production or order not found",
+                        order_id = req.order_id
+                    });
+                }
+
+                return File(
+                    result.file_bytes,
+                    result.content_type,
+                    result.file_name);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message,
+                    order_id = req.order_id
+                });
+            }
+        }
+
+        [HttpPost("upload-import-receive-file")]
+        [Consumes("multipart/form-data")]
+        public async Task<IActionResult> UploadImportReceiveFile(
+    [FromForm] UploadImportReceiveFileRequest req,
+    CancellationToken ct)
+        {
+            if (req == null || req.order_id <= 0)
+            {
+                return BadRequest(new
+                {
+                    message = "order_id is required"
+                });
+            }
+
+            if (req.file == null || req.file.Length == 0)
+            {
+                return BadRequest(new
+                {
+                    message = "File không hợp lệ.",
+                    order_id = req.order_id
+                });
+            }
+
+            try
+            {
+                using var stream = req.file.OpenReadStream();
+
+                var result = await _service.UploadImportReceiveFileAsync(
+                    req.order_id,
+                    stream,
+                    req.file.FileName,
+                    req.file.ContentType,
+                    ct);
+
+                if (result == null)
+                {
+                    return NotFound(new
+                    {
+                        message = "Production or order not found",
+                        order_id = req.order_id
+                    });
+                }
+
+                var notifyMessage =
+                    $"Đơn hàng {req.order_id} đã upload phiếu nhập kho thành phẩm, chờ nhập kho.";
+
+                await _hub.Clients.Group(RealtimeGroups.ByRole("warehouse manager")).SendAsync(
+                    "Importing",
+                    new
+                    {
+                        message = notifyMessage
+                    },
+                    ct);
+
+                await _noti.CreateNotfi(
+                    4,
+                    notifyMessage,
+                    null,
+                    req.order_id,
+                    "Importing");
+
+                return Ok(result);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message,
+                    order_id = req.order_id
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    message = "Upload import receive file failed",
+                    detail = ex.Message,
+                    order_id = req.order_id
+                });
+            }
+        }
+
         [HttpPut("delivery/{orderId:int}")]
         public async Task<IActionResult> SetDelivery(int orderId, CancellationToken ct)
         {
@@ -652,64 +778,6 @@ namespace AMMS.API.Controllers
                 to = rangeTo,
                 machines = data
             });
-        }
-
-        [HttpPost("generate-import-receive")]
-        public async Task<IActionResult> GenerateImportReceive(
-    [FromBody] GenerateImportReceiveRequest req,
-    CancellationToken ct)
-        {
-            if (req == null || req.order_id <= 0)
-            {
-                return BadRequest(new
-                {
-                    message = "orderId is required"
-                });
-            }
-
-            try
-            {
-                var result = await _service.GenerateImportReceiveAsync(
-                    req.order_id,
-                    ct);
-
-                if (result == null)
-                {
-                    return NotFound(new
-                    {
-                        message = "Production or order not found",
-                        orderId = req.order_id
-                    });
-                }
-
-                var notifyMessage =
-                    $"Đơn hàng {req.order_id} đã tạo 1 phiếu nhập kho chung cho {result.total_productions} production, chờ nhập kho";
-
-                await _hub.Clients.Group(RealtimeGroups.ByRole("warehouse manager")).SendAsync(
-                    "Importing",
-                    new
-                    {
-                        message = notifyMessage
-                    },
-                    ct);
-
-                await _noti.CreateNotfi(
-                    4,
-                    notifyMessage,
-                    null,
-                    req.order_id,
-                    "Importing");
-
-                return Ok(result);
-            }
-            catch (InvalidOperationException ex)
-            {
-                return BadRequest(new
-                {
-                    message = ex.Message,
-                    orderId = req.order_id
-                });
-            }
         }
 
         private static string? NormalizeMethodForNotify(string? method)
@@ -1011,6 +1079,17 @@ namespace AMMS.API.Controllers
                     task_id = taskId
                 });
             }
+        }
+
+
+
+        public class UploadImportReceiveFileRequest
+        {
+            [Required]
+            public int order_id { get; set; }
+
+            [Required]
+            public IFormFile file { get; set; } = null!;
         }
     }
 }
