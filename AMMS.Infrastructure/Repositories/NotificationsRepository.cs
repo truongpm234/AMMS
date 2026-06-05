@@ -20,13 +20,14 @@ namespace AMMS.Infrastructure.Repositories
 
         public async Task<List<notification>> StaffGetNoti(string role)
         {
-            var res = await _db.notifications
-                         .Where(n =>
-                             EF.Functions.Unaccent(n.Status).ToLower() ==
-                             EF.Functions.Unaccent(role).ToLower()
-                         )
-                         .ToListAsync();
-            return res;
+            return await _db.notifications
+                .FromSqlInterpolated($@"
+            SELECT *
+            FROM ""AMMS_DB"".notifications
+            WHERE ""AMMS_DB"".unaccent(lower(status::text))
+            LIKE ""AMMS_DB"".unaccent(lower({'%' + role + '%'}::text))
+        ")
+                .ToListAsync();
         }
 
         public async Task<List<notification>> GetConsultantNotificationUserId(int role_id, int? user_id)
