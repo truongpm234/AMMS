@@ -209,8 +209,7 @@ namespace AMMS.Application.Services
             if (!dep.can_start)
             {
                 throw new InvalidOperationException(
-                    "Chưa thể bắt đầu production vì công đoạn trước đó chưa hoàn thành. " +
-                    dep.message);
+                    "Chưa thể bắt đầu production vì công đoạn trước đó chưa hoàn thành. ");
             }
 
             return await _repo.StartProductionByProdIdOnlyAsync(
@@ -5402,7 +5401,6 @@ namespace AMMS.Application.Services
             lines ??= new List<ProductionIssueLine>();
 
             /*
-             * FIX:
              * Luôn tạo file để production.sub_product_issue_file không null.
              */
             if (lines.Count == 0)
@@ -5424,36 +5422,48 @@ namespace AMMS.Application.Services
 
             var now = AppTime.NowVnUnspecified();
 
-            var sb = new System.Text.StringBuilder();
+            var receiptNo = $"PXK-{prod.prod_id}-{now:yyyyMMddHHmmss}";
+            var fileName = $"production-issue-{prod.prod_id}-{now:yyyyMMddHHmmss}.pdf";
 
-            sb.AppendLine(title);
-            sb.AppendLine($"Production: {prod.code} - {prod.prod_id}");
-            sb.AppendLine($"Kind: {prod.prod_kind}");
-            sb.AppendLine($"Method: {prod.prod_method}");
-            sb.AppendLine($"Created at: {now:yyyy-MM-dd HH:mm:ss}");
-            sb.AppendLine();
-            sb.AppendLine("OrderId,ProdId,ItemType,MaterialId,SubProductId,Code,Name,Qty,Unit,Note");
+            var pdfBytes = ProductionIssueReceiptPdfHelper.GeneratePdf(
+                new ProductionIssueReceiptPdfModel
+                {
+                    receipt_no = receiptNo,
+                    title = string.IsNullOrWhiteSpace(title)
+                        ? "PHIẾU XUẤT KHO SẢN XUẤT"
+                        : title,
 
-            foreach (var line in lines)
-            {
-                sb.AppendLine(string.Join(",",
-                    line.order_id?.ToString() ?? "",
-                    line.prod_id.ToString(),
-                    EscapeCsv(line.item_type),
-                    line.material_id?.ToString() ?? "",
-                    line.sub_product_id?.ToString() ?? "",
-                    EscapeCsv(line.code),
-                    EscapeCsv(line.name),
-                    line.qty.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    EscapeCsv(line.unit),
-                    EscapeCsv(line.note)
-                ));
-            }
+                    created_at = now,
 
-            var fileName = $"production-issue-{prod.prod_id}-{now:yyyyMMddHHmmss}.csv";
-            var bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
+                    prod_id = prod.prod_id,
+                    production_code = prod.code,
+                    prod_kind = prod.prod_kind,
+                    prod_method = prod.prod_method,
 
-            await using var ms = new MemoryStream(bytes);
+                    lines = lines.Select(x => new ProductionIssueReceiptPdfLineModel
+                    {
+                        order_id = x.order_id,
+                        prod_id = x.prod_id,
+
+                        item_type = x.item_type,
+
+                        material_id = x.material_id,
+                        sub_product_id = x.sub_product_id,
+
+                        code = x.code,
+                        name = x.name,
+
+                        qty = x.qty,
+                        unit = x.unit,
+
+                        note = x.note
+                    }).ToList()
+                });
+
+            if (pdfBytes == null || pdfBytes.Length == 0)
+                throw new InvalidOperationException("Không tạo được file PDF phiếu xuất kho.");
+
+            await using var ms = new MemoryStream(pdfBytes);
 
             var publicId =
                 $"production-issues/production_issue_{prod.prod_id}_{now:yyyyMMddHHmmss}";
@@ -5461,11 +5471,11 @@ namespace AMMS.Application.Services
             var url = await _fileStorage.UploadRawWithPublicIdAsync(
                 ms,
                 fileName,
-                "text/csv",
+                "application/pdf",
                 publicId);
 
             if (string.IsNullOrWhiteSpace(url))
-                throw new InvalidOperationException("Upload phiếu xuất kho thất bại.");
+                throw new InvalidOperationException("Upload phiếu xuất kho PDF thất bại.");
 
             return url;
         }
