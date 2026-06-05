@@ -124,18 +124,11 @@ namespace AMMS.Application.Services
             }
             else
             {
-                var policy = await _taskRepo.GetQtyPolicyAsync(taskId, ct);
-                if (policy == null)
-                    throw new InvalidOperationException("Không xác định được policy số lượng cho task.");
-
-                if (qtyGood < policy.min_allowed || qtyGood > policy.max_allowed)
-                {
-                    throw new ArgumentOutOfRangeException(
-                        nameof(req.token),
-                        $"qty_good={qtyGood} không hợp lệ. " +
-                        $"Công đoạn [{policy.process_code} - {policy.process_name}] " +
-                        $"chỉ cho phép báo cáo trong khoảng {policy.min_allowed}..{policy.max_allowed} {policy.qty_unit}.");
-                }
+                await ValidateSingleOrSplitFinishQtyAsync(
+                    taskId: taskId,
+                    payload: payload,
+                    normalizedReferenceInputs: normalizedReferenceInputs,
+                    ct: ct);
             }
 
             var result = await _taskRepo.ExecuteInTransactionAsync(async innerCt =>
@@ -330,6 +323,156 @@ namespace AMMS.Application.Services
              * Nếu giữ block cũ ở đây sẽ bị gửi thông báo trùng.
              */
             return result;
+        }
+
+        private async Task ValidateSingleOrSplitFinishQtyAsync(
+    int taskId,
+    TaskQrTokenPayloadDto payload,
+    IReadOnlyList<TaskReferenceUsageInputDto>? normalizedReferenceInputs,
+    CancellationToken ct)
+        {
+            if (payload == null)
+                throw new InvalidOperationException("Payload token không hợp lệ.");
+
+            var qtyGood = payload.qty_good;
+
+            if (qtyGood <= 0)
+                throw new ArgumentOutOfRangeException(nameof(payload), "qty_good phải lớn hơn 0.");
+
+            var policy = await _taskRepo.GetQtyPolicyAsync(taskId, ct);
+
+            if (policy == null)
+                throw new InvalidOperationException("Không xác định được policy số lượng cho task.");
+
+            var preparedBundle = await GetTaskQrMaterialBundleAsync(
+                taskId,
+                ct);
+
+            var preparedReferenceQty = ResolvePreparedMainReferenceQtyForSingleFinish(
+                preparedBundle.reference_inputs);
+
+            var tokenReferenceQty = ResolveTokenMainReferenceQtyForSingleFinish(
+                normalizedReferenceInputs);
+
+            if (tokenReferenceQty <= 0 && payload.reference_inputs != null)
+            {
+                tokenReferenceQty = ResolveTokenMainReferenceQtyForSingleFinish(
+                    payload.reference_inputs);
+            }
+
+            var tokenOutputQty = ResolveTokenOutputQtyForFinish(
+                payload.outputs);
+
+            var baseMax = policy.max_allowed > 0
+                ? policy.max_allowed
+                : policy.suggested_qty > 0
+                    ? policy.suggested_qty
+                    : 1;
+
+            /*
+             * FIX:
+             * SINGLE/SPLIT SUB full path hoặc SPLIT sau group:
+             * policy.max_allowed có thể thấp vì lấy estimate NVL.
+             * Phải nâng max theo reference input thực tế từ qr-prepare/token.
+             */
+            var maxCandidate = new List<decimal>
+    {
+        baseMax,
+        preparedReferenceQty,
+        tokenReferenceQty,
+        tokenOutputQty
+    }
+            .Where(x => x > 0)
+            .DefaultIfEmpty(1m)
+            .Max();
+
+            var maxAllowed = (int)Math.Ceiling(maxCandidate);
+
+            var minAllowed = policy.min_allowed > 0
+                ? policy.min_allowed
+                : 1;
+
+            if (qtyGood < minAllowed || qtyGood > maxAllowed)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(payload),
+                    $"qty_good={qtyGood} không hợp lệ. " +
+                    $"Công đoạn [{policy.process_code} - {policy.process_name}] " +
+                    $"chỉ cho phép báo cáo trong khoảng {minAllowed}..{maxAllowed} {policy.qty_unit}. " +
+                    $"Chi tiết validate: baseMax={baseMax}, " +
+                    $"preparedReferenceQty={Math.Round(preparedReferenceQty, 4)}, " +
+                    $"tokenReferenceQty={Math.Round(tokenReferenceQty, 4)}, " +
+                    $"tokenOutputQty={Math.Round(tokenOutputQty, 4)}.");
+            }
+        }
+
+        private static decimal ResolvePreparedMainReferenceQtyForSingleFinish(
+            IReadOnlyList<TaskReferenceInputDto>? refs)
+        {
+            if (refs == null || refs.Count == 0)
+                return 0m;
+
+            var candidates = refs
+                .Where(IsMainQtyReferenceForSingleFinish)
+                .ToList();
+
+            if (candidates.Count == 0)
+                return 0m;
+
+            var actualTotal = candidates
+                .Where(x => x.actual_qty_prev_stage > 0)
+                .Sum(x => x.actual_qty_prev_stage);
+
+            if (actualTotal > 0)
+                return actualTotal;
+
+            return candidates
+                .Where(x => x.estimated_qty > 0)
+                .Sum(x => x.estimated_qty);
+        }
+
+        private static decimal ResolveTokenMainReferenceQtyForSingleFinish(
+            IReadOnlyList<TaskReferenceUsageInputDto>? refs)
+        {
+            if (refs == null || refs.Count == 0)
+                return 0m;
+
+            return refs
+                .Where(x => x != null)
+                .Where(x => IsMainQtyReferenceForSingleFinish(x.input_code, x.unit))
+                .Sum(x =>
+                {
+                    var used = x.quantity_used > 0 ? x.quantity_used : 0m;
+                    var left = x.quantity_left > 0 ? x.quantity_left : 0m;
+
+                    return used + left;
+                });
+        }
+
+        private static bool IsMainQtyReferenceForSingleFinish(TaskReferenceInputDto? input)
+        {
+            if (input == null)
+                return false;
+
+            return IsMainQtyReferenceForSingleFinish(
+                input.input_code,
+                input.unit);
+        }
+
+        private static bool IsMainQtyReferenceForSingleFinish(
+            string? inputCode,
+            string? unit)
+        {
+            var code = ProductionFlowHelper.Norm(inputCode);
+            var u = (unit ?? "").Trim().ToLowerInvariant();
+
+            if (code == "PLATE_FROM_RALO")
+                return false;
+
+            if (u is "bản" or "ban" or "plate")
+                return false;
+
+            return true;
         }
 
         private sealed class FinishQtyValidationPolicy
@@ -549,30 +692,20 @@ namespace AMMS.Application.Services
         }
 
         private static decimal ResolveTokenReferenceQtyForFinish(
-            IReadOnlyList<TaskReferenceUsageInputDto>? refs)
+    IReadOnlyList<TaskReferenceUsageInputDto>? refs)
         {
             if (refs == null || refs.Count == 0)
                 return 0m;
 
-            /*
-             * Với reference input:
-             * - quantity_used là số BTP/input thật sự dùng.
-             * - quantity_left là phần dư nếu có.
-             *
-             * max hợp lý nên không nhỏ hơn quantity_used.
-             * Dùng used + left để tránh reject khi FE gửi tổng input và có phần left.
-             */
             return refs
                 .Where(x => x != null)
+                .Where(x => IsMainQtyReferenceForSingleFinish(x.input_code, x.unit))
                 .Sum(x =>
                 {
                     var used = x.quantity_used > 0 ? x.quantity_used : 0m;
                     var left = x.quantity_left > 0 ? x.quantity_left : 0m;
 
-                    if (used + left > 0)
-                        return used + left;
-
-                    return used;
+                    return used + left;
                 });
         }
 
@@ -588,8 +721,8 @@ namespace AMMS.Application.Services
         }
 
         private async Task<decimal> ResolvePreparedBundleReferenceQtyForFinishAsync(
-            int taskId,
-            CancellationToken ct)
+    int taskId,
+    CancellationToken ct)
         {
             var bundle = await GetTaskQrMaterialBundleAsync(
                 taskId,
@@ -598,20 +731,24 @@ namespace AMMS.Application.Services
             if (bundle?.reference_inputs == null || bundle.reference_inputs.Count == 0)
                 return 0m;
 
-            /*
-             * Bundle reference_inputs là output của qr-prepare.
-             * Với case SUB-NVL/MIXED, estimated_qty nên là:
-             * actual IN của NVL + BTP planned của SUB.
-             */
-            return bundle.reference_inputs
+            var candidates = bundle.reference_inputs
                 .Where(x => x != null)
-                .Sum(x =>
-                {
-                    var estimated = x.estimated_qty > 0 ? x.estimated_qty : 0m;
-                    var actual = x.actual_qty_prev_stage > 0 ? x.actual_qty_prev_stage : 0m;
+                .Where(x => IsMainQtyReferenceForSingleFinish(x.input_code, x.unit))
+                .ToList();
 
-                    return Math.Max(estimated, actual);
-                });
+            if (candidates.Count == 0)
+                return 0m;
+
+            var actualTotal = candidates
+                .Where(x => x.actual_qty_prev_stage > 0)
+                .Sum(x => x.actual_qty_prev_stage);
+
+            if (actualTotal > 0)
+                return actualTotal;
+
+            return candidates
+                .Where(x => x.estimated_qty > 0)
+                .Sum(x => x.estimated_qty);
         }
 
         private async Task<decimal> ResolveTaskLinkPlanQtyForFinishAsync(
