@@ -110,8 +110,8 @@ namespace AMMS.API.Controllers
 
         [HttpPut("generate-import-receipts")]
         public async Task<IActionResult> GenerateImportReceipts(
-            [FromBody] GenerateSubProductImportReceiptsRequestDto dto,
-            CancellationToken ct)
+    [FromBody] GenerateSubProductImportReceiptsRequestDto dto,
+    CancellationToken ct)
         {
             try
             {
