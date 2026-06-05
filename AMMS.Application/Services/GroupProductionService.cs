@@ -6,6 +6,7 @@ using AMMS.Shared.DTOs.Productions;
 using AMMS.Shared.DTOs.Productions.Groups;
 using AMMS.Shared.DTOs.Socket;
 using AMMS.Shared.Helpers;
+using DocumentFormat.OpenXml.Spreadsheet;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
@@ -1065,6 +1066,8 @@ namespace AMMS.Application.Services
                 row.SingleProd.planned_start_date ??= headStart;
                 row.SingleProd.planned_end_date = headEnd;
                 row.SingleProd.status = "Scheduled";
+
+                EnsureSingleMemberApprovalFlow(row.SingleProd);
             }
 
             await _db.SaveChangesAsync(ct);
@@ -1107,6 +1110,8 @@ namespace AMMS.Application.Services
                 prod_kind = "GROUP",
                 prod_method = ResolveGroupProductionMethodLabel(members),
                 is_full_process = false,
+
+                production_approval_flow = ResolveGroupProductionApprovalFlow(),
 
                 group_process_codes = string.Join(",", processCodes),
                 group_total_qty = groupTotalQty,
@@ -1221,6 +1226,8 @@ namespace AMMS.Application.Services
             if (processCodes.Count == 0)
                 throw new InvalidOperationException("Split batch không có process_codes.");
 
+            EnsureSingleMemberApprovalFlow(row.SingleProd);
+
             var splitProd = new production
             {
                 code = $"SPL-{row.Order.order_id:D5}-{now:HHmmss}",
@@ -1236,6 +1243,8 @@ namespace AMMS.Application.Services
                 sub_product_id = row.SingleProd.sub_product_id,
                 sub_product_used_qty = row.SingleProd.sub_product_used_qty,
                 nvl_qty = row.SingleProd.nvl_qty,
+
+                production_approval_flow = ResolveSplitProductionApprovalFlow(row.SingleProd),
 
                 group_process_codes = string.Join(",", processCodes),
                 group_total_qty = row.Item?.quantity ?? 0,
@@ -7135,52 +7144,65 @@ namespace AMMS.Application.Services
             };
         }
 
-        private static int StageTypeOrder(string? stageType)
+        private static string NormalizeProductionApprovalFlowOrDefault(string? value)
         {
-            var s = (stageType ?? "").Trim().ToUpperInvariant();
+            if (string.IsNullOrWhiteSpace(value))
+                return ProductionApprovalFlowHelper.ManualGeneralManager;
 
-            return s switch
+            var flow = value.Trim().ToUpperInvariant();
+
+            return flow switch
             {
-                "SINGLE" => 1,
-                "SINGLE_PRIVATE" => 1,
-                "GROUP" => 2,
-                "SPLIT" => 3,
-                _ => 99
+                ProductionApprovalFlowHelper.AutoSingleOption => ProductionApprovalFlowHelper.AutoSingleOption,
+                ProductionApprovalFlowHelper.WaitingManager => ProductionApprovalFlowHelper.WaitingManager,
+                ProductionApprovalFlowHelper.ManualManager => ProductionApprovalFlowHelper.ManualManager,
+                ProductionApprovalFlowHelper.ManualGeneralManager => ProductionApprovalFlowHelper.ManualGeneralManager,
+
+                /*
+                 * Không tạo tên mới.
+                 * Nếu data cũ có giá trị lạ thì ép về MANUAL_GENERAL_MANAGER.
+                 */
+                _ => ProductionApprovalFlowHelper.ManualGeneralManager
             };
         }
 
-        private static bool SameString(string? a, string? b)
+        private static string ResolveGroupProductionApprovalFlow()
         {
-            return string.Equals(
-                (a ?? "").Trim(),
-                (b ?? "").Trim(),
-                StringComparison.OrdinalIgnoreCase);
+            /*
+             * Lệnh GROUP chỉ được tạo sau khi GM xác nhận lập lịch ghép,
+             * nên dùng tên cũ MANUAL_GENERAL_MANAGER.
+             */
+            return ProductionApprovalFlowHelper.ManualGeneralManager;
         }
 
-        private static string ResolveDepartmentCodeByProcess(string? processCode)
+        private static string ResolveSplitProductionApprovalFlow(production? sourceSingleProd)
         {
-            var code = NormProcessCode(processCode);
-
-            return code switch
-            {
-                "RALO" or "CAT" or "IN" => "DEPT_1",
-                "PHU" or "CAN" or "CAN_MANG" or "BOI" => "DEPT_2",
-                "BE" or "DUT" or "DAN" => "DEPT_3",
-                _ => "UNKNOWN"
-            };
+            /*
+             * SPLIT phát sinh từ flow group.
+             * Nếu SINGLE gốc đã có flow hợp lệ thì giữ lại.
+             * Nếu SINGLE gốc null thì fallback MANUAL_GENERAL_MANAGER.
+             */
+            return NormalizeProductionApprovalFlowOrDefault(
+                sourceSingleProd?.production_approval_flow);
         }
 
-        private static string ResolveDepartmentNameByProcess(string? processCode)
+        private static void EnsureSingleMemberApprovalFlow(production singleProd)
         {
-            var code = NormProcessCode(processCode);
+            if (singleProd == null)
+                return;
 
-            return code switch
+            if (!string.IsNullOrWhiteSpace(singleProd.production_approval_flow))
             {
-                "RALO" or "CAT" or "IN" => "Ralo - Cắt - In",
-                "PHU" or "CAN" or "CAN_MANG" or "BOI" => "Phủ - Cán - Bồi",
-                "BE" or "DUT" or "DAN" => "Bế - Dứt - Dán",
-                _ => "Không xác định"
-            };
+                singleProd.production_approval_flow =
+                    NormalizeProductionApprovalFlowOrDefault(singleProd.production_approval_flow);
+                return;
+            }
+
+            /*
+             * SINGLE gốc được đưa vào kế hoạch ghép nhưng field đang null.
+             * Không thêm tên mới, dùng tên cũ.
+             */
+            singleProd.production_approval_flow = ProductionApprovalFlowHelper.ManualGeneralManager;
         }
     }
 }

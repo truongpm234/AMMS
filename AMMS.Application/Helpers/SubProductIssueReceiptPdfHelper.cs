@@ -5,7 +5,7 @@ using System.Globalization;
 
 namespace AMMS.Application.Helpers
 {
-    public sealed class SubProductIssueReceiptPdfModel
+    public sealed class SubProductIssueReceiptPdfModel     //phiếu xuất kho NVl và BTP
     {
         public string receipt_no { get; set; } = "";
         public DateTime created_at { get; set; }

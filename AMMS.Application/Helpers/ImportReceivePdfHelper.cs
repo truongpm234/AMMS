@@ -4,143 +4,227 @@ using QuestPDF.Fluent;
 using QuestPDF.Helpers;
 using QuestPDF.Infrastructure;
 
+using AMMS.Shared.DTOs.Productions;
+using QuestPDF.Fluent;
+using QuestPDF.Helpers;
+using QuestPDF.Infrastructure;
+using System.Globalization;
+
 namespace AMMS.Application.Helpers
 {
     public static class ImportReceivePdfHelper
     {
-        // Giữ hàm cũ để không làm vỡ code cũ
-        public static void Generate(string filePath, ImportReceiveSourceDto source)
-        {
-            Generate(filePath, new List<ImportReceiveSourceDto> { source });
-        }
-
-        // Hàm mới: 1 file chứa nhiều production
-        public static void Generate(string filePath, List<ImportReceiveSourceDto> sources)
+        public static void Generate(
+            string outputPath,
+            List<ImportReceiveSourceDto> sources)
         {
             sources ??= new List<ImportReceiveSourceDto>();
 
+            if (string.IsNullOrWhiteSpace(outputPath))
+                throw new InvalidOperationException("outputPath không hợp lệ.");
+
             if (sources.Count == 0)
-                throw new InvalidOperationException("Không có production để tạo phiếu nhập kho.");
+                throw new InvalidOperationException("Không có dữ liệu để tạo phiếu nhập kho.");
 
-            Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
+            var now = AppTime.NowVnUnspecified();
+            var receiptNo = $"PNK-{now:yyyyMMddHHmmss}";
 
-            var first = sources.First();
+            /*
+             * FIX CHÍNH:
+             * Group theo order_id.
+             * Trước đây nếu sources có 3 production của cùng 1 order thì PDF dễ bị 3 dòng.
+             * Bây giờ 1 order chỉ còn 1 dòng.
+             */
+            var orderRows = sources
+                .GroupBy(x => new
+                {
+                    x.order_id,
+                    order_code = x.order_code ?? ""
+                })
+                .Select(g =>
+                {
+                    var prodIds = g
+                        .Select(x => x.prod_id)
+                        .Where(x => x > 0)
+                        .Distinct()
+                        .OrderBy(x => x)
+                        .ToList();
 
-            var prodIds = sources
-                .Select(x => x.prod_id)
-                .Where(x => x > 0)
-                .Distinct()
-                .OrderBy(x => x)
+                    /*
+                     * Vì cùng một order có thể bị lặp items ở nhiều production,
+                     * phải distinct theo item_id để không nhân số lượng.
+                     */
+                    var uniqueItems = g
+                        .SelectMany(x => x.items ?? new List<ImportReceiveItemDto>())
+                        .GroupBy(x => x.item_id > 0
+                            ? $"ID={x.item_id}"
+                            : $"NAME={x.product_name}|QTY={x.quantity}|PACK={x.packaging_standard}")
+                        .Select(x => x.First())
+                        .OrderBy(x => x.item_id)
+                        .ToList();
+
+                    var productNames = uniqueItems.Count == 0
+                        ? ""
+                        : string.Join("; ",
+                            uniqueItems
+                                .Select(x => x.product_name)
+                                .Where(x => !string.IsNullOrWhiteSpace(x))
+                                .Distinct(StringComparer.OrdinalIgnoreCase));
+
+                    var packagingStandards = uniqueItems.Count == 0
+                        ? ""
+                        : string.Join("; ",
+                            uniqueItems
+                                .Select(x => x.packaging_standard)
+                                .Where(x => !string.IsNullOrWhiteSpace(x))
+                                .Distinct(StringComparer.OrdinalIgnoreCase));
+
+                    var totalQuantity = uniqueItems.Sum(x => x.quantity);
+
+                    return new ImportReceiveOrderRow
+                    {
+                        order_id = g.Key.order_id,
+                        order_code = g.Key.order_code,
+
+                        prod_ids = prodIds,
+
+                        product_names = productNames,
+                        packaging_standard = packagingStandards,
+                        total_quantity = totalQuantity,
+
+                        item_count = uniqueItems.Count
+                    };
+                })
+                .OrderBy(x => x.order_id)
                 .ToList();
+
+            if (orderRows.Count == 0)
+                throw new InvalidOperationException("Không có dòng order hợp lệ để tạo phiếu nhập kho.");
 
             Document.Create(container =>
             {
                 container.Page(page =>
                 {
-                    page.Margin(30);
+                    page.Size(PageSizes.A4.Landscape());
+                    page.Margin(24);
+                    page.PageColor(Colors.White);
 
-                    page.Header()
-                        .AlignCenter()
-                        .Text("PHIẾU NHẬP KHO THÀNH PHẨM")
-                        .Bold()
-                        .FontSize(20);
+                    page.DefaultTextStyle(x => x
+                        .FontFamily("DejaVu Sans")
+                        .FontSize(9));
 
-                    page.Content()
-                        .PaddingVertical(20)
-                        .Column(col =>
+                    page.Content().Column(col =>
+                    {
+                        col.Spacing(10);
+
+                        col.Item().AlignCenter()
+                            .Text("PHIẾU NHẬP KHO THÀNH PHẨM")
+                            .Bold()
+                            .FontSize(18);
+
+                        col.Item().AlignCenter()
+                            .Text($"Số phiếu: {receiptNo} - Ngày tạo: {now:dd/MM/yyyy HH:mm}");
+
+                        col.Item().Text(
+                            "Ghi chú: Không.")
+                            .Italic()
+                            .FontSize(8);
+
+                        col.Item().Table(table =>
                         {
-                            col.Spacing(10);
-
-                            col.Item().Text($"Ngày tạo phiếu: {AppTime.NowVnUnspecified():dd/MM/yyyy HH:mm}");
-                            col.Item().Text($"Mã đơn: {first.order_code}");
-                            col.Item().Text($"ID Order: {first.order_id}");
-                            col.Item().Text($"Danh sách Production ID: {string.Join(", ", prodIds)}");
-                            col.Item().Text($"Tổng số production trong phiếu: {prodIds.Count}");
-
-                            col.Item().PaddingTop(15);
-
-                            col.Item().Table(table =>
+                            table.ColumnsDefinition(c =>
                             {
-                                table.ColumnsDefinition(columns =>
-                                {
-                                    columns.ConstantColumn(35);   // STT
-                                    columns.ConstantColumn(70);   // Prod ID
-                                    columns.ConstantColumn(55);   // Item ID
-                                    columns.RelativeColumn(1);    // Mã đơn
-                                    columns.RelativeColumn(2);    // Tên thành phẩm
-                                    columns.RelativeColumn(2);    // Quy cách
-                                    columns.RelativeColumn(1);    // Số lượng
-                                });
-
-                                table.Header(header =>
-                                {
-                                    header.Cell().Element(HeaderCellStyle).Text("STT").Bold();
-                                    header.Cell().Element(HeaderCellStyle).Text("Prod ID").Bold();
-                                    header.Cell().Element(HeaderCellStyle).Text("Item ID").Bold();
-                                    header.Cell().Element(HeaderCellStyle).Text("Mã đơn").Bold();
-                                    header.Cell().Element(HeaderCellStyle).Text("Tên thành phẩm").Bold();
-                                    header.Cell().Element(HeaderCellStyle).Text("Quy cách đóng gói").Bold();
-                                    header.Cell().Element(HeaderCellStyle).Text("Số lượng").Bold();
-                                });
-
-                                int stt = 1;
-
-                                foreach (var source in sources.OrderBy(x => x.prod_id))
-                                {
-                                    foreach (var item in source.items ?? new List<ImportReceiveItemDto>())
-                                    {
-                                        table.Cell().Element(CellStyle).Text(stt.ToString());
-                                        table.Cell().Element(CellStyle).Text(source.prod_id.ToString());
-                                        table.Cell().Element(CellStyle).Text(item.item_id.ToString());
-                                        table.Cell().Element(CellStyle).Text(source.order_code ?? "");
-                                        table.Cell().Element(CellStyle).Text(item.product_name ?? "");
-
-                                        table.Cell().Element(CellStyle).Text(
-                                            string.IsNullOrWhiteSpace(item.packaging_standard)
-                                                ? "Chưa có dữ liệu"
-                                                : item.packaging_standard
-                                        );
-
-                                        table.Cell().Element(CellStyle).Text(item.quantity.ToString());
-
-                                        stt++;
-                                    }
-                                }
+                                c.ConstantColumn(35);
+                                c.ConstantColumn(70);
+                                c.ConstantColumn(105);
+                                c.RelativeColumn(1.2f);
+                                c.RelativeColumn(2.0f);
+                                c.ConstantColumn(80);
+                                c.RelativeColumn(1.4f);
+                                c.RelativeColumn(1.2f);
                             });
 
-                            col.Item()
-                                .PaddingTop(20)
-                                .Text("Phiếu được tạo tự động từ hệ thống. Một phiếu có thể bao gồm nhiều lệnh sản xuất của cùng một đơn hàng.")
-                                .Italic();
+                            Header(table, "STT");
+                            Header(table, "Order ID");
+                            Header(table, "Mã đơn");
+                            Header(table, "Production liên quan");
+                            Header(table, "Sản phẩm");
+                            Header(table, "Tổng SL");
+                            Header(table, "Quy cách");
+                            Header(table, "Ghi chú");
+
+                            var index = 1;
+
+                            foreach (var row in orderRows)
+                            {
+                                Cell(table, index.ToString(CultureInfo.InvariantCulture));
+                                Cell(table, row.order_id.ToString(CultureInfo.InvariantCulture));
+                                Cell(table, row.order_code ?? "");
+                                Cell(table, row.prod_ids.Count == 0
+                                    ? ""
+                                    : string.Join(", ", row.prod_ids));
+
+                                Cell(table, row.product_names ?? "");
+                                Cell(table, FormatQty(row.total_quantity));
+                                Cell(table, row.packaging_standard ?? "");
+
+                                Cell(table,
+                                    row.item_count <= 1
+                                        ? "Yêu cầu nhập kho từ quản lí tổng hợp."
+                                        : "Yêu cầu nhập kho từ quản lí tổng hợp.");
+
+                                index++;
+                            }
                         });
 
-                    page.Footer()
-                        .AlignRight()
-                        .Text(x =>
-                        {
-                            x.Span("Generated at ");
-                            x.Span(DateTime.Now.ToString("dd/MM/yyyy HH:mm"));
-                        });
+                        var totalOrders = orderRows.Count;
+                        var totalQty = orderRows.Sum(x => x.total_quantity);
+
+                        col.Item().AlignRight()
+                            .Text($"Tổng số order: {totalOrders} | Tổng số lượng: {FormatQty(totalQty)}")
+                            .Bold();
+                    });
                 });
-            })
-            .GeneratePdf(filePath);
+            }).GeneratePdf(outputPath);
         }
 
-        private static IContainer HeaderCellStyle(IContainer container)
+        private sealed class ImportReceiveOrderRow
         {
-            return container
-                .Border(1)
-                .Background(Colors.Grey.Lighten3)
-                .Padding(5)
-                .AlignMiddle();
+            public int order_id { get; set; }
+
+            public string? order_code { get; set; }
+
+            public List<int> prod_ids { get; set; } = new();
+
+            public string? product_names { get; set; }
+
+            public string? packaging_standard { get; set; }
+
+            public int total_quantity { get; set; }
+
+            public int item_count { get; set; }
         }
 
-        private static IContainer CellStyle(IContainer container)
+        private static void Header(TableDescriptor table, string text)
         {
-            return container
-                .Border(1)
-                .Padding(5)
-                .AlignMiddle();
+            table.Cell()
+                .Border(0.5f)
+                .Background(Colors.Grey.Lighten2)
+                .Padding(4)
+                .Text(text ?? "")
+                .SemiBold();
         }
+
+        private static void Cell(TableDescriptor table, string text)
+        {
+            table.Cell()
+                .Border(0.5f)
+                .BorderColor(Colors.Grey.Lighten1)
+                .Padding(4)
+                .Text(text ?? "");
+        }
+
+        private static string FormatQty(int value)
+            => string.Format(CultureInfo.InvariantCulture, "{0:N0}", value);
     }
 }

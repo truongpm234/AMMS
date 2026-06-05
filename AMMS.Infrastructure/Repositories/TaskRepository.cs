@@ -646,8 +646,8 @@ namespace AMMS.Infrastructure.Repositories
             var kind = NormPolicyCode(prod.prod_kind);
 
             /*
-             * RALO là bản kẽm, CAT là công đoạn cắt.
-             * Không ép theo actual previous như các công đoạn BTP downstream.
+             * RALO là bản kẽm, CAT là cắt giấy.
+             * Không áp logic BTP downstream.
              */
             if (ProductionFlowHelper.IsRalo(currentCode) || IsCutProcess(currentCode))
             {
@@ -660,14 +660,13 @@ namespace AMMS.Infrastructure.Repositories
                 };
             }
 
-            /*
-             * Ưu tiên actual output công đoạn trước.
-             * Ví dụ: BOI sau CAN thì lấy actual CAN.
-             */
             var previousCode = fullStageIndex > 0
                 ? fullRouteCodes[fullStageIndex - 1]
                 : "";
 
+            /*
+             * Ưu tiên actual output công đoạn trước nếu đã report thật.
+             */
             if (!string.IsNullOrWhiteSpace(previousCode))
             {
                 var previousActual = await ResolveActualOutputQtyForOrderProcessAsync(
@@ -690,7 +689,8 @@ namespace AMMS.Infrastructure.Repositories
             }
 
             /*
-             * Nếu chưa có actual previous thì lấy theo estimated input/output của full route.
+             * Nếu chưa có actual previous:
+             * SUB/SPLIT/BOTH downstream lấy theo orderQty + hao phí từng công đoạn sau BTP.
              */
             var downstreamStageQty = ResolveDownstreamStageEstimatedQtyForPolicy(
                 prod,
@@ -701,10 +701,6 @@ namespace AMMS.Infrastructure.Repositories
 
             if (downstreamStageQty > 0)
             {
-                /*
-                 * BOTH ở công đoạn đầu sau sub boundary:
-                 * số lượng = actual phần NVL trước đó + sub_product_used_qty.
-                 */
                 if (method == "BOTH")
                 {
                     var subCodes = await ResolveSubProductProcessCodesForPolicyAsync(prod, ct);
@@ -751,8 +747,9 @@ namespace AMMS.Infrastructure.Repositories
                         qty = downstreamStageQty,
                         unit = ResolveUnitForDownstreamStage(currentCode),
                         hint =
-                            $"Số lượng QR lấy theo estimated input của công đoạn {currentCode} trên full route. " +
-                            $"EstimatedInput={Math.Round(downstreamStageQty, 4, MidpointRounding.AwayFromZero)}."
+                            $"Số lượng QR lấy theo BTP downstream: orderQty + hao phí sau boundary BTP. " +
+                            $"Current={currentCode}, Qty={Math.Round(downstreamStageQty, 4, MidpointRounding.AwayFromZero)}. " +
+                            $"Không dùng sheets_required/sheets_total của NVL estimate."
                     };
                 }
             }
@@ -767,20 +764,31 @@ namespace AMMS.Infrastructure.Repositories
         }
 
         private decimal ResolveDownstreamStageEstimatedQtyForPolicy(
-            production prod,
-            string currentCode,
-            IReadOnlyList<string> fullRouteCodes,
-            int orderQty,
-            cost_estimate est)
+    production prod,
+    string currentCode,
+    IReadOnlyList<string> fullRouteCodes,
+    int orderQty,
+    cost_estimate est)
         {
             if (currentCode is not ("PHU" or "CAN" or "CAN_MANG" or "BOI" or "BE" or "DUT" or "DAN"))
                 return 0m;
 
-            var nUp = est.n_up > 0 ? est.n_up : 1;
+            var nUp = est.n_up > 0
+                ? est.n_up
+                : 1;
 
-            var sheetsBase = est.sheets_required > 0
-                ? est.sheets_required
-                : Math.Max(1, (int)Math.Ceiling(orderQty / (decimal)nUp));
+            if (orderQty <= 0)
+                orderQty = 1;
+
+            /*
+             * FIX:
+             * Không dùng est.sheets_required cho SUB/BTP downstream.
+             * sheets_required là estimate của flow NVL từ đầu.
+             * Với SUB thì phải tính lại theo orderQty/nUp rồi để SubProductionQuantityHelper cộng hao phí từng stage.
+             */
+            var sheetsBase = Math.Max(
+                1,
+                (int)Math.Ceiling(orderQty / (decimal)nUp));
 
             var stageQty = SubProductionQuantityHelper.ResolveStageQty(
                 currentProcessCode: currentCode,

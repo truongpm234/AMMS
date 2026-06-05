@@ -124,18 +124,11 @@ namespace AMMS.Application.Services
             }
             else
             {
-                var policy = await _taskRepo.GetQtyPolicyAsync(taskId, ct);
-                if (policy == null)
-                    throw new InvalidOperationException("Không xác định được policy số lượng cho task.");
-
-                if (qtyGood < policy.min_allowed || qtyGood > policy.max_allowed)
-                {
-                    throw new ArgumentOutOfRangeException(
-                        nameof(req.token),
-                        $"qty_good={qtyGood} không hợp lệ. " +
-                        $"Công đoạn [{policy.process_code} - {policy.process_name}] " +
-                        $"chỉ cho phép báo cáo trong khoảng {policy.min_allowed}..{policy.max_allowed} {policy.qty_unit}.");
-                }
+                await ValidateSingleOrSplitFinishQtyAsync(
+                    taskId: taskId,
+                    payload: payload,
+                    normalizedReferenceInputs: normalizedReferenceInputs,
+                    ct: ct);
             }
 
             var result = await _taskRepo.ExecuteInTransactionAsync(async innerCt =>
@@ -332,6 +325,156 @@ namespace AMMS.Application.Services
             return result;
         }
 
+        private async Task ValidateSingleOrSplitFinishQtyAsync(
+    int taskId,
+    TaskQrTokenPayloadDto payload,
+    IReadOnlyList<TaskReferenceUsageInputDto>? normalizedReferenceInputs,
+    CancellationToken ct)
+        {
+            if (payload == null)
+                throw new InvalidOperationException("Payload token không hợp lệ.");
+
+            var qtyGood = payload.qty_good;
+
+            if (qtyGood <= 0)
+                throw new ArgumentOutOfRangeException(nameof(payload), "qty_good phải lớn hơn 0.");
+
+            var policy = await _taskRepo.GetQtyPolicyAsync(taskId, ct);
+
+            if (policy == null)
+                throw new InvalidOperationException("Không xác định được policy số lượng cho task.");
+
+            var preparedBundle = await GetTaskQrMaterialBundleAsync(
+                taskId,
+                ct);
+
+            var preparedReferenceQty = ResolvePreparedMainReferenceQtyForSingleFinish(
+                preparedBundle.reference_inputs);
+
+            var tokenReferenceQty = ResolveTokenMainReferenceQtyForSingleFinish(
+                normalizedReferenceInputs);
+
+            if (tokenReferenceQty <= 0 && payload.reference_inputs != null)
+            {
+                tokenReferenceQty = ResolveTokenMainReferenceQtyForSingleFinish(
+                    payload.reference_inputs);
+            }
+
+            var tokenOutputQty = ResolveTokenOutputQtyForFinish(
+                payload.outputs);
+
+            var baseMax = policy.max_allowed > 0
+                ? policy.max_allowed
+                : policy.suggested_qty > 0
+                    ? policy.suggested_qty
+                    : 1;
+
+            /*
+             * FIX:
+             * SINGLE/SPLIT SUB full path hoặc SPLIT sau group:
+             * policy.max_allowed có thể thấp vì lấy estimate NVL.
+             * Phải nâng max theo reference input thực tế từ qr-prepare/token.
+             */
+            var maxCandidate = new List<decimal>
+    {
+        baseMax,
+        preparedReferenceQty,
+        tokenReferenceQty,
+        tokenOutputQty
+    }
+            .Where(x => x > 0)
+            .DefaultIfEmpty(1m)
+            .Max();
+
+            var maxAllowed = (int)Math.Ceiling(maxCandidate);
+
+            var minAllowed = policy.min_allowed > 0
+                ? policy.min_allowed
+                : 1;
+
+            if (qtyGood < minAllowed || qtyGood > maxAllowed)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(payload),
+                    $"qty_good={qtyGood} không hợp lệ. " +
+                    $"Công đoạn [{policy.process_code} - {policy.process_name}] " +
+                    $"chỉ cho phép báo cáo trong khoảng {minAllowed}..{maxAllowed} {policy.qty_unit}. " +
+                    $"Chi tiết validate: baseMax={baseMax}, " +
+                    $"preparedReferenceQty={Math.Round(preparedReferenceQty, 4)}, " +
+                    $"tokenReferenceQty={Math.Round(tokenReferenceQty, 4)}, " +
+                    $"tokenOutputQty={Math.Round(tokenOutputQty, 4)}.");
+            }
+        }
+
+        private static decimal ResolvePreparedMainReferenceQtyForSingleFinish(
+            IReadOnlyList<TaskReferenceInputDto>? refs)
+        {
+            if (refs == null || refs.Count == 0)
+                return 0m;
+
+            var candidates = refs
+                .Where(IsMainQtyReferenceForSingleFinish)
+                .ToList();
+
+            if (candidates.Count == 0)
+                return 0m;
+
+            var actualTotal = candidates
+                .Where(x => x.actual_qty_prev_stage > 0)
+                .Sum(x => x.actual_qty_prev_stage);
+
+            if (actualTotal > 0)
+                return actualTotal;
+
+            return candidates
+                .Where(x => x.estimated_qty > 0)
+                .Sum(x => x.estimated_qty);
+        }
+
+        private static decimal ResolveTokenMainReferenceQtyForSingleFinish(
+            IReadOnlyList<TaskReferenceUsageInputDto>? refs)
+        {
+            if (refs == null || refs.Count == 0)
+                return 0m;
+
+            return refs
+                .Where(x => x != null)
+                .Where(x => IsMainQtyReferenceForSingleFinish(x.input_code, x.unit))
+                .Sum(x =>
+                {
+                    var used = x.quantity_used > 0 ? x.quantity_used : 0m;
+                    var left = x.quantity_left > 0 ? x.quantity_left : 0m;
+
+                    return used + left;
+                });
+        }
+
+        private static bool IsMainQtyReferenceForSingleFinish(TaskReferenceInputDto? input)
+        {
+            if (input == null)
+                return false;
+
+            return IsMainQtyReferenceForSingleFinish(
+                input.input_code,
+                input.unit);
+        }
+
+        private static bool IsMainQtyReferenceForSingleFinish(
+            string? inputCode,
+            string? unit)
+        {
+            var code = ProductionFlowHelper.Norm(inputCode);
+            var u = (unit ?? "").Trim().ToLowerInvariant();
+
+            if (code == "PLATE_FROM_RALO")
+                return false;
+
+            if (u is "bản" or "ban" or "plate")
+                return false;
+
+            return true;
+        }
+
         private sealed class FinishQtyValidationPolicy
         {
             public int MinAllowed { get; set; } = 1;
@@ -419,8 +562,10 @@ namespace AMMS.Application.Services
             {
                 return new FinishQtyValidationPolicy
                 {
+                    MinAllowed = 1,
                     MaxAllowed = 1,
                     SuggestedQty = 1,
+                    QtyUnit = "sp",
                     Source = "Task không có prod_id"
                 };
             }
@@ -433,8 +578,10 @@ namespace AMMS.Application.Services
             {
                 return new FinishQtyValidationPolicy
                 {
+                    MinAllowed = 1,
                     MaxAllowed = 1,
                     SuggestedQty = 1,
+                    QtyUnit = "sp",
                     Source = "Không tìm thấy production"
                 };
             }
@@ -442,20 +589,12 @@ namespace AMMS.Application.Services
             var currentCode = ProductionFlowHelper.Norm(
                 groupTask.process?.process_code);
 
-            /*
-             * 1. Công thức DB cũ.
-             * Có thể thấp hơn QR-prepare trong case SUB-NVL/MIXED.
-             */
             var dbStageLimit = await ResolveDbStageOutputLimitForFinishAsync(
                 groupTask,
                 prod,
                 currentCode,
                 ct);
 
-            /*
-             * 2. Reference input từ QR token.
-             * Đây là data FE/BE đã nhúng trong token khi tạo QR.
-             */
             var tokenReferenceLimit = ResolveTokenReferenceQtyForFinish(
                 normalizedReferenceInputs);
 
@@ -465,40 +604,36 @@ namespace AMMS.Application.Services
                     payload.reference_inputs);
             }
 
-            /*
-             * 3. Output từ QR token.
-             * Nếu FE gửi outputs_json thì đây là output thực tế muốn báo cáo.
-             */
             var tokenOutputLimit = ResolveTokenOutputQtyForFinish(
                 payload?.outputs);
 
             /*
-             * 4. Bundle qr-prepare hiện tại.
-             * Đây là cách đồng bộ finish với qr-prepare.
+             * Đây là source chính sau khi sửa:
+             * qr-prepare reference_inputs.actual_qty_prev_stage đã phản ánh
+             * SUB/SUB-NVL theo order qty + hao phí downstream.
              */
             var bundleReferenceLimit = await ResolvePreparedBundleReferenceQtyForFinishAsync(
                 groupTask.task_id,
                 ct);
 
-            /*
-             * 5. group_total_qty và task_links dùng làm fallback.
-             */
-            decimal groupTotalQty = prod.group_total_qty > 0 ? (decimal)prod.group_total_qty : 0m;
+            decimal groupTotalQty = prod.group_total_qty > 0
+                ? prod.group_total_qty
+                : 0m;
 
             var taskLinkPlanQty = await ResolveTaskLinkPlanQtyForFinishAsync(
                 groupTask.task_id,
                 ct);
 
             decimal tokenQtyGood = payload?.qty_good != null
-                ? (decimal)payload.qty_good
+                ? payload.qty_good
                 : 0m;
 
             var candidates = new List<(string source, decimal qty)>
     {
-        ("DB_STAGE_OUTPUT", dbStageLimit),
         ("QR_PREPARE_REFERENCE", bundleReferenceLimit),
         ("TOKEN_REFERENCE_INPUT", tokenReferenceLimit),
         ("TOKEN_OUTPUT", tokenOutputLimit),
+        ("DB_STAGE_OUTPUT", dbStageLimit),
         ("GROUP_TOTAL_QTY", groupTotalQty),
         ("TASK_LINK_PLAN_QTY", taskLinkPlanQty),
         ("SIGNED_TOKEN_QTY_GOOD", tokenQtyGood)
@@ -510,12 +645,19 @@ namespace AMMS.Application.Services
             {
                 return new FinishQtyValidationPolicy
                 {
+                    MinAllowed = 1,
                     MaxAllowed = 1,
                     SuggestedQty = 1,
+                    QtyUnit = "sp",
                     Source = "Không có candidate số lượng hợp lệ"
                 };
             }
 
+            /*
+             * Lấy max để không reject case SUB-NVL:
+             * DB_STAGE_OUTPUT có thể vẫn thấp do còn estimate cũ.
+             * QR_PREPARE_REFERENCE/TOKEN_REFERENCE_INPUT mới là số đúng.
+             */
             var best = candidates
                 .OrderByDescending(x => x.qty)
                 .First();
@@ -529,13 +671,13 @@ namespace AMMS.Application.Services
                 SuggestedQty = maxAllowed,
                 QtyUnit = "sp",
 
-                DbStageOutputLimit = Math.Round((decimal)dbStageLimit, 4),
-                BundleReferenceLimit = Math.Round((decimal)bundleReferenceLimit, 4),
-                TokenReferenceLimit = Math.Round((decimal)tokenReferenceLimit, 4),
-                TokenOutputLimit = Math.Round((decimal)tokenOutputLimit, 4),
-                GroupTotalQty = Math.Round((decimal)groupTotalQty, 4),
-                TaskLinkPlanQty = Math.Round((decimal)taskLinkPlanQty, 4),
-                TokenQtyGood = Math.Round((decimal)tokenQtyGood, 4),
+                DbStageOutputLimit = Math.Round(dbStageLimit, 4, MidpointRounding.AwayFromZero),
+                BundleReferenceLimit = Math.Round(bundleReferenceLimit, 4, MidpointRounding.AwayFromZero),
+                TokenReferenceLimit = Math.Round(tokenReferenceLimit, 4, MidpointRounding.AwayFromZero),
+                TokenOutputLimit = Math.Round(tokenOutputLimit, 4, MidpointRounding.AwayFromZero),
+                GroupTotalQty = Math.Round(groupTotalQty, 4, MidpointRounding.AwayFromZero),
+                TaskLinkPlanQty = Math.Round(taskLinkPlanQty, 4, MidpointRounding.AwayFromZero),
+                TokenQtyGood = Math.Round(tokenQtyGood, 4, MidpointRounding.AwayFromZero),
 
                 Source = best.source
             };
@@ -550,30 +692,20 @@ namespace AMMS.Application.Services
         }
 
         private static decimal ResolveTokenReferenceQtyForFinish(
-            IReadOnlyList<TaskReferenceUsageInputDto>? refs)
+    IReadOnlyList<TaskReferenceUsageInputDto>? refs)
         {
             if (refs == null || refs.Count == 0)
                 return 0m;
 
-            /*
-             * Với reference input:
-             * - quantity_used là số BTP/input thật sự dùng.
-             * - quantity_left là phần dư nếu có.
-             *
-             * max hợp lý nên không nhỏ hơn quantity_used.
-             * Dùng used + left để tránh reject khi FE gửi tổng input và có phần left.
-             */
             return refs
                 .Where(x => x != null)
+                .Where(x => IsMainQtyReferenceForSingleFinish(x.input_code, x.unit))
                 .Sum(x =>
                 {
                     var used = x.quantity_used > 0 ? x.quantity_used : 0m;
                     var left = x.quantity_left > 0 ? x.quantity_left : 0m;
 
-                    if (used + left > 0)
-                        return used + left;
-
-                    return used;
+                    return used + left;
                 });
         }
 
@@ -589,8 +721,8 @@ namespace AMMS.Application.Services
         }
 
         private async Task<decimal> ResolvePreparedBundleReferenceQtyForFinishAsync(
-            int taskId,
-            CancellationToken ct)
+    int taskId,
+    CancellationToken ct)
         {
             var bundle = await GetTaskQrMaterialBundleAsync(
                 taskId,
@@ -599,20 +731,24 @@ namespace AMMS.Application.Services
             if (bundle?.reference_inputs == null || bundle.reference_inputs.Count == 0)
                 return 0m;
 
-            /*
-             * Bundle reference_inputs là output của qr-prepare.
-             * Với case SUB-NVL/MIXED, estimated_qty nên là:
-             * actual IN của NVL + BTP planned của SUB.
-             */
-            return bundle.reference_inputs
+            var candidates = bundle.reference_inputs
                 .Where(x => x != null)
-                .Sum(x =>
-                {
-                    var estimated = x.estimated_qty > 0 ? x.estimated_qty : 0m;
-                    var actual = x.actual_qty_prev_stage > 0 ? x.actual_qty_prev_stage : 0m;
+                .Where(x => IsMainQtyReferenceForSingleFinish(x.input_code, x.unit))
+                .ToList();
 
-                    return Math.Max(estimated, actual);
-                });
+            if (candidates.Count == 0)
+                return 0m;
+
+            var actualTotal = candidates
+                .Where(x => x.actual_qty_prev_stage > 0)
+                .Sum(x => x.actual_qty_prev_stage);
+
+            if (actualTotal > 0)
+                return actualTotal;
+
+            return candidates
+                .Where(x => x.estimated_qty > 0)
+                .Sum(x => x.estimated_qty);
         }
 
         private async Task<decimal> ResolveTaskLinkPlanQtyForFinishAsync(
@@ -2348,19 +2484,20 @@ namespace AMMS.Application.Services
                 normalizedRoute[currentIndex - 1]);
 
             /*
-             * FIX:
-             * Tính reference input theo từng order trong group.
-             *
-             * Case NVL:
-             * - Nếu công đoạn trước đã finish thật, dùng actual output của công đoạn trước.
-             *
-             * Case SUB:
-             * - Dùng BTP planned input sau boundary sub_product.
-             *
-             * Case BOTH:
-             * - Nếu là công đoạn đầu tiên sau boundary BTP:
-             *   input = actual output phần NVL tự sản xuất + BTP planned/used.
-             * - Các công đoạn sau đó lấy actual output của công đoạn trước nếu đã có.
+             * Base estimate giữ theo logic cũ/NVL estimate để FE vẫn thấy estimated_qty như hiện tại.
+             */
+            var baseShape = ResolveReferenceInputShape(
+                currentProcessCode: currentCode,
+                currentStageIndex: currentIndex,
+                routeProcessCodes: normalizedRoute,
+                ctx: ctx);
+
+            var baseEstimatedQty = Math.Round(baseShape.qty, 4, MidpointRounding.AwayFromZero);
+
+            /*
+             * Override actual cho SUB/SUB-NVL:
+             * - estimated_qty giữ baseEstimatedQty.
+             * - actual_qty_prev_stage tính theo order qty/link qty + hao phí downstream.
              */
             var groupShape = await TryResolveGroupLinkReferenceQtyAsync(
                 ctx: ctx,
@@ -2369,6 +2506,8 @@ namespace AMMS.Application.Services
                 previousProcessCode: previousCode,
                 currentStageIndex: currentIndex,
                 routeProcessCodes: normalizedRoute,
+                fallbackUnit: baseShape.unit,
+                fallbackEstimatedQty: baseEstimatedQty,
                 ct: ct);
 
             if (groupShape != null)
@@ -2380,36 +2519,23 @@ namespace AMMS.Application.Services
                 input_code = previousCode,
                 input_name = ResolveReferenceInputDisplayName(previousCode),
                 unit = groupShape.unit,
-                estimated_qty = Math.Round(groupShape.estimated_qty, 4),
-                actual_qty_prev_stage = Math.Round(groupShape.actual_qty_prev_stage, 4)
+                estimated_qty = Math.Round(groupShape.estimated_qty, 4, MidpointRounding.AwayFromZero),
+                actual_qty_prev_stage = Math.Round(groupShape.actual_qty_prev_stage, 4, MidpointRounding.AwayFromZero)
             }
         };
             }
 
             /*
-             * Fallback logic cũ.
+             * Fallback logic cũ cho NVL hoặc case không thuộc SUB/BOTH downstream.
              */
-            var shape = ResolveReferenceInputShape(
-                currentProcessCode: currentCode,
-                currentStageIndex: currentIndex,
-                routeProcessCodes: normalizedRoute,
-                ctx: ctx);
-
             var actualQtyPrevStage = await ResolveActualOutputQtyForOrderProcessAsync(
                 link.order_id,
                 previousCode,
                 ct);
 
-            var estimatedQty = Math.Round(shape.qty, 4);
-            var actualQty = Math.Round(actualQtyPrevStage, 4);
+            var estimatedQty = baseEstimatedQty;
+            var actualQty = Math.Round(actualQtyPrevStage, 4, MidpointRounding.AwayFromZero);
 
-            /*
-             * Nếu order NVL trong group đã có actual output công đoạn trước,
-             * thì estimated_qty cũng phải dùng actual để aggregate đúng.
-             *
-             * Đây là điểm sửa cho case SUB-NVL:
-             * GROUP PHU = IN actual của order NVL + BTP planned của order SUB.
-             */
             var method = NormBothProcessCodeForScan(ctx.Production.prod_method);
 
             if (method == "NVL" && actualQty > 0)
@@ -2421,7 +2547,7 @@ namespace AMMS.Application.Services
         {
             input_code = previousCode,
             input_name = ResolveReferenceInputDisplayName(previousCode),
-            unit = shape.unit,
+            unit = baseShape.unit,
             estimated_qty = estimatedQty,
             actual_qty_prev_stage = actualQty > 0 ? actualQty : estimatedQty
         }
@@ -2438,13 +2564,15 @@ namespace AMMS.Application.Services
         }
 
         private async Task<ReferenceQtyShape?> TryResolveGroupLinkReferenceQtyAsync(
-            TaskEstimateContext ctx,
-            task_link link,
-            string currentProcessCode,
-            string previousProcessCode,
-            int currentStageIndex,
-            IReadOnlyList<string?> routeProcessCodes,
-            CancellationToken ct)
+    TaskEstimateContext ctx,
+    task_link link,
+    string currentProcessCode,
+    string previousProcessCode,
+    int currentStageIndex,
+    IReadOnlyList<string?> routeProcessCodes,
+    string fallbackUnit,
+    decimal fallbackEstimatedQty,
+    CancellationToken ct)
         {
             var method = NormBothProcessCodeForScan(ctx.Production.prod_method);
             var currentCode = NormBothProcessCodeForScan(currentProcessCode);
@@ -2463,9 +2591,8 @@ namespace AMMS.Application.Services
                 ct);
 
             /*
-             * Case GROUP + NVL:
-             * Dùng actual output công đoạn trước nếu đã có.
-             * Ví dụ group PHU: lấy actual IN của single NVL.
+             * GROUP + NVL:
+             * Giữ logic cũ: nếu công đoạn trước đã có actual thì lấy actual.
              */
             if (method == "NVL")
             {
@@ -2483,8 +2610,15 @@ namespace AMMS.Application.Services
             }
 
             /*
-             * Case GROUP + SUB / BOTH:
-             * Dùng helper stageQty để tính số lượng BTP input/output sau boundary.
+             * GROUP + SUB:
+             * Đây là fix chính cho SUB-SUB và SUB-NVL.
+             *
+             * estimated_qty:
+             * - giữ fallbackEstimatedQty theo logic estimate hiện tại.
+             *
+             * actual_qty_prev_stage:
+             * - tính theo link.qty_plan/order quantity + hao phí downstream
+             * - không dùng sheets_required/sheets_total của NVL estimate.
              */
             var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
                 ctx,
@@ -2498,19 +2632,36 @@ namespace AMMS.Application.Services
                 if (stageQty == null)
                     return null;
 
-                /*
-                 * SUB trong group:
-                 * Không lấy log IN cũ; BTP đã có sẵn.
-                 * estimated_qty và actual_qty_prev_stage đều hiển thị theo BTP planned input.
-                 */
+                var plannedActualInputQty = stageQty.input_qty > 0
+                    ? stageQty.input_qty
+                    : stageQty.output_qty;
+
+                if (plannedActualInputQty <= 0)
+                    plannedActualInputQty = link.qty_plan > 0 ? link.qty_plan : 1;
+
                 return new ReferenceQtyShape
                 {
                     unit = stageQty.unit,
-                    estimated_qty = stageQty.input_qty,
-                    actual_qty_prev_stage = stageQty.input_qty
+
+                    /*
+                     * Giữ estimate hiện tại.
+                     */
+                    estimated_qty = fallbackEstimatedQty > 0
+                        ? fallbackEstimatedQty
+                        : plannedActualInputQty,
+
+                    /*
+                     * Actual BTP phải là số lượng cần cấp thật theo hao phí sau boundary.
+                     */
+                    actual_qty_prev_stage = plannedActualInputQty
                 };
             }
 
+            /*
+             * GROUP + BOTH:
+             * Giữ case cũ nhưng chỉnh actual cho công đoạn đầu sau boundary:
+             * actual = actual phần NVL + BTP đã cấp.
+             */
             if (method == "BOTH")
             {
                 if (stageQty == null)
@@ -2520,10 +2671,6 @@ namespace AMMS.Application.Services
                     ctx.Production,
                     ct);
 
-                /*
-                 * BOTH thường không cho group theo rule của bạn.
-                 * Nhưng nếu data cũ lỡ có, vẫn tính đúng cho qr-prepare.
-                 */
                 if (IsFirstStageAfterSubProductBoundaryForQr(
                         currentCode,
                         routeProcessCodes,
@@ -2539,20 +2686,21 @@ namespace AMMS.Application.Services
                     return new ReferenceQtyShape
                     {
                         unit = stageQty.unit,
-                        estimated_qty = stageQty.input_qty,
+                        estimated_qty = fallbackEstimatedQty > 0
+                            ? fallbackEstimatedQty
+                            : stageQty.input_qty,
                         actual_qty_prev_stage = combinedActual
                     };
                 }
 
-                /*
-                 * Sau công đoạn đầu tiên hậu boundary, previous đã là output chung.
-                 */
                 if (actualPrevQty > 0)
                 {
                     return new ReferenceQtyShape
                     {
                         unit = stageQty.unit,
-                        estimated_qty = actualPrevQty,
+                        estimated_qty = fallbackEstimatedQty > 0
+                            ? fallbackEstimatedQty
+                            : actualPrevQty,
                         actual_qty_prev_stage = actualPrevQty
                     };
                 }
@@ -2560,7 +2708,9 @@ namespace AMMS.Application.Services
                 return new ReferenceQtyShape
                 {
                     unit = stageQty.unit,
-                    estimated_qty = stageQty.input_qty,
+                    estimated_qty = fallbackEstimatedQty > 0
+                        ? fallbackEstimatedQty
+                        : stageQty.input_qty,
                     actual_qty_prev_stage = stageQty.input_qty
                 };
             }
@@ -2732,8 +2882,8 @@ namespace AMMS.Application.Services
 
             /*
              * SUB:
-             * - Nếu có sub_product.product_process thì chỉ áp dụng từ công đoạn sau boundary.
-             * - Nếu chưa lấy được sub_product.product_process thì vẫn áp dụng cho PHU/CAN/BOI/BE/DUT/DAN.
+             * Chỉ tính từ công đoạn sau boundary BTP.
+             * Ví dụ sub_product = RALO,CAT,IN thì PHU/CAN/BOI/BE/DUT/DAN mới dùng logic này.
              */
             if (method == "SUB")
             {
@@ -2746,8 +2896,7 @@ namespace AMMS.Application.Services
 
             /*
              * BOTH:
-             * - Chỉ áp dụng cho công đoạn nằm sau phần sub_product đã dùng.
-             * - Phần NVL tự sản xuất phía trước vẫn giữ logic estimate cũ.
+             * Chỉ tính cho phần sau boundary BTP.
              */
             if (method == "BOTH")
             {
@@ -2760,6 +2909,11 @@ namespace AMMS.Application.Services
 
             var productQty = ResolveProductReferenceQty(ctx, linkQtyPlan);
 
+            /*
+             * FIX CHÍNH:
+             * Với SUB/SUB-NVL/SUB-SUB, sheetsBase phải tính lại từ productQty,
+             * không dùng ctx.Estimate.sheets_required vì đó là estimate của flow NVL.
+             */
             var sheetsBase = ResolveSheetsBaseForSubQty(
                 ctx,
                 productQty);
@@ -2774,22 +2928,33 @@ namespace AMMS.Application.Services
         }
 
         private static int ResolveSheetsBaseForSubQty(
-            TaskEstimateContext ctx,
-            decimal productQty)
+    TaskEstimateContext ctx,
+    decimal productQty)
         {
-            var nUp = ctx.Estimate.n_up > 0 ? ctx.Estimate.n_up : 1;
+            var nUp = ctx.Estimate.n_up > 0
+                ? ctx.Estimate.n_up
+                : 1;
+
+            if (productQty <= 0)
+            {
+                if (ctx.Request.quantity.HasValue && ctx.Request.quantity.Value > 0)
+                    productQty = ctx.Request.quantity.Value;
+                else if (ctx.Production.sub_product_used_qty + ctx.Production.nvl_qty > 0)
+                    productQty = ctx.Production.sub_product_used_qty + ctx.Production.nvl_qty;
+                else if (ctx.Production.group_total_qty > 0)
+                    productQty = ctx.Production.group_total_qty;
+                else
+                    productQty = 1m;
+            }
 
             /*
-             * Với SUB không dùng sheets_total vì sheets_total thường đã chứa waste cũ
-             * của flow NVL.
-             *
-             * Ưu tiên sheets_required nếu có.
-             * Nếu không có thì tự tính ceil(productQty / n_up).
+             * Không dùng ctx.Estimate.sheets_required ở đây.
+             * Vì sheets_required thường thuộc estimate sản xuất NVL từ đầu,
+             * không đúng cho SUB/SUB-NVL khi chỉ cần tính số BTP input downstream.
              */
-            if (ctx.Estimate.sheets_required > 0)
-                return ctx.Estimate.sheets_required;
+            var sheetsBase = (int)Math.Ceiling(productQty / (decimal)nUp);
 
-            return (int)Math.Ceiling(productQty / nUp);
+            return Math.Max(sheetsBase, 1);
         }
 
         private static bool IsDownstreamBtpStageForReference(string? processCode)
@@ -3514,23 +3679,18 @@ namespace AMMS.Application.Services
 
             var currentStageIndex = previousCtx.previous_stage_index + 1;
 
-            var methodShape = await TryResolveReferenceInputShapeByProductionMethodAsync(
-                ctx: ctx,
-                currentProcessCode: currentCode,
-                previousProcessCode: previousCtx.previous_process_code,
-                currentStageIndex: currentStageIndex,
-                routeProcessCodes: previousCtx.route_process_codes,
-                linkQtyPlan: null,
-                ct: ct);
-
-            var shape = methodShape ?? ResolveReferenceInputShape(
+            /*
+             * Base estimate giữ nguyên logic cũ.
+             * Không lấy methodShape trước nữa, vì methodShape sẽ đổi estimate sang SUB qty.
+             */
+            var baseShape = ResolveReferenceInputShape(
                 currentProcessCode: currentCode,
                 currentStageIndex: currentStageIndex,
                 routeProcessCodes: previousCtx.route_process_codes,
                 ctx: ctx);
 
-            var unit = shape.unit;
-            var qty = shape.qty;
+            var unit = baseShape.unit;
+            var estimatedQty = baseShape.qty;
 
             var actualQtyPrevStage = await ResolveActualQtyPrevStageForTaskAsync(
                 ctx,
@@ -3538,16 +3698,10 @@ namespace AMMS.Application.Services
                 ct);
 
             /*
-             * FIX SINGLE SUB/BOTH:
-             * Tính lại reference input để qr-prepare hiển thị đúng:
-             *
-             * - SINGLE SUB:
-             *   Nếu previous đã có actual thì dùng actual.
-             *   Nếu chưa có actual nhưng current sau boundary BTP thì dùng BTP planned input.
-             *
-             * - SINGLE BOTH:
-             *   Nếu current là công đoạn đầu sau boundary BTP:
-             *   reference input = actual phần NVL trước đó + BTP đã dùng.
+             * Fix SUB single:
+             * - estimated_qty giữ estimate hiện tại.
+             * - actual_qty_prev_stage mới tính theo actual previous nếu có,
+             *   hoặc planned BTP input theo order qty + hao phí downstream.
              */
             var overrideRef = await TryResolveSingleReferenceQtyForQrAsync(
                 ctx: ctx,
@@ -3556,14 +3710,14 @@ namespace AMMS.Application.Services
                 currentStageIndex: currentStageIndex,
                 routeProcessCodes: previousCtx.route_process_codes,
                 fallbackUnit: unit,
-                fallbackEstimatedQty: qty,
+                fallbackEstimatedQty: estimatedQty,
                 fallbackActualPrevQty: actualQtyPrevStage,
                 ct: ct);
 
             if (overrideRef != null)
             {
                 unit = overrideRef.unit;
-                qty = overrideRef.estimated_qty;
+                estimatedQty = overrideRef.estimated_qty;
                 actualQtyPrevStage = overrideRef.actual_qty_prev_stage;
             }
 
@@ -3585,8 +3739,8 @@ namespace AMMS.Application.Services
                         input_name = ResolveReferenceInputDisplayName(
                             previousCtx.previous_process_code),
                         unit = unit,
-                        estimated_qty = Math.Round(qty, 4),
-                        actual_qty_prev_stage = Math.Round(actualQtyPrevStage, 4)
+                        estimated_qty = Math.Round(estimatedQty, 4, MidpointRounding.AwayFromZero),
+                        actual_qty_prev_stage = Math.Round(actualQtyPrevStage, 4, MidpointRounding.AwayFromZero)
                     });
 
                     break;
@@ -3628,7 +3782,6 @@ namespace AMMS.Application.Services
         {
             var method = NormBothProcessCodeForScan(ctx.Production.prod_method);
             var currentCode = NormBothProcessCodeForScan(currentProcessCode);
-            var previousCode = NormBothProcessCodeForScan(previousProcessCode);
 
             if (string.IsNullOrWhiteSpace(currentCode))
                 return null;
@@ -3645,8 +3798,11 @@ namespace AMMS.Application.Services
 
             /*
              * SINGLE SUB:
-             * - Nếu actual previous đã có, dùng actual để FE không lệch.
-             * - Nếu chưa có actual nhưng đã nằm sau boundary BTP, dùng stageQty.input_qty.
+             * estimated_qty giữ estimate hiện tại.
+             * actual_qty_prev_stage:
+             * - nếu công đoạn trước đã report thì lấy actual previous
+             * - nếu chưa report nhưng current nằm sau boundary BTP thì lấy planned BTP input
+             *   theo order qty + hao phí downstream.
              */
             if (method == "SUB")
             {
@@ -3655,18 +3811,26 @@ namespace AMMS.Application.Services
                     return new ReferenceQtyShape
                     {
                         unit = fallbackUnit,
-                        estimated_qty = fallbackActualPrevQty,
+                        estimated_qty = fallbackEstimatedQty > 0
+                            ? fallbackEstimatedQty
+                            : fallbackActualPrevQty,
                         actual_qty_prev_stage = fallbackActualPrevQty
                     };
                 }
 
                 if (stageQty != null)
                 {
+                    var plannedActualInputQty = stageQty.input_qty > 0
+                        ? stageQty.input_qty
+                        : stageQty.output_qty;
+
                     return new ReferenceQtyShape
                     {
                         unit = stageQty.unit,
-                        estimated_qty = stageQty.input_qty,
-                        actual_qty_prev_stage = stageQty.input_qty
+                        estimated_qty = fallbackEstimatedQty > 0
+                            ? fallbackEstimatedQty
+                            : plannedActualInputQty,
+                        actual_qty_prev_stage = plannedActualInputQty
                     };
                 }
 
@@ -3675,9 +3839,7 @@ namespace AMMS.Application.Services
 
             /*
              * SINGLE BOTH:
-             * - Các công đoạn trước hoặc nằm trong boundary BTP vẫn đi theo NVL portion.
-             * - Công đoạn đầu tiên sau boundary:
-             *   actual input = actual output phần NVL + BTP đã dùng.
+             * Giữ logic cũ nhưng estimate vẫn giữ fallback.
              */
             if (method == "BOTH")
             {
@@ -3705,20 +3867,21 @@ namespace AMMS.Application.Services
                     return new ReferenceQtyShape
                     {
                         unit = stageQty.unit,
-                        estimated_qty = stageQty.input_qty,
+                        estimated_qty = fallbackEstimatedQty > 0
+                            ? fallbackEstimatedQty
+                            : stageQty.input_qty,
                         actual_qty_prev_stage = combinedActual
                     };
                 }
 
-                /*
-                 * Các công đoạn sau đó dùng actual previous nếu có.
-                 */
                 if (fallbackActualPrevQty > 0)
                 {
                     return new ReferenceQtyShape
                     {
                         unit = stageQty.unit,
-                        estimated_qty = fallbackActualPrevQty,
+                        estimated_qty = fallbackEstimatedQty > 0
+                            ? fallbackEstimatedQty
+                            : fallbackActualPrevQty,
                         actual_qty_prev_stage = fallbackActualPrevQty
                     };
                 }
@@ -3726,7 +3889,9 @@ namespace AMMS.Application.Services
                 return new ReferenceQtyShape
                 {
                     unit = stageQty.unit,
-                    estimated_qty = stageQty.input_qty,
+                    estimated_qty = fallbackEstimatedQty > 0
+                        ? fallbackEstimatedQty
+                        : stageQty.input_qty,
                     actual_qty_prev_stage = stageQty.input_qty
                 };
             }

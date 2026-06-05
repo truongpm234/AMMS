@@ -67,15 +67,6 @@ public class TasksController : ControllerBase
             });
         }
 
-        /*
-         * FIX:
-         * Không chỉ dùng _taskRepo.GetByIdAsync(taskId) vì có thể chưa Include:
-         * - process
-         * - prod
-         *
-         * API qr-prepare cần biết prod_kind/prod_method/process_code
-         * để xử lý riêng GROUP + SUB.
-         */
         var taskForPrepare = await _db.tasks
             .AsNoTracking()
             .Include(x => x.process)
@@ -91,136 +82,347 @@ public class TasksController : ControllerBase
             });
         }
 
-        var isGroupProduction =
-            taskForPrepare.prod != null &&
-            string.Equals(
-                taskForPrepare.prod.prod_kind,
-                "GROUP",
-                StringComparison.OrdinalIgnoreCase);
-
-        /*
-         * CASE 1:
-         * GROUP production
-         *
-         * Với GROUP + SUB:
-         * - suggested_qty vẫn là group_total_qty, ví dụ 6000 -> 6290.
-         * - max_allowed phải lấy theo 6290.
-         *
-         * Với GROUP + NVL/BOTH:
-         * - giữ logic cũ, max_allowed theo group_total_qty.
-         */
-        if (isGroupProduction)
-        {
-            var groupBundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
-                taskId,
-                ct);
-
-            var groupPolicy = await ResolveGroupQrQtyPolicyAsync(
-                taskMeta: taskForPrepare,
-                preparedReferenceInputs: groupBundle.reference_inputs,
-                submittedReferenceInputs: null,
-                ct: ct);
-
-            var groupStageCount = await _db.tasks
-                .AsNoTracking()
-                .CountAsync(x => x.prod_id == taskForPrepare.prod_id, ct);
-
-            return Ok(new
-            {
-                task_id = taskId,
-
-                process_code = taskForPrepare.process?.process_code,
-                process_name = taskForPrepare.process?.process_name,
-
-                qty_unit = groupPolicy.QtyUnit,
-                min_allowed = groupPolicy.MinAllowed,
-
-                /*
-                 * GROUP + SUB:
-                 * max_allowed = BTP planned input, ví dụ 6290.
-                 */
-                max_allowed = groupPolicy.MaxAllowed,
-                suggested_qty = groupPolicy.SuggestedQty,
-                happy_case_qty = groupPolicy.HappyCaseQty,
-
-                /*
-                 * order_qty vẫn là số lượng đơn ghép: 6000.
-                 */
-                order_qty = taskForPrepare.prod!.group_total_qty,
-
-                sheets_required = 0,
-                sheets_waste = 0,
-                sheets_total = 0,
-                n_up = 1,
-                number_of_plates = 0,
-
-                stage_index = taskForPrepare.seq_num ?? 1,
-                stage_count = groupStageCount,
-
-                production_output_qty = groupPolicy.SuggestedQty,
-                production_output_unit = groupPolicy.QtyUnit,
-
-                input_mode = "MANUAL",
-                allow_manual_input = true,
-                can_use_manual_input = true,
-                manual_input_optional = false,
-
-                is_group_production = true,
-                group_prod_id = taskForPrepare.prod.prod_id,
-                group_total_qty = taskForPrepare.prod.group_total_qty,
-
-                manual_input_hint = groupPolicy.Hint,
-
-                consumable_materials = groupBundle.consumable_materials,
-
-                /*
-                 * FIX:
-                 * Không trả reference_inputs cũ có actual_qty_prev_stage = 7674.
-                 */
-                reference_inputs = groupPolicy.ReferenceInputs
-            });
-        }
-
-        /*
-         * CASE 2:
-         * SINGLE / SPLIT production
-         */
-        var policy = await _taskRepo.GetQtyPolicyAsync(taskId, ct);
-
-        if (policy == null)
-        {
-            return BadRequest(new
-            {
-                message = "Không xác định được policy số lượng cho task.",
-                task_id = taskId
-            });
-        }
-
-        var bundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
-            taskId,
+        var resolved = await ResolveQrPrepareUnifiedPolicyAsync(
+            taskForPrepare,
             ct);
 
-        var inputMode = string.IsNullOrWhiteSpace(taskForPrepare.input_mode)
+        return Ok(new
+        {
+            task_id = taskId,
+
+            process_code = resolved.process_code,
+            process_name = resolved.process_name,
+
+            qty_unit = resolved.qty_unit,
+            min_allowed = resolved.min_allowed,
+            max_allowed = resolved.max_allowed,
+            suggested_qty = resolved.suggested_qty,
+            happy_case_qty = resolved.happy_case_qty,
+
+            order_qty = resolved.order_qty,
+            sheets_required = resolved.sheets_required,
+            sheets_waste = resolved.sheets_waste,
+            sheets_total = resolved.sheets_total,
+            n_up = resolved.n_up,
+            number_of_plates = resolved.number_of_plates,
+
+            stage_index = resolved.stage_index,
+            stage_count = resolved.stage_count,
+
+            production_output_qty = resolved.production_output_qty,
+            production_output_unit = resolved.production_output_unit,
+
+            input_mode = resolved.input_mode,
+            allow_manual_input = resolved.allow_manual_input,
+            can_use_manual_input = true,
+            manual_input_optional = resolved.manual_input_optional,
+
+            is_group_production = resolved.is_group_production,
+            group_prod_id = resolved.group_prod_id,
+            group_total_qty = resolved.group_total_qty,
+
+            manual_input_hint = resolved.manual_input_hint,
+
+            consumable_materials = resolved.consumable_materials,
+            reference_inputs = resolved.reference_inputs
+        });
+    }
+
+    private sealed class QrPrepareUnifiedPolicy
+    {
+        public string? process_code { get; set; }
+
+        public string? process_name { get; set; }
+
+        public string qty_unit { get; set; } = "sp";
+
+        public int min_allowed { get; set; } = 1;
+
+        public int max_allowed { get; set; } = 1;
+
+        public int suggested_qty { get; set; } = 1;
+
+        public int happy_case_qty { get; set; } = 1;
+
+        public int order_qty { get; set; }
+
+        public int sheets_required { get; set; }
+
+        public int sheets_waste { get; set; }
+
+        public int sheets_total { get; set; }
+
+        public int n_up { get; set; } = 1;
+
+        public int number_of_plates { get; set; }
+
+        public int stage_index { get; set; }
+
+        public int stage_count { get; set; }
+
+        public int production_output_qty { get; set; }
+
+        public string production_output_unit { get; set; } = "sp";
+
+        public string input_mode { get; set; } = "ESTIMATE";
+
+        public bool allow_manual_input { get; set; }
+
+        public bool manual_input_optional { get; set; } = true;
+
+        public bool is_group_production { get; set; }
+
+        public int? group_prod_id { get; set; }
+
+        public int? group_total_qty { get; set; }
+
+        public string manual_input_hint { get; set; } = "";
+
+        public List<TaskConsumableMaterialDto> consumable_materials { get; set; } = new();
+
+        public List<TaskReferenceInputDto> reference_inputs { get; set; } = new();
+    }
+
+    private sealed class GroupQrComposition
+    {
+        public int link_qty_plan { get; set; }
+
+        public List<string> member_methods { get; set; } = new();
+
+        public bool has_nvl { get; set; }
+
+        public bool has_sub { get; set; }
+
+        public bool has_both { get; set; }
+
+        public string case_label { get; set; } = "";
+    }
+
+    private async Task<QrPrepareUnifiedPolicy> ResolveQrPrepareUnifiedPolicyAsync(
+        task taskMeta,
+        CancellationToken ct)
+    {
+        if (taskMeta == null)
+            throw new InvalidOperationException("Task not found.");
+
+        if (!taskMeta.prod_id.HasValue)
+            throw new InvalidOperationException("Task chưa gắn với production.");
+
+        var isGroup =
+            taskMeta.prod != null &&
+            string.Equals(taskMeta.prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase);
+
+        return isGroup
+            ? await ResolveGroupQrPrepareUnifiedPolicyAsync(taskMeta, ct)
+            : await ResolveSingleQrPrepareUnifiedPolicyAsync(taskMeta, ct);
+    }
+
+    private async Task<QrPrepareUnifiedPolicy> ResolveGroupQrPrepareUnifiedPolicyAsync(
+        task taskMeta,
+        CancellationToken ct)
+    {
+        if (taskMeta.prod == null)
+        {
+            taskMeta.prod = await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.prod_id == taskMeta.prod_id, ct);
+        }
+
+        if (taskMeta.prod == null)
+            throw new InvalidOperationException("Không tìm thấy production của group task.");
+
+        var prod = taskMeta.prod;
+
+        var bundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
+            taskMeta.task_id,
+            ct);
+
+        var composition = await ResolveGroupQrCompositionAsync(
+            taskMeta,
+            ct);
+
+        var groupStageCount = await _db.tasks
+            .AsNoTracking()
+            .CountAsync(x => x.prod_id == prod.prod_id, ct);
+
+        var processCode = NormQrProcessCode(taskMeta.process?.process_code);
+        var processName = taskMeta.process?.process_name;
+
+        var groupTotalQty = prod.group_total_qty > 0
+            ? prod.group_total_qty
+            : 0;
+
+        var linkQtyPlan = composition.link_qty_plan > 0
+            ? composition.link_qty_plan
+            : 0;
+
+        /*
+         * Source chính để đồng bộ:
+         * - reference_inputs.actual_qty_prev_stage: số BTP/input thực tế cần dùng.
+         * - Nếu actual chưa có thì fallback estimated.
+         *
+         * SUB-SUB / SUB-NVL:
+         * TaskScanService.GetTaskQrMaterialBundleAsync phải build reference_inputs
+         * theo order qty + hao phí downstream.
+         */
+        var referenceQty = ResolveMainReferenceQtyForPrepare(
+            bundle.reference_inputs);
+
+        var effectiveQtyDecimal =
+            referenceQty > 0 ? referenceQty :
+            linkQtyPlan > 0 ? linkQtyPlan :
+            groupTotalQty > 0 ? groupTotalQty :
+            1m;
+
+        var effectiveQty = CeilPositive(effectiveQtyDecimal);
+
+        if (effectiveQty <= 0)
+            effectiveQty = 1;
+
+        var referenceInputs = NormalizeReferenceInputsForQrPrepare(
+            bundle.reference_inputs,
+            effectiveQty,
+            forceActualTotal: referenceQty > 0);
+
+        var qtyUnit = ResolveQrUnit(
+            processCode,
+            referenceInputs,
+            fallback: "sp");
+
+        return new QrPrepareUnifiedPolicy
+        {
+            process_code = taskMeta.process?.process_code,
+            process_name = processName,
+
+            qty_unit = qtyUnit,
+            min_allowed = 1,
+            max_allowed = effectiveQty,
+            suggested_qty = effectiveQty,
+            happy_case_qty = effectiveQty,
+
+            order_qty = groupTotalQty > 0
+                ? groupTotalQty
+                : effectiveQty,
+
+            sheets_required = 0,
+            sheets_waste = 0,
+            sheets_total = 0,
+            n_up = 1,
+            number_of_plates = 0,
+
+            stage_index = taskMeta.seq_num ?? 1,
+            stage_count = groupStageCount,
+
+            production_output_qty = effectiveQty,
+            production_output_unit = qtyUnit,
+
+            input_mode = "MANUAL",
+            allow_manual_input = true,
+            manual_input_optional = false,
+
+            is_group_production = true,
+            group_prod_id = prod.prod_id,
+            group_total_qty = groupTotalQty,
+
+            manual_input_hint =
+                $"GROUP {composition.case_label}: QR prepare đã đồng bộ theo reference input thực tế. " +
+                $"group_total_qty={groupTotalQty}; task_link_qty_plan={linkQtyPlan}; " +
+                $"reference_qty={Math.Round(referenceQty, 4)}; effective_qty={effectiveQty}. " +
+                $"SUB-SUB/SUB-NVL dùng số BTP sau hao phí downstream, không dùng sheets_required/sheets_total của NVL estimate.",
+
+            consumable_materials = bundle.consumable_materials ?? new List<TaskConsumableMaterialDto>(),
+            reference_inputs = referenceInputs
+        };
+    }
+
+    private async Task<QrPrepareUnifiedPolicy> ResolveSingleQrPrepareUnifiedPolicyAsync(
+        task taskMeta,
+        CancellationToken ct)
+    {
+        var policy = await _taskRepo.GetQtyPolicyAsync(
+            taskMeta.task_id,
+            ct);
+
+        if (policy == null)
+            throw new InvalidOperationException("Không xác định được policy số lượng cho task.");
+
+        var bundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
+            taskMeta.task_id,
+            ct);
+
+        var inputMode = string.IsNullOrWhiteSpace(taskMeta.input_mode)
             ? "ESTIMATE"
-            : taskForPrepare.input_mode.Trim();
+            : taskMeta.input_mode.Trim();
 
         var forceManual = string.Equals(
             inputMode,
             "MANUAL",
             StringComparison.OrdinalIgnoreCase);
 
-        return Ok(new
-        {
-            task_id = taskId,
+        var processCode = NormQrProcessCode(policy.process_code);
 
+        /*
+         * Main reference qty:
+         * - Loại PLATE_FROM_RALO để không cộng bản kẽm vào số lượng sản phẩm.
+         * - Ưu tiên actual_qty_prev_stage.
+         * - Nếu actual chưa có thì dùng estimated_qty.
+         */
+        var referenceQty = ResolveMainReferenceQtyForPrepare(
+            bundle.reference_inputs);
+
+        var canOverrideByReference = CanQrPrepareUseReferenceQty(
+            processCode,
+            bundle.reference_inputs);
+
+        var baseSuggested = policy.suggested_qty > 0
+            ? policy.suggested_qty
+            : 1;
+
+        var baseMax = policy.max_allowed > 0
+            ? policy.max_allowed
+            : baseSuggested;
+
+        var effectiveQty = baseSuggested;
+
+        if (canOverrideByReference && referenceQty > 0)
+        {
+            effectiveQty = CeilPositive(referenceQty);
+        }
+
+        if (effectiveQty <= 0)
+            effectiveQty = 1;
+
+        /*
+         * FIX chính:
+         * Với SUB single full path / SPLIT / downstream sau BTP:
+         * max_allowed không được nhỏ hơn reference actual.
+         *
+         * Ví dụ BOI:
+         * policy.max_allowed = 1329 nhưng reference actual CAN = 3942
+         * => max_allowed phải thành 3942.
+         */
+        var maxAllowed = Math.Max(baseMax, effectiveQty);
+
+        var referenceInputs = NormalizeReferenceInputsForQrPrepare(
+            bundle.reference_inputs,
+            effectiveQty,
+            forceActualTotal: canOverrideByReference && referenceQty > 0);
+
+        var qtyUnit = ResolveQrUnit(
+            processCode,
+            referenceInputs,
+            fallback: policy.qty_unit);
+
+        return new QrPrepareUnifiedPolicy
+        {
             process_code = policy.process_code,
             process_name = policy.process_name,
 
-            qty_unit = policy.qty_unit,
-            min_allowed = policy.min_allowed,
-            max_allowed = policy.max_allowed,
-            suggested_qty = policy.suggested_qty,
-            happy_case_qty = policy.happy_case_qty,
+            qty_unit = qtyUnit,
+            min_allowed = policy.min_allowed > 0 ? policy.min_allowed : 1,
+            max_allowed = maxAllowed,
+            suggested_qty = effectiveQty,
+            happy_case_qty = effectiveQty,
 
             order_qty = policy.order_qty,
             sheets_required = policy.sheets_required,
@@ -232,545 +434,297 @@ public class TasksController : ControllerBase
             stage_index = policy.stage_index,
             stage_count = policy.stage_count,
 
-            production_output_qty = policy.suggested_qty,
-            production_output_unit = policy.qty_unit,
+            production_output_qty = effectiveQty,
+            production_output_unit = qtyUnit,
 
             input_mode = inputMode,
             allow_manual_input = forceManual,
-            can_use_manual_input = true,
             manual_input_optional = !forceManual,
 
             is_group_production = false,
-            group_prod_id = (int?)null,
-            group_total_qty = (int?)null,
+            group_prod_id = null,
+            group_total_qty = null,
 
-            manual_input_hint = forceManual
-                ? "Task này đang được cấu hình MANUAL, FE cần gửi manual input khi finish."
-                : "Task SINGLE có thể chọn nhập tay input. Nếu không chọn thì dùng estimate như logic cũ.",
+            manual_input_hint =
+                forceManual
+                    ? $"Task MANUAL. QR prepare dùng policy đồng bộ. base_max={baseMax}; reference_qty={Math.Round(referenceQty, 4)}; effective_qty={effectiveQty}."
+                    : $"Task SINGLE/SPLIT. QR prepare dùng policy đồng bộ. base_max={baseMax}; reference_qty={Math.Round(referenceQty, 4)}; effective_qty={effectiveQty}.",
 
-            consumable_materials = bundle.consumable_materials,
-            reference_inputs = bundle.reference_inputs
-        });
+            consumable_materials = bundle.consumable_materials ?? new List<TaskConsumableMaterialDto>(),
+            reference_inputs = referenceInputs
+        };
     }
 
-    //[HttpPost("qr")]
-    //[Consumes("multipart/form-data")]
-    //[RequestSizeLimit(30 * 1024 * 1024)]
-    //public async Task<ActionResult<TaskQrResponse>> CreateQr(
-    //[FromForm] CreateTaskQrFormRequest form,
-    //CancellationToken ct)
-    //{
-    //    List<TaskSubProductLeftoverInputDto> formSubProductLeftovers;
-
-    //    if (form == null)
-    //    {
-    //        return BadRequest(new
-    //        {
-    //            message = "Request body is required."
-    //        });
-    //    }
-
-    //    if (form.task_id <= 0)
-    //    {
-    //        return BadRequest(new
-    //        {
-    //            message = "task_id không hợp lệ.",
-    //            task_id = form.task_id
-    //        });
-    //    }
-
-    //    List<TaskMaterialUsageInputDto> formMaterials;
-    //    List<TaskReferenceUsageInputDto> formRefs;
-    //    List<TaskOutputReportDto> formOutputs;
-    //    List<string> imageUrls;
-
-    //    try
-    //    {
-    //        formMaterials = ParseJsonList<TaskMaterialUsageInputDto>(
-    //            form.materials_json);
-
-    //        formRefs = ParseJsonList<TaskReferenceUsageInputDto>(
-    //            form.reference_inputs_json);
-
-    //        formOutputs = ParseJsonList<TaskOutputReportDto>(
-    //            form.outputs_json);
-
-    //        formSubProductLeftovers = ParseJsonList<TaskSubProductLeftoverInputDto>(
-    //            form.sub_product_leftovers_json);
-
-    //        imageUrls = await UploadTaskReportImagesAsync(
-    //            form.images,
-    //            ct);
-    //    }
-    //    catch (InvalidOperationException ex)
-    //    {
-    //        return BadRequest(new
-    //        {
-    //            message = ex.Message,
-    //            task_id = form.task_id
-    //        });
-    //    }
-
-    //    var reportImageUrl = imageUrls.Count == 0
-    //        ? null
-    //        : string.Join(",", imageUrls);
-
-    //    var req = new CreateTaskQrRequest
-    //    {
-    //        task_id = form.task_id,
-    //        ttl_minutes = form.ttl_minutes,
-    //        qty_good = form.qty_good,
-    //        use_manual_input = form.use_manual_input,
-    //        materials = formMaterials
-    //    };
-
-    //    var reason = string.IsNullOrWhiteSpace(form.reason)
-    //        ? null
-    //        : form.reason.Trim();
-
-    //    var t = await _taskRepo.GetByIdAsync(req.task_id);
-
-    //    if (t == null)
-    //    {
-    //        return NotFound(new
-    //        {
-    //            message = "Task not found",
-    //            task_id = req.task_id
-    //        });
-    //    }
-
-    //    var dep = await ProductionDependencyValidator.CheckTaskCanStartAsync(
-    //        _db,
-    //        req.task_id,
-    //        ct);
-
-    //    if (!dep.can_start)
-    //    {
-    //        var currentTaskMeta = await _db.tasks
-    //            .AsNoTracking()
-    //            .Include(x => x.process)
-    //            .FirstOrDefaultAsync(x => x.task_id == req.task_id, ct);
-
-    //        return BadRequest(new
-    //        {
-    //            message = "Chưa thể tạo QR vì công đoạn trước đó chưa hoàn thành.",
-    //            task_id = req.task_id,
-    //            prod_id = currentTaskMeta?.prod_id,
-    //            process_code = currentTaskMeta?.process?.process_code,
-    //            detail = dep.message,
-    //            issues = dep.issues
-    //        });
-    //    }
-
-    //    var taskMeta = await _db.tasks
-    //        .AsNoTracking()
-    //        .Include(x => x.prod)
-    //        .Include(x => x.process)
-    //        .FirstOrDefaultAsync(x => x.task_id == req.task_id, ct);
-
-    //    if (taskMeta == null)
-    //    {
-    //        return NotFound(new
-    //        {
-    //            message = "Task not found",
-    //            task_id = req.task_id
-    //        });
-    //    }
-
-    //    List<TaskReferenceUsageInputDto> qrReferenceInputs;
-
-    //    try
-    //    {
-    //        /*
-    //         * reference_inputs_json gốc được giữ trong submitted_payload.reference_inputs.
-    //         * qrReferenceInputs là bản đã merge sub_product_leftovers_json để đưa vào token.
-    //         */
-    //        qrReferenceInputs = BuildQrReferenceInputsWithSubProductLeftovers(
-    //            formRefs,
-    //            formSubProductLeftovers,
-    //            taskMeta?.process?.process_code,
-    //            taskMeta?.process?.process_name);
-    //    }
-    //    catch (InvalidOperationException ex)
-    //    {
-    //        return BadRequest(new
-    //        {
-    //            message = ex.Message,
-    //            task_id = req.task_id
-    //        });
-    //    }
-
-    //    var isGroupTask =
-    //        taskMeta.prod != null &&
-    //        string.Equals(
-    //            taskMeta.prod.prod_kind,
-    //            "GROUP",
-    //            StringComparison.OrdinalIgnoreCase);
-
-    //    var isManualTask =
-    //        string.Equals(
-    //            taskMeta.input_mode,
-    //            "MANUAL",
-    //            StringComparison.OrdinalIgnoreCase);
-
-    //    var ttlMinutes = req.ttl_minutes <= 0
-    //        ? 10
-    //        : req.ttl_minutes;
-
-    //    var ttl = TimeSpan.FromMinutes(ttlMinutes);
-
-    //    /*
-    //     * CASE 1: GROUP TASK
-    //     * Group luôn manual.
-    //     * Token chứa materials/referenceInputs/outputs/reason/images.
-    //     * Response trả thêm submitted_payload để FE thấy lại đầy đủ JSON đã gửi.
-    //     */
-    //    if (isGroupTask)
-    //    {
-    //        var preparedBundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
-    //            req.task_id,
-    //            ct);
-
-    //        var groupPolicy = await ResolveGroupQrQtyPolicyAsync(
-    //            taskMeta,
-    //            preparedReferenceInputs: preparedBundle.reference_inputs,
-    //            submittedReferenceInputs: qrReferenceInputs,
-    //            ct: ct);
-
-    //        var maxAllowed = groupPolicy.MaxAllowed;
-    //        var suggestedQty = groupPolicy.SuggestedQty;
-
-    //        if (maxAllowed <= 0)
-    //        {
-    //            return BadRequest(new
-    //            {
-    //                message = "Production ghép chưa có số lượng hợp lệ.",
-    //                task_id = req.task_id,
-    //                prod_id = taskMeta.prod_id
-    //            });
-    //        }
-
-    //        var isAuto = !req.qty_good.HasValue || req.qty_good.Value <= 0;
-
-    //        var qtyGood = isAuto
-    //            ? suggestedQty
-    //            : req.qty_good!.Value;
-
-    //        if (qtyGood <= 0)
-    //        {
-    //            return BadRequest(new
-    //            {
-    //                message = "Số lượng báo cáo phải lớn hơn 0.",
-    //                task_id = req.task_id,
-    //                input_qty_good = qtyGood
-    //            });
-    //        }
-
-    //        if (qtyGood > maxAllowed)
-    //        {
-    //            return BadRequest(new
-    //            {
-    //                message =
-    //                    $"Số lượng báo cáo group không hợp lệ. " +
-    //                    $"Công đoạn [{taskMeta.process?.process_code} - {taskMeta.process?.process_name}] " +
-    //                    $"chỉ cho phép tối đa {maxAllowed} {groupPolicy.QtyUnit}.",
-
-    //                task_id = req.task_id,
-    //                input_qty_good = qtyGood,
-    //                max_allowed = maxAllowed,
-    //                suggested_qty = suggestedQty,
-    //                qty_unit = groupPolicy.QtyUnit,
-    //                hint = groupPolicy.Hint
-    //            });
-    //        }
-
-    //        var token = _tokenSvc.CreateToken(
-    //            req.task_id,
-    //            qtyGood,
-    //            req.materials,
-    //            ttl,
-    //            useManualInput: true,
-    //            reason: reason,
-    //            reportImageUrl: reportImageUrl,
-    //            referenceInputs: qrReferenceInputs,
-    //            outputs: formOutputs);
-
-    //        var response = new TaskQrResponse
-    //        {
-    //            task_id = req.task_id,
-    //            token = token,
-    //            expires_at_unix = DateTimeOffset.UtcNow
-    //                .Add(ttl)
-    //                .ToUnixTimeSeconds(),
-
-    //            qty_good_used = qtyGood,
-    //            is_auto_filled = isAuto,
-
-    //            min_allowed = groupPolicy.MinAllowed,
-    //            max_allowed = groupPolicy.MaxAllowed,
-    //            suggested_qty = groupPolicy.SuggestedQty,
-    //            qty_unit = groupPolicy.QtyUnit,
-
-    //            process_code = taskMeta.process?.process_code,
-    //            process_name = taskMeta.process?.process_name,
-
-    //            embedded_material_count = req.materials.Count,
-
-    //            consumable_materials = preparedBundle.consumable_materials,
-    //            reference_inputs = groupPolicy.ReferenceInputs
-    //        };
-
-    //        return Ok(AttachSubmittedPayloadToQrResponse(
-    //            response,
-    //            form,
-    //            formMaterials,
-    //            formRefs,
-    //            qrReferenceInputs,
-    //            formOutputs,
-    //            formSubProductLeftovers,
-    //            imageUrls,
-    //            reason,
-    //            reportImageUrl));
-    //    }
-
-    //    /*
-    //     * CASE 2: SINGLE MANUAL
-    //     * FE chọn use_manual_input=true hoặc task input_mode=MANUAL.
-    //     */
-    //    if (req.use_manual_input || isManualTask)
-    //    {
-    //        var manualPolicy = await _taskRepo.GetQtyPolicyAsync(
-    //            req.task_id,
-    //            ct);
-
-    //        if (manualPolicy == null)
-    //        {
-    //            return BadRequest(new
-    //            {
-    //                message = "Không xác định được ngưỡng số lượng hợp lệ cho công đoạn này.",
-    //                task_id = req.task_id
-    //            });
-    //        }
-
-    //        var isAuto = !req.qty_good.HasValue || req.qty_good.Value <= 0;
-
-    //        int qtyGood;
-
-    //        if (isAuto)
-    //        {
-    //            qtyGood = manualPolicy.suggested_qty;
-
-    //            if (qtyGood <= 0)
-    //                qtyGood = 1;
-    //        }
-    //        else
-    //        {
-    //            qtyGood = req.qty_good!.Value;
-
-    //            if (qtyGood < manualPolicy.min_allowed ||
-    //                qtyGood > manualPolicy.max_allowed)
-    //            {
-    //                return BadRequest(new
-    //                {
-    //                    message =
-    //                        $"Số lượng báo cáo không hợp lệ. " +
-    //                        $"Công đoạn [{manualPolicy.process_code} - {manualPolicy.process_name}] " +
-    //                        $"chỉ cho phép trong khoảng {manualPolicy.min_allowed} -> {manualPolicy.max_allowed} {manualPolicy.qty_unit}.",
-
-    //                    task_id = req.task_id,
-    //                    input_qty_good = qtyGood,
-    //                    min_allowed = manualPolicy.min_allowed,
-    //                    max_allowed = manualPolicy.max_allowed,
-    //                    suggested_qty = manualPolicy.suggested_qty,
-    //                    qty_unit = manualPolicy.qty_unit
-    //                });
-    //            }
-    //        }
-
-    //        var token = _tokenSvc.CreateToken(
-    //            req.task_id,
-    //            qtyGood,
-    //            req.materials,
-    //            ttl,
-    //            useManualInput: true,
-    //            reason: reason,
-    //            reportImageUrl: reportImageUrl,
-    //            referenceInputs: qrReferenceInputs,
-    //            outputs: formOutputs);
-
-    //        var response = new TaskQrResponse
-    //        {
-    //            task_id = req.task_id,
-    //            token = token,
-    //            expires_at_unix = DateTimeOffset.UtcNow
-    //                .Add(ttl)
-    //                .ToUnixTimeSeconds(),
-
-    //            qty_good_used = qtyGood,
-    //            is_auto_filled = isAuto,
-
-    //            min_allowed = manualPolicy.min_allowed,
-    //            max_allowed = manualPolicy.max_allowed,
-    //            suggested_qty = manualPolicy.suggested_qty,
-    //            qty_unit = manualPolicy.qty_unit,
-
-    //            process_code = manualPolicy.process_code,
-    //            process_name = manualPolicy.process_name,
-
-    //            embedded_material_count = req.materials.Count,
-
-    //            consumable_materials = new List<TaskConsumableMaterialDto>(),
-    //            reference_inputs = new List<TaskReferenceInputDto>()
-    //        };
-
-    //        return Ok(AttachSubmittedPayloadToQrResponse(
-    //            response,
-    //            form,
-    //            formMaterials,
-    //            formRefs,
-    //            qrReferenceInputs,
-    //            formOutputs,
-    //            formSubProductLeftovers,
-    //            imageUrls,
-    //            reason,
-    //            reportImageUrl));
-    //    }
-
-    //    /*
-    //     * CASE 3: SINGLE ESTIMATE FLOW CŨ
-    //     * materials_json FE gửi có thể chỉ là override.
-    //     * inputMaterials là materials thực sự được build/nhúng vào QR token.
-    //     * submitted_payload vẫn trả lại đúng JSON FE đã nhập.
-    //     */
-    //    var policy = await _taskRepo.GetQtyPolicyAsync(
-    //        req.task_id,
-    //        ct);
-
-    //    if (policy == null)
-    //    {
-    //        return BadRequest(new
-    //        {
-    //            message = "Không xác định được ngưỡng số lượng hợp lệ cho công đoạn này.",
-    //            task_id = req.task_id
-    //        });
-    //    }
-
-    //    var oldFlowIsAuto = !req.qty_good.HasValue || req.qty_good.Value <= 0;
-
-    //    int oldFlowQtyGood;
-
-    //    if (oldFlowIsAuto)
-    //    {
-    //        oldFlowQtyGood = policy.suggested_qty;
-
-    //        if (oldFlowQtyGood <= 0)
-    //            oldFlowQtyGood = 1;
-    //    }
-    //    else
-    //    {
-    //        oldFlowQtyGood = req.qty_good!.Value;
-
-    //        if (oldFlowQtyGood < policy.min_allowed ||
-    //            oldFlowQtyGood > policy.max_allowed)
-    //        {
-    //            return BadRequest(new
-    //            {
-    //                message =
-    //                    $"Số lượng báo cáo không hợp lệ. " +
-    //                    $"Công đoạn [{policy.process_code} - {policy.process_name}] " +
-    //                    $"chỉ cho phép trong khoảng {policy.min_allowed} -> {policy.max_allowed} {policy.qty_unit}.",
-
-    //                task_id = req.task_id,
-    //                input_qty_good = oldFlowQtyGood,
-
-    //                min_allowed = policy.min_allowed,
-    //                max_allowed = policy.max_allowed,
-    //                suggested_qty = policy.suggested_qty,
-    //                qty_unit = policy.qty_unit
-    //            });
-    //        }
-    //    }
-
-    //    List<TaskMaterialUsageInputDto> inputMaterials;
-
-    //    try
-    //    {
-    //        inputMaterials = await _scanSvc.BuildMaterialUsageForQrAsync(
-    //            req.task_id,
-    //            req.materials,
-    //            ct);
-    //    }
-    //    catch (InvalidOperationException ex)
-    //    {
-    //        return BadRequest(new
-    //        {
-    //            message = ex.Message,
-    //            task_id = req.task_id,
-
-    //            process_code = policy.process_code,
-    //            process_name = policy.process_name,
-
-    //            suggested_qty = policy.suggested_qty,
-    //            qty_unit = policy.qty_unit
-    //        });
-    //    }
-
-    //    var oldFlowToken = _tokenSvc.CreateToken(
-    //        req.task_id,
-    //        oldFlowQtyGood,
-    //        inputMaterials,
-    //        ttl,
-    //        useManualInput: false,
-    //        reason: reason,
-    //        reportImageUrl: reportImageUrl,
-    //        referenceInputs: qrReferenceInputs,
-    //        outputs: formOutputs);
-
-    //    var qrMaterialBundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
-    //        req.task_id,
-    //        ct);
-
-    //    var oldFlowResponse = new TaskQrResponse
-    //    {
-    //        task_id = req.task_id,
-    //        token = oldFlowToken,
-    //        expires_at_unix = DateTimeOffset.UtcNow
-    //            .Add(ttl)
-    //            .ToUnixTimeSeconds(),
-
-    //        qty_good_used = oldFlowQtyGood,
-    //        is_auto_filled = oldFlowIsAuto,
-
-    //        min_allowed = policy.min_allowed,
-    //        max_allowed = policy.max_allowed,
-    //        suggested_qty = policy.suggested_qty,
-    //        qty_unit = policy.qty_unit,
-
-    //        process_code = policy.process_code,
-    //        process_name = policy.process_name,
-
-    //        /*
-    //         * embedded_material_count là số material thực sự được nhúng token.
-    //         * submitted_payload.materials vẫn là materials_json FE gửi.
-    //         */
-    //        embedded_material_count = inputMaterials.Count,
-
-    //        consumable_materials = qrMaterialBundle.consumable_materials,
-    //        reference_inputs = qrMaterialBundle.reference_inputs
-    //    };
-
-    //    return Ok(AttachSubmittedPayloadToQrResponse(
-    //        oldFlowResponse,
-    //        form,
-    //        formMaterials,
-    //        formRefs,
-    //        qrReferenceInputs,
-    //        formOutputs,
-    //        formSubProductLeftovers,
-    //        imageUrls,
-    //        reason,
-    //        reportImageUrl));
-    //}
+    private async Task<GroupQrComposition> ResolveGroupQrCompositionAsync(
+        task groupTask,
+        CancellationToken ct)
+    {
+        var result = new GroupQrComposition();
+
+        var links = await _db.task_links
+            .AsNoTracking()
+            .Where(x =>
+                x.group_task_id == groupTask.task_id &&
+                (
+                    x.status == null ||
+                    x.status.ToUpper() != "CANCELLED"
+                ))
+            .ToListAsync(ct);
+
+        result.link_qty_plan = links.Sum(x => Math.Max(x.qty_plan, 0));
+
+        var singleProdIds = links
+            .Where(x => x.single_prod_id > 0)
+            .Select(x => x.single_prod_id)
+            .Distinct()
+            .ToList();
+
+        if (singleProdIds.Count == 0)
+        {
+            result.case_label = "NO_LINK";
+            return result;
+        }
+
+        var methods = await _db.productions
+            .AsNoTracking()
+            .Where(x => singleProdIds.Contains(x.prod_id))
+            .Select(x => x.prod_method)
+            .ToListAsync(ct);
+
+        result.member_methods = methods
+            .Select(NormQrMethod)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        result.has_nvl = result.member_methods.Contains("NVL", StringComparer.OrdinalIgnoreCase);
+        result.has_sub = result.member_methods.Contains("SUB", StringComparer.OrdinalIgnoreCase);
+        result.has_both = result.member_methods.Contains("BOTH", StringComparer.OrdinalIgnoreCase);
+
+        if (result.has_sub && result.has_nvl)
+            result.case_label = "SUB-NVL";
+        else if (result.has_sub && !result.has_nvl && !result.has_both)
+            result.case_label = "SUB-SUB";
+        else if (result.has_nvl && !result.has_sub && !result.has_both)
+            result.case_label = "NVL-NVL";
+        else if (result.has_both)
+            result.case_label = "HAS-BOTH";
+        else
+            result.case_label = "UNKNOWN";
+
+        return result;
+    }
+
+    private static decimal ResolveMainReferenceQtyForPrepare(
+        IReadOnlyList<TaskReferenceInputDto>? refs)
+    {
+        if (refs == null || refs.Count == 0)
+            return 0m;
+
+        var candidates = refs
+            .Where(IsMainQtyReferenceForQrPrepare)
+            .ToList();
+
+        if (candidates.Count == 0)
+            return 0m;
+
+        /*
+         * Ưu tiên actual_qty_prev_stage.
+         * Nếu actual chưa có thì fallback estimated_qty.
+         */
+        var actualTotal = candidates
+            .Where(x => x.actual_qty_prev_stage > 0)
+            .Sum(x => x.actual_qty_prev_stage);
+
+        if (actualTotal > 0)
+            return actualTotal;
+
+        return candidates
+            .Where(x => x.estimated_qty > 0)
+            .Sum(x => x.estimated_qty);
+    }
+
+    private static List<TaskReferenceInputDto> NormalizeReferenceInputsForQrPrepare(
+        IReadOnlyList<TaskReferenceInputDto>? refs,
+        int effectiveQty,
+        bool forceActualTotal)
+    {
+        var result = (refs ?? Array.Empty<TaskReferenceInputDto>())
+            .Select(x => new TaskReferenceInputDto
+            {
+                input_code = x.input_code,
+                input_name = x.input_name,
+                unit = string.IsNullOrWhiteSpace(x.unit) ? "sp" : x.unit,
+
+                /*
+                 * Không phá estimated_qty cũ.
+                 */
+                estimated_qty = x.estimated_qty,
+
+                actual_qty_prev_stage = x.actual_qty_prev_stage
+            })
+            .ToList();
+
+        if (!forceActualTotal || effectiveQty <= 0)
+            return result;
+
+        var mainRefs = result
+            .Where(IsMainQtyReferenceForQrPrepare)
+            .ToList();
+
+        if (mainRefs.Count == 0)
+            return result;
+
+        /*
+         * Nếu chỉ có 1 reference chính, set actual thẳng bằng effectiveQty.
+         * Đây là case thường gặp: PHU -> CAN, CAN -> BOI, IN -> PHU...
+         */
+        if (mainRefs.Count == 1)
+        {
+            var item = mainRefs[0];
+
+            item.actual_qty_prev_stage = effectiveQty;
+
+            if (item.estimated_qty <= 0)
+                item.estimated_qty = effectiveQty;
+
+            return result;
+        }
+
+        /*
+         * Nếu có nhiều reference chính, phân bổ theo tỷ lệ actual/estimated hiện có.
+         */
+        var totalWeight = mainRefs.Sum(x =>
+            x.actual_qty_prev_stage > 0
+                ? x.actual_qty_prev_stage
+                : x.estimated_qty > 0
+                    ? x.estimated_qty
+                    : 1m);
+
+        if (totalWeight <= 0)
+            totalWeight = mainRefs.Count;
+
+        decimal remaining = effectiveQty;
+
+        for (var i = 0; i < mainRefs.Count; i++)
+        {
+            var item = mainRefs[i];
+
+            decimal value;
+
+            if (i == mainRefs.Count - 1)
+            {
+                value = remaining;
+            }
+            else
+            {
+                var weight =
+                    item.actual_qty_prev_stage > 0
+                        ? item.actual_qty_prev_stage
+                        : item.estimated_qty > 0
+                            ? item.estimated_qty
+                            : 1m;
+
+                value = Math.Round(
+                    effectiveQty * weight / totalWeight,
+                    4,
+                    MidpointRounding.AwayFromZero);
+
+                if (value > remaining)
+                    value = remaining;
+            }
+
+            item.actual_qty_prev_stage = value;
+
+            if (item.estimated_qty <= 0)
+                item.estimated_qty = value;
+
+            remaining -= value;
+        }
+
+        return result;
+    }
+
+    private static bool CanQrPrepareUseReferenceQty(
+        string? processCode,
+        IReadOnlyList<TaskReferenceInputDto>? refs)
+    {
+        var code = NormQrProcessCode(processCode);
+
+        if (string.IsNullOrWhiteSpace(code))
+            return false;
+
+        /*
+         * RALO không có BTP input.
+         * CAT thường là cắt giấy, giữ policy cũ.
+         */
+        if (code is "RALO" or "CAT")
+            return false;
+
+        if (refs == null || refs.Count == 0)
+            return false;
+
+        return refs.Any(IsMainQtyReferenceForQrPrepare);
+    }
+
+    private static bool IsMainQtyReferenceForQrPrepare(TaskReferenceInputDto? input)
+    {
+        if (input == null)
+            return false;
+
+        var code = NormQrProcessCode(input.input_code);
+        var unit = (input.unit ?? "").Trim().ToLowerInvariant();
+
+        /*
+         * Không cộng bản kẽm vào số lượng sản phẩm.
+         * IN có thể có:
+         * - CAT: giấy đã cắt
+         * - PLATE_FROM_RALO: bản kẽm in
+         */
+        if (code == "PLATE_FROM_RALO")
+            return false;
+
+        if (unit is "bản" or "ban" or "plate")
+            return false;
+
+        if (input.actual_qty_prev_stage <= 0 && input.estimated_qty <= 0)
+            return false;
+
+        return true;
+    }
+
+    private static string ResolveQrUnit(
+        string? processCode,
+        IReadOnlyList<TaskReferenceInputDto>? refs,
+        string? fallback)
+    {
+        var mainRef = refs?
+            .FirstOrDefault(IsMainQtyReferenceForQrPrepare);
+
+        if (!string.IsNullOrWhiteSpace(mainRef?.unit))
+            return mainRef!.unit!;
+
+        if (!string.IsNullOrWhiteSpace(fallback))
+            return fallback!;
+
+        var code = NormQrProcessCode(processCode);
+
+        return code switch
+        {
+            "RALO" => "bản",
+            "CAT" => "tờ",
+            "IN" => "tờ",
+            "BOI" => "tờ",
+            _ => "sp"
+        };
+    }
+
+    private static string NormQrMethod(string? value)
+    {
+        return (value ?? "")
+            .Trim()
+            .ToUpperInvariant();
+    }
 
     [HttpPost("qr")]
     [Consumes("multipart/form-data")]
@@ -1899,6 +1853,13 @@ public class TasksController : ControllerBase
     {
         if (taskMeta?.prod == null)
         {
+            taskMeta!.prod = await _db.productions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.prod_id == taskMeta.prod_id, ct);
+        }
+
+        if (taskMeta?.prod == null)
+        {
             return new GroupQrQtyPolicy
             {
                 IsGroupSub = false,
@@ -1912,72 +1873,83 @@ public class TasksController : ControllerBase
             };
         }
 
-        var prod = taskMeta.prod;
-
-        var groupTotalQty = prod.group_total_qty > 0
-            ? prod.group_total_qty
-            : 1;
-
-        var refs = preparedReferenceInputs?.ToList()
-            ?? new List<TaskReferenceInputDto>();
-
-        if (refs.Count == 0)
-        {
-            var bundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
-                taskMeta.task_id,
-                ct);
-
-            refs = bundle.reference_inputs?.ToList()
-                ?? new List<TaskReferenceInputDto>();
-        }
+        /*
+         * Dùng lại unified policy để POST /qr và GET /qr-prepare cùng số.
+         */
+        var unified = await ResolveGroupQrPrepareUnifiedPolicyAsync(
+            taskMeta,
+            ct);
 
         /*
-         * preparedQty lúc này đã được TaskScanService normalize theo flow:
-         * - PHU: tổng input từ IN/SUB/MIXED.
-         * - CAN: output PHU nếu PHU đã Finished, hoặc estimate PHU.
-         * - BOI: output CAN nếu CAN đã Finished, hoặc estimate CAN.
+         * Nếu FE submit reference_inputs_json khi tạo QR,
+         * ưu tiên số FE submit để không lệch token.
          */
-        var preparedQty = ResolveGroupPreparedQtyForQrPolicy(refs);
-
-        var submittedQty = ResolveActualQtyFromSubmittedReferenceInputs(
+        var submittedQty = ResolveSubmittedReferenceQtyForQr(
             submittedReferenceInputs);
 
-        var effectiveQtyDecimal = submittedQty > 0
-            ? submittedQty
-            : preparedQty;
+        if (submittedQty > 0)
+        {
+            var submittedEffectiveQty = CeilPositive(submittedQty);
 
-        var effectiveQty = CeilPositive(effectiveQtyDecimal);
+            unified.max_allowed = Math.Max(unified.max_allowed, submittedEffectiveQty);
+            unified.suggested_qty = submittedEffectiveQty;
+            unified.happy_case_qty = submittedEffectiveQty;
+            unified.production_output_qty = submittedEffectiveQty;
 
-        if (effectiveQty <= 0)
-            effectiveQty = groupTotalQty;
+            unified.reference_inputs = NormalizeReferenceInputsForQrPrepare(
+                unified.reference_inputs,
+                submittedEffectiveQty,
+                forceActualTotal: true);
 
-        var normalizedRefs = NormalizeGroupReferenceInputsForQrPolicy(
-            refs,
-            effectiveQty);
-
-        var methodLabel = string.IsNullOrWhiteSpace(prod.prod_method)
-            ? "GROUP"
-            : prod.prod_method.Trim().ToUpperInvariant();
+            unified.manual_input_hint +=
+                $" FE submitted reference_qty={Math.Round(submittedQty, 4)} nên QR token dùng suggested_qty={submittedEffectiveQty}.";
+        }
 
         return new GroupQrQtyPolicy
         {
-            IsGroupSub = normalizedRefs.Count > 0,
-
-            MinAllowed = 1,
-            MaxAllowed = effectiveQty,
-            SuggestedQty = effectiveQty,
-            HappyCaseQty = effectiveQty,
-
-            QtyUnit = "sp",
-
-            ReferenceInputs = normalizedRefs,
-
-            Hint =
-                $"GROUP {methodLabel}: qty_good lấy theo flow tuần tự đã đồng bộ với groupProduction/detail. " +
-                $"group_total_qty={groupTotalQty}; prepared_reference_qty={Math.Round(preparedQty, 4)}; " +
-                $"submitted_reference_qty={Math.Round(submittedQty, 4)}; effective_qty={effectiveQty}. " +
-                $"Công đoạn sau lấy output công đoạn trước làm input chuẩn."
+            IsGroupSub = true,
+            MinAllowed = unified.min_allowed,
+            MaxAllowed = unified.max_allowed,
+            SuggestedQty = unified.suggested_qty,
+            HappyCaseQty = unified.happy_case_qty,
+            QtyUnit = unified.qty_unit,
+            Hint = unified.manual_input_hint,
+            ReferenceInputs = unified.reference_inputs
         };
+    }
+
+    private static decimal ResolveSubmittedReferenceQtyForQr(
+        IReadOnlyList<TaskReferenceUsageInputDto>? refs)
+    {
+        if (refs == null || refs.Count == 0)
+            return 0m;
+
+        return refs
+            .Where(x => x != null)
+            .Where(x => IsMainQtyReferenceForSubmittedQr(x.input_code, x.unit))
+            .Sum(x =>
+            {
+                var used = x.quantity_used > 0 ? x.quantity_used : 0m;
+                var left = x.quantity_left > 0 ? x.quantity_left : 0m;
+
+                return used + left;
+            });
+    }
+
+    private static bool IsMainQtyReferenceForSubmittedQr(
+        string? inputCode,
+        string? unit)
+    {
+        var code = NormQrProcessCode(inputCode);
+        var u = (unit ?? "").Trim().ToLowerInvariant();
+
+        if (code == "PLATE_FROM_RALO")
+            return false;
+
+        if (u is "bản" or "ban" or "plate")
+            return false;
+
+        return true;
     }
 
     private static decimal ResolveGroupPreparedQtyForQrPolicy(

@@ -64,7 +64,7 @@ public static class ProductionDependencyValidator
                 {
                     new()
                     {
-                        message = $"Production {prodId} chưa có task."
+                        message = $"LSX {prodId} chưa có task."
                     }
                 }
             };
@@ -284,7 +284,7 @@ public static class ProductionDependencyValidator
                     previous_task_id = previous?.task_id,
                     previous_task_status = previous?.status,
                     message =
-                        $"Order {orderId}: công đoạn {currentProcessCode} chưa được bắt đầu vì công đoạn trước đó {previousCode} chưa Finished."
+                        $"Order {orderId}: công đoạn {taskId} chưa được bắt đầu vì công đoạn trước đó {previous?.task_id} chưa Finished."
                 });
             }
         }
