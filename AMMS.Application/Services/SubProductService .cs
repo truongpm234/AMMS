@@ -248,13 +248,7 @@ namespace AMMS.Application.Services
             if (subProductIds.Count == 0)
                 throw new ArgumentException("sub_product_ids is required");
 
-            /*
-             * FIX:
-             * Dùng AsNoTracking vì API này chỉ generate file PDF preview/import receipt
-             * rồi upload Cloudinary, KHÔNG cập nhật database.
-             */
             var items = await _db.sub_products
-                .AsNoTracking()
                 .Include(x => x.product_type)
                 .Where(x => subProductIds.Contains(x.id))
                 .OrderBy(x => x.id)
@@ -280,24 +274,12 @@ namespace AMMS.Application.Services
             var now = AppTime.NowVnUnspecified();
             var receiptNo = $"PNBTP-{now:yyyyMMddHHmmss}";
             var fileName = $"{receiptNo}.pdf";
+            var publicId = $"sub-product-imports/{receiptNo}";
 
-            /*
-             * Có thể giữ publicId cũ không đuôi .pdf.
-             * Nhưng để Cloudinary raw file trả URL rõ là PDF hơn,
-             * nên để publicId có .pdf.
-             */
-            var publicId = $"sub-product-imports/{receiptNo}.pdf";
-
-            /*
-             * Tạo PDF như logic cũ.
-             */
             var pdfBytes = SubProductImportReceiptPdfHelper.GeneratePdf(
                 items,
                 receiptNo,
                 now);
-
-            if (pdfBytes == null || pdfBytes.Length == 0)
-                throw new InvalidOperationException("Không tạo được file PDF phiếu nhập bán thành phẩm.");
 
             string cloudUrl;
 
@@ -310,30 +292,18 @@ namespace AMMS.Application.Services
                     publicId);
             }
 
-            if (string.IsNullOrWhiteSpace(cloudUrl))
-                throw new InvalidOperationException("Upload file PDF lên Cloudinary thất bại.");
+            foreach (var item in items)
+            {
+                item.import_file = cloudUrl;
+                item.updated_at = now;
+            }
 
-            /*
-             * FIX CHÍNH:
-             * KHÔNG set:
-             * item.import_file = cloudUrl;
-             * item.updated_at = now;
-             *
-             * KHÔNG gọi:
-             * await _db.SaveChangesAsync(ct);
-             *
-             * API này chỉ trả link file vừa generate/upload.
-             */
+            await _db.SaveChangesAsync(ct);
 
             return new SubProductImportReceiptBatchResponseDto
             {
                 success = true,
-
-                /*
-                 * Link file PDF Cloudinary trả về cho FE.
-                 */
                 import_file = cloudUrl,
-
                 file_name = fileName,
                 total_selected = items.Count,
 
@@ -350,12 +320,7 @@ namespace AMMS.Application.Services
 
                     is_active = x.is_active,
                     is_imported = x.is_imported,
-
-                    /*
-                     * Không lưu DB nhưng response vẫn trả link file vừa tạo
-                     * để FE có thể hiển thị/download ngay.
-                     */
-                    import_file = cloudUrl,
+                    import_file = x.import_file,
 
                     paper_material_code = x.paper_material_code,
                     wave_material_code = x.wave_material_code,
@@ -368,9 +333,7 @@ namespace AMMS.Application.Services
                     total_cost_to_stage = x.total_cost_to_stage
                 }).ToList(),
 
-                message =
-                    $"Tạo file phiếu nhập bán thành phẩm thành công cho {items.Count} dòng. " +
-                    $"File đã upload Cloudinary nhưng chưa lưu vào database."
+                message = $"Tạo phiếu nhập bán thành phẩm thành công cho {items.Count} dòng."
             };
         }
 

@@ -1380,16 +1380,10 @@ namespace AMMS.Application.Services
                     publicId);
             }
 
-            var updatedCount = await _repo.SaveImportReceivePathForProdIdsAsync(
-                prodIds,
-                cloudUrl,
-                ct);
-
-            if (updatedCount != prodIds.Count)
-            {
-                throw new InvalidOperationException(
-                    $"Không lưu đủ đường dẫn phiếu nhập kho. Cần lưu {prodIds.Count} production liên quan, thực tế lưu {updatedCount}.");
-            }
+            //var updatedCount = await _repo.SaveImportReceivePathForProdIdsAsync(
+            //    prodIds,
+            //    cloudUrl,
+            //    ct);
 
             try
             {

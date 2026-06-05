@@ -574,6 +574,8 @@ namespace AMMS.API.Controllers
         }
 
         [HttpPost("generate-import-receive")]
+        [Produces("application/json")]
+        [ProducesResponseType(typeof(GenerateImportReceiveUrlResponse), StatusCodes.Status200OK)]
         public async Task<IActionResult> GenerateImportReceive(
     [FromBody] GenerateImportReceiveRequest req,
     CancellationToken ct)
@@ -588,7 +590,15 @@ namespace AMMS.API.Controllers
 
             try
             {
-                var result = await _service.GenerateImportReceiveFileAsync(
+                /*
+                 * Service hiện tại đã:
+                 * - lấy sources theo order_id
+                 * - tạo PDF
+                 * - upload Cloudinary
+                 * - lưu import_recieve_path vào productions liên quan
+                 * - trả import_recieve_path = cloudUrl
+                 */
+                var result = await _service.GenerateImportReceiveAsync(
                     req.order_id,
                     ct);
 
@@ -601,16 +611,93 @@ namespace AMMS.API.Controllers
                     });
                 }
 
-                return File(
-                    result.file_bytes,
-                    result.content_type,
-                    result.file_name);
+                var fileUrl = result.import_recieve_path;
+
+                if (string.IsNullOrWhiteSpace(fileUrl))
+                {
+                    return BadRequest(new
+                    {
+                        message = "Tạo phiếu nhập kho thành công nhưng không lấy được link Cloudinary.",
+                        order_id = req.order_id
+                    });
+                }
+
+                var notifyMessage =
+                    $"Đơn hàng {req.order_id} đã tạo 1 phiếu nhập kho chung cho {result.total_productions} production, chờ nhập kho";
+
+                await _hub.Clients.Group(RealtimeGroups.ByRole("warehouse manager")).SendAsync(
+                    "Importing",
+                    new
+                    {
+                        message = notifyMessage
+                    },
+                    ct);
+
+                await _noti.CreateNotfi(
+                    4,
+                    notifyMessage,
+                    null,
+                    req.order_id,
+                    "Importing");
+
+                /*
+                 * FIX CHÍNH:
+                 * Trả JSON chứa link.
+                 * Tuyệt đối không return File(...).
+                 */
+                return Ok(new GenerateImportReceiveUrlResponse
+                {
+                    success = result.success,
+
+                    order_id = result.order_id,
+                    order_code = result.order_code,
+
+                    total_productions = result.total_productions,
+                    generated_count = result.generated_count,
+
+                    prod_ids = result.prod_ids ?? new List<int>(),
+
+                    file_url = fileUrl,
+                    import_recieve_path = fileUrl,
+                    import_file = fileUrl,
+
+                    files = (result.files ?? new List<GenerateImportReceiveResponse>())
+                        .Select(x => new GenerateImportReceiveUrlFileItem
+                        {
+                            success = x.success,
+
+                            prod_id = x.prod_id,
+                            prod_ids = x.prod_ids ?? new List<int>(),
+
+                            order_id = x.order_id,
+                            order_code = x.order_code,
+
+                            file_url = x.import_recieve_path,
+                            import_recieve_path = x.import_recieve_path,
+                            import_file = x.import_recieve_path,
+
+                            total_productions_in_file = x.total_productions_in_file,
+                            message = x.message
+                        })
+                        .ToList(),
+
+                    message = result.message
+                });
             }
             catch (InvalidOperationException ex)
             {
                 return BadRequest(new
                 {
                     message = ex.Message,
+                    order_id = req.order_id
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    message = "Generate import receive failed",
+                    detail = ex.Message,
                     order_id = req.order_id
                 });
             }
