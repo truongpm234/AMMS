@@ -1166,14 +1166,20 @@ namespace AMMS.Application.Services
                 {
                     await _db.task_links.AddAsync(new task_link
                     {
+                        group_prod_id = groupProd.prod_id,
                         group_task_id = groupTask.task_id,
-                        single_task_id = null,
+
                         single_prod_id = row.SingleProd.prod_id,
+                        single_task_id = null,
+                        original_single_task_id = null,
+
                         order_id = row.Order.order_id,
                         process_code = taskProcessCode,
                         qty_plan = row.Item?.quantity ?? 0,
+
                         status = "Active",
-                        created_at = now
+                        created_at = now,
+                        done_at = null
                     }, ct);
                 }
             }
