@@ -2166,17 +2166,62 @@ public class TasksController : ControllerBase
         /*
          * Nếu không có material_id thì không build material.
          */
-        var materialIds = GetFormValues(form, "material_id", "materialId", "materials[0].material_id");
+        var materialIds = GetFormValues(
+            form,
+            "material_id",
+            "materialId",
+            "materials[0].material_id");
 
         if (materialIds.Count == 0)
             return null;
 
-        var materialCodes = GetFormValues(form, "material_code", "materialCode");
-        var materialNames = GetFormValues(form, "material_name", "materialName");
-        var units = GetFormValues(form, "material_unit", "unit");
-        var quantityUsedValues = GetFormValues(form, "material_quantity_used", "materialQuantityUsed", "quantity_used", "quantityUsed");
-        var quantityLeftValues = GetFormValues(form, "material_quantity_left", "materialQuantityLeft", "quantity_left", "quantityLeft");
-        var isStockValues = GetFormValues(form, "material_is_stock", "materialIsStock", "is_stock", "isStock");
+        var materialCodes = GetFormValues(
+            form,
+            "material_code",
+            "materialCode");
+
+        var materialNames = GetFormValues(
+            form,
+            "material_name",
+            "materialName");
+
+        var units = GetFormValues(
+            form,
+            "material_unit",
+            "materialUnit",
+            "unit");
+
+        /*
+         * NEW:
+         * Ưu tiên mat_quantity_used / mat_quantity_left để phân biệt với BTP/reference input.
+         *
+         * OLD:
+         * Vẫn nhận material_quantity_used, quantity_used để không vỡ FE/API cũ.
+         */
+        var quantityUsedValues = GetFormValues(
+            form,
+            "mat_quantity_used",
+            "matQuantityUsed",
+            "material_quantity_used",
+            "materialQuantityUsed",
+            "quantity_used",
+            "quantityUsed");
+
+        var quantityLeftValues = GetFormValues(
+            form,
+            "mat_quantity_left",
+            "matQuantityLeft",
+            "material_quantity_left",
+            "materialQuantityLeft",
+            "quantity_left",
+            "quantityLeft");
+
+        var isStockValues = GetFormValues(
+            form,
+            "material_is_stock",
+            "materialIsStock",
+            "is_stock",
+            "isStock");
 
         var result = new List<TaskMaterialUsageInputDto>();
 
@@ -2188,17 +2233,31 @@ public class TasksController : ControllerBase
                 continue;
 
             /*
-             * Trường hợp curl của bạn có quantity_used lặp:
-             * - quantity_used=6289 thường là BTP/reference input
-             * - quantity_used=38.2076 thường là NVL/material
+             * Nếu FE gửi đúng field mới mat_quantity_used/mat_quantity_left,
+             * lấy theo index bình thường.
              *
-             * Nếu không gửi material_quantity_used riêng thì lấy phần tử cuối để tránh lấy nhầm BTP.
+             * Nếu FE còn dùng quantity_used chung bị lặp với reference input,
+             * giữ fallback cũ: lấy phần tử sau để tránh lấy nhầm BTP.
              */
-            var used = HasAnyKey(form, "material_quantity_used", "materialQuantityUsed")
+            var hasDedicatedMaterialUsedKey = HasAnyKey(
+                form,
+                "mat_quantity_used",
+                "matQuantityUsed",
+                "material_quantity_used",
+                "materialQuantityUsed");
+
+            var hasDedicatedMaterialLeftKey = HasAnyKey(
+                form,
+                "mat_quantity_left",
+                "matQuantityLeft",
+                "material_quantity_left",
+                "materialQuantityLeft");
+
+            var used = hasDedicatedMaterialUsedKey
                 ? ReadDecimalAt(quantityUsedValues, i)
                 : ReadDecimalAt(quantityUsedValues, Math.Min(i + 1, quantityUsedValues.Count - 1));
 
-            var left = HasAnyKey(form, "material_quantity_left", "materialQuantityLeft")
+            var left = hasDedicatedMaterialLeftKey
                 ? ReadDecimalAt(quantityLeftValues, i)
                 : ReadDecimalAt(quantityLeftValues, Math.Min(i + 1, quantityLeftValues.Count - 1));
 
@@ -2208,8 +2267,10 @@ public class TasksController : ControllerBase
                 material_code = ReadStringAt(materialCodes, i),
                 material_name = ReadStringAt(materialNames, i),
                 unit = ReadStringAt(units, i) ?? "kg",
+
                 quantity_used = Math.Round(used, 4),
                 quantity_left = Math.Round(left, 4),
+
                 is_stock = ReadBoolAt(isStockValues, i, fallback: false)
             });
         }
