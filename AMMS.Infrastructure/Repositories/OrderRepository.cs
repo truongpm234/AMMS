@@ -58,7 +58,12 @@ namespace AMMS.Infrastructure.Repositories
                     o.delivery_date,
                     Status = o.status ?? "",
                     o.production_id,
+                    request_id = _db.order_requests.AsNoTracking()
+                        .Where(req => req.order_id == o.order_id)
+                        .Select(req => (int?)req.order_request_id)
+                        .FirstOrDefault(),
 
+                    product_type_id = r.product_type,
                     is_production_ready = o.is_production_ready,
                     customer_name = r != null ? (r.customer_name ?? "") : "Khách hàng",
 
@@ -303,6 +308,7 @@ namespace AMMS.Infrastructure.Repositories
                 {
                     order_id = o.order_id.ToString(),
                     code = o.code,
+                    request_id = o.request_id,
                     customer_name = o.customer_name ?? "",
                     product_name = o.FirstItem?.product_name,
                     product_id = o.FirstItem?.product_type_id?.ToString(),
@@ -310,6 +316,7 @@ namespace AMMS.Infrastructure.Repositories
                     created_at = ToUtcString(o.order_date),
                     delivery_date = ToUtcString(o.delivery_date),
                     status = o.Status,
+                    product_type = o.product_type_id,
                     production_approval_flow = mainProduction?.production_approval_flow,
                     gm_proposed_method =
                         approvalProduction?.gm_proposed_method

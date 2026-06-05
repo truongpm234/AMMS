@@ -1,5 +1,6 @@
 ﻿using AMMS.Application.Interfaces;
 using AMMS.Shared.DTOs.Machines;
+using AMMS.Shared.Helpers;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
@@ -42,7 +43,7 @@ namespace AMMS.API.Controllers
     [FromQuery] DateTime? at,
     CancellationToken ct = default)
         {
-            var anchor = at ?? AMMS.Shared.Helpers.AppTime.NowVnUnspecified();
+            var anchor = at ?? AppTime.NowVnUnspecified();
             var result = await _service.GetAvailabilitySnapshotAsync(anchor, ct);
             return Ok(result);
         }

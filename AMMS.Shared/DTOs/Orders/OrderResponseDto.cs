@@ -9,8 +9,10 @@ namespace AMMS.Shared.DTOs.Orders
     public class OrderResponseDto
     {
         public string order_id { get; set; } = "";
+        public int? request_id { get; set; }
         public string? code { get; set; }
         public string customer_name { get; set; } = "";
+        public string? product_type { get; set; }
         public string? product_name { get; set; }
         public string? product_id { get; set; }
         public int quantity { get; set; }

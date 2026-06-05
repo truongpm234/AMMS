@@ -30,6 +30,7 @@ namespace AMMS.Shared.DTOs.Productions
         public string? gm_proposed_method { get; set; }
         public string? proposed_production_method { get; set; }
         public bool is_production_ready { get; set; }
+        public string? customer_signed_contract_path { get; set; }
         public bool has_enough_material { get; set; }
         public bool has_free_machine { get; set; }
         public int? production_id { get; set; }

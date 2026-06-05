@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 
 namespace AMMS.Application.Services
 {
-    public class MachineService: IMachineService
+    public class MachineService : IMachineService
     {
         private readonly IMachineRepository _repo;
 
@@ -44,6 +44,11 @@ namespace AMMS.Application.Services
         public Task<MachineAvailabilitySnapshotDto> GetAvailabilitySnapshotAsync(
     DateTime anchor,
     CancellationToken ct = default)
-    => _repo.GetAvailabilitySnapshotAsync(anchor, ignoreOverdueOrders: true, ct);
+        {
+            return _repo.GetAvailabilitySnapshotAsync(
+                anchor,
+                ignoreOverdueOrders: false,
+                ct);
+        }
     }
 }

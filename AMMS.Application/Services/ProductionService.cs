@@ -286,8 +286,8 @@ namespace AMMS.Application.Services
                 ct);
 
             var subSelection = SelectSubOptionForMethod(
-    validSubOptions,
-    orderQty);
+                validSubOptions,
+                orderQty);
 
             var displaySubOption = subSelection.DisplayOption;
             var bestSubEnoughOption = subSelection.EnoughForSubOption;
@@ -364,12 +364,12 @@ namespace AMMS.Application.Services
             }
 
             var methodCostOptions = await BuildMethodCostOptionsAsync(
-    orderId,
-    orderQty,
-    item?.production_process,
-    bestSubEnoughOption,
-    bestSubPartialOption,
-    ct);
+                orderId,
+                orderQty,
+                item?.production_process,
+                bestSubEnoughOption,
+                bestSubPartialOption,
+                ct);
 
             foreach (var option in methodCostOptions)
             {
@@ -401,50 +401,73 @@ namespace AMMS.Application.Services
                 order_id = orderId,
                 production_id = prod?.prod_id,
                 is_production_ready = ord.is_production_ready,
+
                 has_enough_material = hasEnoughMaterial,
                 has_free_machine = hasFreeMachine,
+
                 materials = fullMaterials,
+
                 remaining_materials_for_both = remainingMaterialsForBoth,
                 machines = machines,
+
                 product_type_id = prod?.product_type_id ?? item?.product_type_id,
+
                 request_print_width_mm = req?.print_width_mm,
                 request_print_length_mm = req?.print_length_mm,
+
                 order_quantity = orderQty,
+
                 production_approval_flow = prod?.production_approval_flow,
                 is_auto_production_approval = ProductionApprovalFlowHelper.IsAuto(prod?.production_approval_flow),
                 production_approval_label = ProductionApprovalFlowHelper.Label(prod?.production_approval_flow),
+
                 is_full_process = prod?.is_full_process,
                 production_method = prod?.prod_method,
+
                 gm_proposed_method = prod?.gm_proposed_method,
                 proposed_production_method = prod?.gm_proposed_method,
+
                 sub_product_issue_file = prod?.sub_product_issue_file,
+
                 gm_note = prod?.gm_note,
                 mgr_note = prod?.mgr_note,
+
                 can_use_nvl = canUseNvl,
                 can_use_sub = canUseSub,
                 can_use_both = canUseBoth,
+
                 need_manager_approval = needManagerApproval,
+
                 nvl_qty = prod?.nvl_qty ?? nvlQtyForBoth,
+
                 selected_sub_product_id = prod?.sub_product_id ?? displaySubOption?.Sub.id,
                 sub_product_used_qty = prod?.sub_product_used_qty ?? 0,
+
                 has_matched_sub_product = hasMatchedSubProduct,
                 sub_product_message = subMessage,
                 matched_sub_product = matchedSubProduct,
+
                 method_cost_options = methodCostOptions,
+
                 nvl_estimated_unit_cost = nvlCost?.unit_cost,
+
                 sub_estimated_unit_cost = subCost?.is_available == true
-                ? subCost.unit_cost
-                : null,
+                    ? subCost.unit_cost
+                    : null,
+
                 both_estimated_unit_cost = bothCost?.is_available == true
-                ? bothCost.unit_cost
-                : null,
+                    ? bothCost.unit_cost
+                    : null,
+
                 nvl_estimated_total_cost = nvlCost?.total_cost,
+
                 sub_estimated_total_cost = subCost?.is_available == true
-                ? subCost.total_cost
-                : null,
+                    ? subCost.total_cost
+                    : null,
+
                 both_estimated_total_cost = bothCost?.is_available == true
-                ? bothCost.total_cost
-                : null
+                    ? bothCost.total_cost
+                    : null
             };
         }
 
@@ -6158,6 +6181,171 @@ namespace AMMS.Application.Services
                 updated_count = updatedCount,
                 message = $"Upload file nhập kho thành công. Đã lưu link vào {updatedCount} production."
             };
+        }
+
+        public async Task<CustomerContractByOrderResponse?> GetCustomerContractByOrderIdAsync(
+    int orderId,
+    CancellationToken ct = default)
+        {
+            if (orderId <= 0)
+                throw new InvalidOperationException("order_id không hợp lệ.");
+
+            var ord = await _db.orders
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .Select(x => new
+                {
+                    x.order_id,
+                    x.code,
+                    x.quote_id
+                })
+                .FirstOrDefaultAsync(ct);
+
+            if (ord == null)
+                return null;
+
+            var requestRows = await _db.order_requests
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderByDescending(x => x.order_request_id)
+                .Select(x => new
+                {
+                    x.order_request_id,
+                    x.quote_id,
+                    x.accepted_estimate_id
+                })
+                .ToListAsync(ct);
+
+            var requestIds = requestRows
+                .Select(x => x.order_request_id)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            var acceptedEstimateIds = requestRows
+                .Where(x => x.accepted_estimate_id.HasValue && x.accepted_estimate_id.Value > 0)
+                .Select(x => x.accepted_estimate_id!.Value)
+                .Distinct()
+                .ToList();
+
+            var quoteIds = new List<int>();
+
+            if (ord.quote_id.HasValue && ord.quote_id.Value > 0)
+                quoteIds.Add(ord.quote_id.Value);
+
+            quoteIds.AddRange(
+                requestRows
+                    .Where(x => x.quote_id.HasValue && x.quote_id.Value > 0)
+                    .Select(x => x.quote_id!.Value));
+
+            quoteIds = quoteIds
+                .Distinct()
+                .ToList();
+
+            var quoteEstimateIds = new List<int>();
+
+            if (quoteIds.Count > 0)
+            {
+                quoteEstimateIds = await _db.quotes
+                    .AsNoTracking()
+                    .Where(x => quoteIds.Contains(x.quote_id))
+                    .Select(x => x.estimate_id)
+                    .Distinct()
+                    .ToListAsync(ct);
+            }
+
+            var priorityEstimateIds = acceptedEstimateIds
+                .Concat(quoteEstimateIds)
+                .Where(x => x > 0)
+                .Distinct()
+                .ToList();
+
+            var estimates = await _db.cost_estimates
+                .AsNoTracking()
+                .Where(x =>
+                    requestIds.Contains(x.order_request_id) ||
+                    priorityEstimateIds.Contains(x.estimate_id))
+                .Select(x => new
+                {
+                    x.estimate_id,
+                    x.order_request_id,
+                    x.is_active,
+                    x.created_at,
+                    x.consultant_contract_path,
+                    x.customer_signed_contract_path
+                })
+                .ToListAsync(ct);
+
+            var candidates = estimates
+                .GroupBy(x => x.estimate_id)
+                .Select(g => g
+                    .OrderByDescending(x => !string.IsNullOrWhiteSpace(NormalizeContractPathForResponse(x.customer_signed_contract_path)))
+                    .ThenByDescending(x => !string.IsNullOrWhiteSpace(NormalizeContractPathForResponse(x.consultant_contract_path)))
+                    .First())
+                .Select(x =>
+                {
+                    var customerPath = NormalizeContractPathForResponse(x.customer_signed_contract_path);
+                    var consultantPath = NormalizeContractPathForResponse(x.consultant_contract_path);
+
+                    return new CustomerContractCandidateDto
+                    {
+                        estimate_id = x.estimate_id,
+                        order_request_id = x.order_request_id,
+                        is_active = x.is_active,
+                        created_at = x.created_at,
+
+                        consultant_contract_path = consultantPath,
+                        customer_signed_contract_path = customerPath,
+
+                        is_accepted_estimate = acceptedEstimateIds.Contains(x.estimate_id),
+                        is_quote_estimate = quoteEstimateIds.Contains(x.estimate_id),
+
+                        has_customer_contract = !string.IsNullOrWhiteSpace(customerPath),
+                        has_consultant_contract = !string.IsNullOrWhiteSpace(consultantPath)
+                    };
+                })
+                .OrderByDescending(x => x.has_customer_contract)
+                .ThenByDescending(x => x.has_consultant_contract)
+                .ThenByDescending(x => x.is_accepted_estimate)
+                .ThenByDescending(x => x.is_quote_estimate)
+                .ThenByDescending(x => x.is_active)
+                .ThenByDescending(x => x.estimate_id)
+                .ToList();
+
+            var best = candidates.FirstOrDefault(x => x.has_customer_contract)
+                       ?? candidates.FirstOrDefault(x => x.has_consultant_contract)
+                       ?? candidates.FirstOrDefault();
+
+            var latestReq = requestRows
+                .OrderByDescending(x => x.order_request_id)
+                .FirstOrDefault();
+
+            var hasCustomerContract = !string.IsNullOrWhiteSpace(best.customer_signed_contract_path);
+
+            return new CustomerContractByOrderResponse
+            {
+                order_id = ord.order_id,
+                order_quote_id = ord.quote_id,
+                order_request_id = best.order_request_id,
+                customer_signed_contract_path = best.customer_signed_contract_path,
+            };
+        }
+
+        private static string? NormalizeContractPathForResponse(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            var text = value.Trim();
+
+            if (string.Equals(text, "null", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(text, "undefined", StringComparison.OrdinalIgnoreCase) ||
+                text == "-")
+            {
+                return null;
+            }
+
+            return text;
         }
     }
 }

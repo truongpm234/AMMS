@@ -23,22 +23,14 @@ namespace AMMS.Shared.DTOs.Orders
 
         public int order_request_id { get; set; }
 
-        /*
-         * NEW:
-         * Kích thước sản phẩm thật của khách.
-         * Lấy ưu tiên từ order_request.product_length_mm/product_width_mm/product_height_mm.
-         */
         public int? product_length_mm { get; set; }
 
         public int? product_width_mm { get; set; }
 
         public int? product_height_mm { get; set; }
 
-        /*
-         * NEW:
-         * Kích thước in/khổ in.
-         * Lấy từ order_request.print_length_mm/print_width_mm.
-         */
+        public string? customer_signed_contract_path { get; set; }
+
         public int? print_length_mm { get; set; }
 
         public int? print_width_mm { get; set; }

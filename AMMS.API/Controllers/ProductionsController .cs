@@ -1099,7 +1099,46 @@ namespace AMMS.API.Controllers
             }
         }
 
+        [HttpGet("customer-contract/order/{orderId:int}")]
+        public async Task<IActionResult> GetCustomerContractByOrderId(
+    int orderId,
+    CancellationToken ct)
+        {
+            if (orderId <= 0)
+            {
+                return BadRequest(new
+                {
+                    message = "order_id không hợp lệ.",
+                    order_id = orderId
+                });
+            }
 
+            try
+            {
+                var result = await _service.GetCustomerContractByOrderIdAsync(
+                    orderId,
+                    ct);
+
+                if (result == null)
+                {
+                    return NotFound(new
+                    {
+                        message = "Không tìm thấy order.",
+                        order_id = orderId
+                    });
+                }
+
+                return Ok(result);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new
+                {
+                    message = ex.Message,
+                    order_id = orderId
+                });
+            }
+        }
 
         public class UploadImportReceiveFileRequest
         {

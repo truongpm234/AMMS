@@ -46,5 +46,8 @@ namespace AMMS.Application.Interfaces
             string fileName,
             string contentType,
             CancellationToken ct = default);
+        Task<CustomerContractByOrderResponse?> GetCustomerContractByOrderIdAsync(
+    int orderId,
+    CancellationToken ct = default);
     }
 }
