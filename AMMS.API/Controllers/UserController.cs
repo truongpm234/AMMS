@@ -46,18 +46,23 @@ namespace AMMS.API.Controllers
         }
 
 
+        [AllowAnonymous]
         [HttpPost("/login-with-google")]
         public async Task<IActionResult> GoogleLogin(GoogleLoginRequestDto req)
         {
-            var payload = await _googleAuthService.VerifyToken(req.id_token);
-
-            if (payload.EmailVerified)
+            try
             {
+                var payload = await _googleAuthService.VerifyToken(req.id_token);
+
+                Console.WriteLine("VERIFY OK");
+
                 var token = _jwt.GenerateTokenForGoogle(
-                payload.Email,
-                payload.Name,
-                payload.Subject
-            );
+                    payload.Email,
+                    payload.Name,
+                    payload.Subject
+                );
+
+                Console.WriteLine("JWT OK");
 
                 return Ok(new
                 {
@@ -67,7 +72,17 @@ namespace AMMS.API.Controllers
                     avatar = payload.Picture
                 });
             }
-            return BadRequest();
+            catch (Exception ex)
+            {
+                Console.WriteLine("GOOGLE LOGIN ERROR:");
+                Console.WriteLine(ex.ToString());
+
+                return StatusCode(500, new
+                {
+                    error = ex.Message,
+                    detail = ex.InnerException?.Message
+                });
+            }
         }
 
         [HttpPost("/register")]
