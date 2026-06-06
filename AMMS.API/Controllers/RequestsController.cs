@@ -808,12 +808,6 @@ namespace AMMS.API.Controllers
                 if (est == null)
                     return BadRequest(new { message = "Active estimate not found for this request" });
 
-                /*
-                 * FIX CHÍNH:
-                 * Không bắt buộc FE phải truyền quote_id đúng.
-                 * Backend tự tìm quote theo request_id + estimate_id.
-                 * Nếu order_request.quote_id / accepted_estimate_id đang NULL thì sync lại trước khi gọi PayOS.
-                 */
                 var prepared = await PrepareDepositPaymentDataAsync(
                     req,
                     est,
@@ -835,14 +829,6 @@ namespace AMMS.API.Controllers
                     });
                 }
 
-                /*
-                 * Sau bước PrepareDepositPaymentDataAsync:
-                 * - req.quote_id chắc chắn có data
-                 * - req.accepted_estimate_id chắc chắn có data
-                 * - req.verified_at chắc chắn có data
-                 * - req.quote_expires_at chắc chắn có data
-                 * - quote chắc chắn tồn tại và match estimate
-                 */
                 var dto = await _dealService.CreateOrReuseDepositLinkAsync(
                     requestId: request_id,
                     estimateId: estimate_id,
@@ -1007,7 +993,6 @@ namespace AMMS.API.Controllers
                 if (dto == null || dto.request_id <= 0)
                     return BadRequest(new { message = "request_id is required" });
 
-                // fallback tránh race với background tạo order
                 var current = await _service.GetByIdAsync(dto.request_id);
                 if (current == null)
                     return NotFound(new { message = "Order request not found" });
@@ -1223,11 +1208,6 @@ namespace AMMS.API.Controllers
         {
             try
             {
-                // Chỉ cho phép DEV
-                //if (!_config.GetValue<bool>("Payment:AllowFakePayment"))
-                //{
-                //    return Forbid("Fake payment is disabled");
-                //}
 
                 var req = await _db.order_requests
                     .FirstOrDefaultAsync(x => x.order_request_id == orderRequestId, ct);
@@ -1311,12 +1291,6 @@ namespace AMMS.API.Controllers
         {
             var now = AppTime.NowVnUnspecified();
 
-            /*
-             * Chỉ cho phép tạo link thanh toán khi request đang ở trạng thái hợp lệ.
-             * Waiting: đã gửi báo giá, đang chờ khách thanh toán.
-             * Verified: đã được manager duyệt, có thể chuẩn bị thanh toán.
-             * Accepted: đã accepted rồi thì chỉ reuse link nếu còn pending, nhưng không nên tạo mới nhiều lần.
-             */
             if (!IsPayableStatus(req.process_status))
             {
                 return (false,
@@ -1324,10 +1298,6 @@ namespace AMMS.API.Controllers
                     null);
             }
 
-            /*
-             * Nếu request chưa có verified_at / quote_expires_at thì khởi tạo.
-             * Case này thường gặp ở flow consultant-created request hoặc data cũ.
-             */
             if (!req.verified_at.HasValue)
                 req.verified_at = now;
 
@@ -1341,13 +1311,6 @@ namespace AMMS.API.Controllers
                     null);
             }
 
-            /*
-             * Resolve quote theo thứ tự:
-             * 1. quote_id FE truyền lên nếu đúng request + estimate.
-             * 2. order_request.quote_id nếu đúng request + estimate.
-             * 3. quotes theo request_id + estimate_id.
-             * 4. Nếu chưa có thì tạo quote mới từ estimate.
-             */
             var quote = await ResolveOrCreateQuoteForDepositAsync(
                 req,
                 est,
@@ -1361,9 +1324,6 @@ namespace AMMS.API.Controllers
                     null);
             }
 
-            /*
-             * Sync các cột quan trọng trước khi gọi PayOS.
-             */
             req.quote_id = quote.quote_id;
             req.accepted_estimate_id = est.estimate_id;
 
@@ -1372,9 +1332,6 @@ namespace AMMS.API.Controllers
 
             await _db.SaveChangesAsync(ct);
 
-            /*
-             * Check lại lần cuối để đảm bảo đủ data mới được gọi PayOS.
-             */
             if (!req.quote_id.HasValue || req.quote_id.Value <= 0)
                 return (false, "order_request.quote_id is missing after sync", null);
 
@@ -1399,7 +1356,7 @@ namespace AMMS.API.Controllers
             quote? q = null;
 
             /*
-             * 1. Ưu tiên quote_id FE truyền lên.
+             * 1. Ưu tiên quote_id.
              */
             if (inputQuoteId.HasValue && inputQuoteId.Value > 0)
             {
@@ -1428,7 +1385,6 @@ namespace AMMS.API.Controllers
 
             /*
              * 3. Tìm quote theo request_id + estimate_id.
-             * Đây là case của bạn: bảng quotes có quote nhưng order_request.quote_id đang NULL.
              */
             q ??= await _db.quotes
                 .Where(x =>
@@ -1442,7 +1398,6 @@ namespace AMMS.API.Controllers
 
             /*
              * 4. Nếu chưa có quote, tạo quote mới.
-             * Việc này giúp flow consultant-created request không bị chết nếu estimate đã có nhưng quote chưa được tạo.
              */
             q = new quote
             {

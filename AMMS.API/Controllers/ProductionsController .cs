@@ -18,7 +18,6 @@ namespace AMMS.API.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
-    //[Authorize]
     public class ProductionsController : ControllerBase
     {
         private readonly IProductionService _service;
@@ -590,14 +589,6 @@ namespace AMMS.API.Controllers
 
             try
             {
-                /*
-                 * Service hiện tại đã:
-                 * - lấy sources theo order_id
-                 * - tạo PDF
-                 * - upload Cloudinary
-                 * - lưu import_recieve_path vào productions liên quan
-                 * - trả import_recieve_path = cloudUrl
-                 */
                 var result = await _service.GenerateImportReceiveAsync(
                     req.order_id,
                     ct);

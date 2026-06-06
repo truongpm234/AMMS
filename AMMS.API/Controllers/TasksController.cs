@@ -256,15 +256,6 @@ public class TasksController : ControllerBase
             ? composition.link_qty_plan
             : 0;
 
-        /*
-         * Source chính để đồng bộ:
-         * - reference_inputs.actual_qty_prev_stage: số BTP/input thực tế cần dùng.
-         * - Nếu actual chưa có thì fallback estimated.
-         *
-         * SUB-SUB / SUB-NVL:
-         * TaskScanService.GetTaskQrMaterialBundleAsync phải build reference_inputs
-         * theo order qty + hao phí downstream.
-         */
         var referenceQty = ResolveMainReferenceQtyForPrepare(
             bundle.reference_inputs);
 
@@ -361,12 +352,6 @@ public class TasksController : ControllerBase
 
         var processCode = NormQrProcessCode(policy.process_code);
 
-        /*
-         * Main reference qty:
-         * - Loại PLATE_FROM_RALO để không cộng bản kẽm vào số lượng sản phẩm.
-         * - Ưu tiên actual_qty_prev_stage.
-         * - Nếu actual chưa có thì dùng estimated_qty.
-         */
         var referenceQty = ResolveMainReferenceQtyForPrepare(
             bundle.reference_inputs);
 
@@ -392,15 +377,6 @@ public class TasksController : ControllerBase
         if (effectiveQty <= 0)
             effectiveQty = 1;
 
-        /*
-         * FIX chính:
-         * Với SUB single full path / SPLIT / downstream sau BTP:
-         * max_allowed không được nhỏ hơn reference actual.
-         *
-         * Ví dụ BOI:
-         * policy.max_allowed = 1329 nhưng reference actual CAN = 3942
-         * => max_allowed phải thành 3942.
-         */
         var maxAllowed = Math.Max(baseMax, effectiveQty);
 
         var referenceInputs = NormalizeReferenceInputsForQrPrepare(
@@ -528,10 +504,6 @@ public class TasksController : ControllerBase
         if (candidates.Count == 0)
             return 0m;
 
-        /*
-         * Ưu tiên actual_qty_prev_stage.
-         * Nếu actual chưa có thì fallback estimated_qty.
-         */
         var actualTotal = candidates
             .Where(x => x.actual_qty_prev_stage > 0)
             .Sum(x => x.actual_qty_prev_stage);
@@ -575,10 +547,6 @@ public class TasksController : ControllerBase
         if (mainRefs.Count == 0)
             return result;
 
-        /*
-         * Nếu chỉ có 1 reference chính, set actual thẳng bằng effectiveQty.
-         * Đây là case thường gặp: PHU -> CAN, CAN -> BOI, IN -> PHU...
-         */
         if (mainRefs.Count == 1)
         {
             var item = mainRefs[0];
@@ -591,9 +559,6 @@ public class TasksController : ControllerBase
             return result;
         }
 
-        /*
-         * Nếu có nhiều reference chính, phân bổ theo tỷ lệ actual/estimated hiện có.
-         */
         var totalWeight = mainRefs.Sum(x =>
             x.actual_qty_prev_stage > 0
                 ? x.actual_qty_prev_stage
@@ -654,10 +619,6 @@ public class TasksController : ControllerBase
         if (string.IsNullOrWhiteSpace(code))
             return false;
 
-        /*
-         * RALO không có BTP input.
-         * CAT thường là cắt giấy, giữ policy cũ.
-         */
         if (code is "RALO" or "CAT")
             return false;
 
@@ -675,12 +636,6 @@ public class TasksController : ControllerBase
         var code = NormQrProcessCode(input.input_code);
         var unit = (input.unit ?? "").Trim().ToLowerInvariant();
 
-        /*
-         * Không cộng bản kẽm vào số lượng sản phẩm.
-         * IN có thể có:
-         * - CAT: giấy đã cắt
-         * - PLATE_FROM_RALO: bản kẽm in
-         */
         if (code == "PLATE_FROM_RALO")
             return false;
 
@@ -853,10 +808,6 @@ public class TasksController : ControllerBase
 
         try
         {
-            /*
-             * qrReferenceInputs là dữ liệu dùng thật khi finish:
-             * reference_inputs_json gốc + sub_product_leftovers_json đã merge.
-             */
             qrReferenceInputs = BuildQrReferenceInputsWithSubProductLeftovers(
                 formRefs,
                 taskMeta.process?.process_code,
@@ -890,10 +841,6 @@ public class TasksController : ControllerBase
 
         var ttl = TimeSpan.FromMinutes(ttlMinutes);
 
-        /*
-         * JSON này chứa full dữ liệu FE nhập vào request.
-         * Sẽ được nhét vào token.
-         */
         var submittedJson = BuildSubmittedJsonForToken(
             form,
             formMaterials,
@@ -1127,11 +1074,6 @@ public class TasksController : ControllerBase
             });
         }
 
-        /*
-         * Lưu ý:
-         * - inputMaterials là vật tư thực sự dùng để finish theo flow cũ.
-         * - submittedJson vẫn chứa formMaterials FE nhập ban đầu để decode xem lại request.
-         */
         var oldFlowToken = _tokenSvc.CreateToken(
             req.task_id,
             oldFlowQtyGood,
@@ -1179,9 +1121,6 @@ public class TasksController : ControllerBase
             });
         }
 
-        /*
-         * Optional: kiểm tra task còn tồn tại để link chắc chắn đúng.
-         */
         var exists = await _db.tasks
             .AsNoTracking()
             .AnyAsync(x => x.task_id == payload.task_id, ct);
@@ -1320,17 +1259,6 @@ public class TasksController : ControllerBase
         };
     }
 
-    private TaskQrResponse AttachLinkAndRequestJsonEcho(
-        TaskQrResponse response,
-        CreateTaskQrFormRequest form)
-    {
-        response.link = BuildProductionManagerTaskDetailLink(form.task_id);
-
-        response.request_json = BuildRequestJsonEcho(form);
-
-        return response;
-    }
-
     private TaskQrSubmittedPayloadDto BuildSubmittedQrPayload(
     CreateTaskQrFormRequest form,
     List<TaskMaterialUsageInputDto> formMaterials,
@@ -1364,47 +1292,6 @@ public class TasksController : ControllerBase
             }
         };
     }
-
-    private TaskQrResponse AttachSubmittedPayloadToQrResponse(
-    TaskQrResponse response,
-    CreateTaskQrFormRequest form,
-    List<TaskMaterialUsageInputDto> formMaterials,
-    List<TaskReferenceUsageInputDto> formRefs,
-    List<TaskReferenceUsageInputDto> qrReferenceInputs,
-    List<TaskOutputReportDto> formOutputs,
-    List<TaskSubProductLeftoverInputDto> formSubProductLeftovers,
-    List<string> imageUrls,
-    string? reason,
-    string? reportImageUrl)
-    {
-        /*
-         * Giữ link như yêu cầu cũ.
-         */
-        response.link = BuildProductionManagerTaskDetailLink(form.task_id);
-
-        /*
-         * NEW:
-         * Trả raw JSON FE đã nhập ở request.
-         * Cái nào không nhập thì null.
-         */
-        response.request_json = BuildRequestJsonEcho(form);
-
-        /*
-         * Giữ submitted_payload nếu bạn vẫn muốn response cũ.
-         */
-        response.submitted_payload = BuildSubmittedQrPayload(
-            form,
-            formMaterials,
-            formRefs,
-            qrReferenceInputs,
-            formOutputs,
-            imageUrls,
-            reason,
-            reportImageUrl);
-
-        return response;
-    }
-
     private async Task<List<string>> UploadTaskReportImagesAsync(
     List<IFormFile>? images,
     CancellationToken ct)
@@ -1706,22 +1593,6 @@ public class TasksController : ControllerBase
             .Replace("-", "_");
     }
 
-    private static bool CanImportAsSubProductStage(string? processCode)
-    {
-        var code = NormQrProcessCode(processCode);
-
-        return code is
-            "RALO" or
-            "CAT" or
-            "IN" or
-            "PHU" or
-            "CAN" or
-            "CAN_MANG" or
-            "BOI" or
-            "BE" or
-            "DUT";
-    }
-
     private sealed class GroupQrQtyPolicy
     {
         public bool IsGroupSub { get; set; }
@@ -1736,113 +1607,6 @@ public class TasksController : ControllerBase
         public string Hint { get; set; } = "";
 
         public List<TaskReferenceInputDto> ReferenceInputs { get; set; } = new();
-    }
-    private static bool IsGroupSubTask(task taskMeta)
-    {
-        return taskMeta?.prod != null
-               && string.Equals(taskMeta.prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase)
-               && string.Equals(taskMeta.prod.prod_method, "SUB", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static decimal ResolveGroupSubPlannedInputQty(
-        IReadOnlyList<TaskReferenceInputDto>? referenceInputs)
-    {
-        if (referenceInputs == null || referenceInputs.Count == 0)
-            return 0m;
-
-        /*
-         * GROUP + SUB:
-         * Số chuẩn là estimated_qty, ví dụ 6290.
-         * Không lấy actual_qty_prev_stage nếu actual đang bị kéo từ log IN cũ.
-         */
-        var estimated = referenceInputs
-            .Where(x => x != null)
-            .Sum(x => x.estimated_qty);
-
-        if (estimated > 0)
-            return estimated;
-
-        var actual = referenceInputs
-            .Where(x => x != null)
-            .Sum(x => x.actual_qty_prev_stage);
-
-        return actual > 0 ? actual : 0m;
-    }
-
-    private static List<TaskReferenceInputDto> NormalizeGroupSubReferenceInputs(
-        IReadOnlyList<TaskReferenceInputDto>? referenceInputs,
-        int plannedInputQty)
-    {
-        var result = (referenceInputs ?? Array.Empty<TaskReferenceInputDto>())
-            .Select(x => new TaskReferenceInputDto
-            {
-                input_code = x.input_code,
-                input_name = x.input_name,
-                unit = string.IsNullOrWhiteSpace(x.unit) ? "sp" : x.unit,
-
-                /*
-                 * Đồng bộ cả estimated và actual về plannedInputQty.
-                 */
-                estimated_qty = plannedInputQty,
-                actual_qty_prev_stage = plannedInputQty
-            })
-            .ToList();
-
-        if (result.Count == 0)
-        {
-            result.Add(new TaskReferenceInputDto
-            {
-                input_code = "SUB_BTP_INPUT",
-                input_name = "Bán thành phẩm đầu vào từ SUB",
-                unit = "sp",
-                estimated_qty = plannedInputQty,
-                actual_qty_prev_stage = plannedInputQty
-            });
-        }
-
-        return result;
-    }
-
-    private static string NormQrCode(string? value)
-    {
-        return (value ?? "")
-            .Trim()
-            .ToUpperInvariant()
-            .Replace(" ", "_")
-            .Replace("-", "_");
-    }
-
-    private static decimal ResolveActualQtyFromPreparedReferenceInputs(
-        IReadOnlyList<TaskReferenceInputDto>? referenceInputs)
-    {
-        if (referenceInputs == null || referenceInputs.Count == 0)
-            return 0m;
-
-        /*
-         * Với GROUP + SUB, input BTP thực tế nằm ở actual_qty_prev_stage.
-         * Ví dụ:
-         * reference_inputs[0].actual_qty_prev_stage = 7674
-         */
-        return referenceInputs
-            .Where(x => x != null)
-            .Sum(x => x.actual_qty_prev_stage);
-    }
-
-    private static decimal ResolveActualQtyFromSubmittedReferenceInputs(
-        List<TaskReferenceUsageInputDto>? referenceInputs)
-    {
-        if (referenceInputs == null || referenceInputs.Count == 0)
-            return 0m;
-
-        return referenceInputs
-            .Where(x => x != null)
-            .Sum(x =>
-            {
-                var used = x.quantity_used > 0 ? x.quantity_used : 0m;
-                var left = x.quantity_left > 0 ? x.quantity_left : 0m;
-
-                return used + left;
-            });
     }
 
     private async Task<GroupQrQtyPolicy> ResolveGroupQrQtyPolicyAsync(
@@ -1873,17 +1637,10 @@ public class TasksController : ControllerBase
             };
         }
 
-        /*
-         * Dùng lại unified policy để POST /qr và GET /qr-prepare cùng số.
-         */
         var unified = await ResolveGroupQrPrepareUnifiedPolicyAsync(
             taskMeta,
             ct);
 
-        /*
-         * Nếu FE submit reference_inputs_json khi tạo QR,
-         * ưu tiên số FE submit để không lệch token.
-         */
         var submittedQty = ResolveSubmittedReferenceQtyForQr(
             submittedReferenceInputs);
 
@@ -1952,77 +1709,6 @@ public class TasksController : ControllerBase
         return true;
     }
 
-    private static decimal ResolveGroupPreparedQtyForQrPolicy(
-    IReadOnlyList<TaskReferenceInputDto>? referenceInputs)
-    {
-        if (referenceInputs == null || referenceInputs.Count == 0)
-            return 0m;
-
-        var total = referenceInputs
-            .Where(x => x != null)
-            .Sum(x =>
-            {
-                var estimated = x.estimated_qty > 0 ? x.estimated_qty : 0m;
-                var actual = x.actual_qty_prev_stage > 0 ? x.actual_qty_prev_stage : 0m;
-
-                return Math.Max(estimated, actual);
-            });
-
-        return total > 0 ? total : 0m;
-    }
-
-    private static List<TaskReferenceInputDto> NormalizeGroupReferenceInputsForQrPolicy(
-        IReadOnlyList<TaskReferenceInputDto>? referenceInputs,
-        int effectiveQty)
-    {
-        var refs = (referenceInputs ?? Array.Empty<TaskReferenceInputDto>())
-            .Where(x => x != null)
-            .Select(x =>
-            {
-                var estimated = x.estimated_qty > 0
-                    ? x.estimated_qty
-                    : x.actual_qty_prev_stage;
-
-                var actual = x.actual_qty_prev_stage > 0
-                    ? x.actual_qty_prev_stage
-                    : estimated;
-
-                return new TaskReferenceInputDto
-                {
-                    input_code = string.IsNullOrWhiteSpace(x.input_code)
-                        ? "REFERENCE_INPUT"
-                        : x.input_code,
-
-                    input_name = string.IsNullOrWhiteSpace(x.input_name)
-                        ? "Bán thành phẩm đầu vào"
-                        : x.input_name,
-
-                    unit = string.IsNullOrWhiteSpace(x.unit)
-                        ? "sp"
-                        : x.unit,
-
-                    estimated_qty = Math.Round(estimated, 4, MidpointRounding.AwayFromZero),
-                    actual_qty_prev_stage = Math.Round(actual, 4, MidpointRounding.AwayFromZero)
-                };
-            })
-            .ToList();
-
-        if (refs.Count > 0)
-            return refs;
-
-        return new List<TaskReferenceInputDto>
-    {
-        new TaskReferenceInputDto
-        {
-            input_code = "REFERENCE_INPUT",
-            input_name = "Bán thành phẩm đầu vào",
-            unit = "sp",
-            estimated_qty = effectiveQty,
-            actual_qty_prev_stage = effectiveQty
-        }
-    };
-    }
-
     private static int CeilPositive(decimal value)
     {
         return value <= 0
@@ -2060,25 +1746,6 @@ public class TasksController : ControllerBase
             payload,
             QrSubmittedJsonOptions);
     }
-
-    private static TaskQrSubmittedPayloadDto? TryDeserializeSubmittedPayloadFromToken(
-        string? submittedJson)
-    {
-        if (string.IsNullOrWhiteSpace(submittedJson))
-            return null;
-
-        try
-        {
-            return JsonSerializer.Deserialize<TaskQrSubmittedPayloadDto>(
-                submittedJson,
-                QrSubmittedJsonOptions);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
     private CreateTaskQrCompactResponse BuildCompactQrResponse(
         string token,
         int taskId)
@@ -2135,9 +1802,7 @@ public class TasksController : ControllerBase
 
     private static string? BuildMaterialsJsonFromFlatForm(IFormCollection form)
     {
-        /*
-         * Nếu không có material_id thì không build material.
-         */
+
         var materialIds = GetFormValues(
             form,
             "material_id",
@@ -2163,13 +1828,6 @@ public class TasksController : ControllerBase
             "materialUnit",
             "unit");
 
-        /*
-         * NEW:
-         * Ưu tiên mat_quantity_used / mat_quantity_left để phân biệt với BTP/reference input.
-         *
-         * OLD:
-         * Vẫn nhận material_quantity_used, quantity_used để không vỡ FE/API cũ.
-         */
         var quantityUsedValues = GetFormValues(
             form,
             "mat_quantity_used",
@@ -2204,13 +1862,6 @@ public class TasksController : ControllerBase
             if (materialId <= 0)
                 continue;
 
-            /*
-             * Nếu FE gửi đúng field mới mat_quantity_used/mat_quantity_left,
-             * lấy theo index bình thường.
-             *
-             * Nếu FE còn dùng quantity_used chung bị lặp với reference input,
-             * giữ fallback cũ: lấy phần tử sau để tránh lấy nhầm BTP.
-             */
             var hasDedicatedMaterialUsedKey = HasAnyKey(
                 form,
                 "mat_quantity_used",
@@ -2262,14 +1913,6 @@ public class TasksController : ControllerBase
         var quantityUsedValues = GetFormValues(form, "reference_quantity_used", "referenceQuantityUsed", "input_quantity_used", "inputQuantityUsed", "quantity_used", "quantityUsed");
         var quantityLeftValues = GetFormValues(form, "reference_quantity_left", "referenceQuantityLeft", "input_quantity_left", "inputQuantityLeft", "quantity_left", "quantityLeft");
 
-        /*
-         * Với curl của bạn:
-         * quantity_used lặp 2 lần:
-         * - lần 1 thường là BTP/reference input = 6289
-         * - lần 2 thường là material = 38.2076
-         *
-         * Nên reference input lấy phần tử đầu.
-         */
         var quantityUsed = ReadDecimalAt(quantityUsedValues, 0);
         var quantityLeft = ReadDecimalAt(quantityLeftValues, 0);
 
@@ -2312,69 +1955,6 @@ public class TasksController : ControllerBase
             unit = FirstFormValue(form, "output_unit", "unit") ?? "sp",
             quantity_good = Math.Round(quantityGood, 4),
             quantity_bad = Math.Round(quantityBad, 4)
-        }
-    };
-
-        return JsonSerializer.Serialize(result, QrFormJsonOptions);
-    }
-
-    private static string? BuildSubProductLeftoversJsonFromFlatForm(IFormCollection form)
-    {
-        /*
-         * Không tự lấy quantity_left chung để tạo leftover,
-         * vì quantity_left có thể là của material hoặc reference input.
-         *
-         * Muốn tạo sub_product_leftovers từ field rời thì FE nên gửi rõ:
-         * - leftover_process_code
-         * - leftover_quantity_left
-         */
-        var processCode = FirstFormValue(
-            form,
-            "leftover_process_code",
-            "leftoverProcessCode",
-            "sub_product_process_code",
-            "subProductProcessCode");
-
-        if (string.IsNullOrWhiteSpace(processCode))
-            return null;
-
-        var quantityLeft = ReadDecimalAt(
-            GetFormValues(
-                form,
-                "leftover_quantity_left",
-                "leftoverQuantityLeft",
-                "sub_product_quantity_left",
-                "subProductQuantityLeft"),
-            0);
-
-        if (quantityLeft <= 0)
-            return null;
-
-        var result = new List<TaskSubProductLeftoverInputDto>
-    {
-        new TaskSubProductLeftoverInputDto
-        {
-            process_code = processCode.Trim(),
-            process_name = FirstFormValue(
-                form,
-                "leftover_process_name",
-                "leftoverProcessName",
-                "sub_product_process_name",
-                "subProductProcessName"),
-
-            unit = FirstFormValue(
-                form,
-                "leftover_unit",
-                "sub_product_unit",
-                "unit") ?? "sp",
-
-            quantity_left = Math.Round(quantityLeft, 4),
-
-            note = FirstFormValue(
-                form,
-                "leftover_note",
-                "sub_product_note",
-                "note")
         }
     };
 
