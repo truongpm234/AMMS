@@ -1037,10 +1037,7 @@ namespace AMMS.Application.Services
             if (links.Count == 0)
                 return;
 
-            /*
-             * Phải dùng cùng logic phân bổ với MirrorGroupFinishToSingleTasksAsync
-             * để task_qtys và sub_product pending không lệch nhau.
-             */
+
             var allocations = await AllocateGroupLeftoverQtyByExpectedOutputAsync(
                 currentTask,
                 totalQty,
@@ -1074,40 +1071,11 @@ namespace AMMS.Application.Services
     List<task_link> links,
     CancellationToken ct)
         {
-            var weights = new List<(int orderId, decimal weight)>();
-
-            foreach (var link in links)
-            {
-                var ctx = await GetGroupLinkEstimateContextAsync(
-                    groupTask,
-                    link,
-                    ct);
-
-                if (ctx == null)
-                {
-                    weights.Add((link.order_id, Math.Max(link.qty_plan, 1)));
-                    continue;
-                }
-
-                var route = await ResolveRouteProcessCodesForOrderAsync(
-                    link.order_id,
-                    ct);
-
-                var currentCode = link.process_code ?? groupTask.process?.process_code;
-
-                var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
-                    ctx,
-                    currentCode,
-                    route,
-                    link.qty_plan,
-                    ct);
-
-                var weight = stageQty?.output_qty ?? Math.Max(link.qty_plan, 1);
-
-                weights.Add((link.order_id, weight));
-            }
-
-            return AllocateQtyByWeights(totalQty, weights);
+            return await AllocateGroupQtyByOrderQuantityAsync(
+                groupTask,
+                totalQty,
+                links,
+                ct);
         }
 
         private async Task CreatePendingSubProductForOrderAsync(
@@ -1716,44 +1684,131 @@ namespace AMMS.Application.Services
     List<task_link> links,
     CancellationToken ct)
         {
+            /*
+             * LOGIC:
+             * Chia sản lượng group theo tỷ lệ số lượng đơn hàng gốc.
+             *
+             * Ví dụ:
+             * Order A = 500
+             * Order B = 1500
+             * groupQtyGood = 2900
+             *
+             * A = 2900 * 500 / 2000 = 725
+             * B = phần còn lại = 2175
+             */
+            return await AllocateGroupQtyByOrderQuantityAsync(
+                groupTask,
+                groupQtyGood,
+                links,
+                ct);
+        }
+
+        private async Task<Dictionary<int, int>> AllocateGroupQtyByOrderQuantityAsync(
+    task groupTask,
+    int totalQty,
+    List<task_link> links,
+    CancellationToken ct)
+        {
+            var result = new Dictionary<int, int>();
+
+            if (links == null || links.Count == 0)
+                return result;
+
+            if (totalQty <= 0)
+            {
+                foreach (var link in links.Where(x => x.order_id > 0))
+                    result[link.order_id] = 0;
+
+                return result;
+            }
+
+            /*
+             * Mỗi order trong 1 group task chỉ nên có 1 link.
+             * Nếu data cũ bị trùng link, group lại theo order_id để tránh phân bổ lặp.
+             */
+            var orderLinks = links
+                .Where(x => x.order_id > 0)
+                .Where(x =>
+                    x.status == null ||
+                    !string.Equals(x.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                .GroupBy(x => x.order_id)
+                .Select(g => g
+                    .OrderBy(x => x.id)
+                    .First())
+                .OrderBy(x => x.id)
+                .ToList();
+
+            if (orderLinks.Count == 0)
+                return result;
+
             var weights = new List<(int orderId, decimal weight)>();
 
-            foreach (var link in links)
+            foreach (var link in orderLinks)
             {
-                var ctx = await GetGroupLinkEstimateContextAsync(
-                    groupTask,
-                    link,
-                    ct);
-
-                if (ctx == null)
-                {
-                    weights.Add((link.order_id, Math.Max(link.qty_plan, 1)));
-                    continue;
-                }
-
-                var route = await ResolveRouteProcessCodesForOrderAsync(
-                    link.order_id,
-                    ct);
-
-                var currentCode = link.process_code ?? groupTask.process?.process_code;
-
-                var stageQty = await ResolveSubOrBothDownstreamStageQtyAsync(
-                    ctx,
-                    currentCode,
-                    route,
-                    link.qty_plan,
-                    ct);
+                var weight = await ResolveOrderQuantityWeightForGroupAllocationAsync(
+                    orderId: link.order_id,
+                    groupProdId: groupTask.prod_id,
+                    fallbackQtyPlan: link.qty_plan,
+                    ct: ct);
 
                 /*
-                 * Weight nên là output sau công đoạn hiện tại.
-                 * Nếu không phải SUB/BOTH downstream thì fallback về qty_plan cũ.
+                 * weight chính là số lượng đơn hàng.
                  */
-                var weight = stageQty?.output_qty ?? Math.Max(link.qty_plan, 1);
-
                 weights.Add((link.order_id, weight));
             }
 
-            return AllocateQtyByWeights(groupQtyGood, weights);
+            return AllocateQtyByWeights(
+                totalQty,
+                weights);
+        }
+
+        private async Task<decimal> ResolveOrderQuantityWeightForGroupAllocationAsync(
+            int orderId,
+            int? groupProdId,
+            int fallbackQtyPlan,
+            CancellationToken ct)
+        {
+            if (orderId <= 0)
+                return Math.Max(fallbackQtyPlan, 1);
+
+            var orderItemQty = await _db.order_items
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .Select(x => (decimal?)x.quantity)
+                .SumAsync(ct);
+
+            if (orderItemQty.HasValue && orderItemQty.Value > 0)
+                return orderItemQty.Value;
+
+            var requestQty = await _db.order_requests
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderByDescending(x => x.order_request_id)
+                .Select(x => (decimal?)x.quantity)
+                .FirstOrDefaultAsync(ct);
+
+            if (requestQty.HasValue && requestQty.Value > 0)
+                return requestQty.Value;
+
+            if (groupProdId.HasValue && groupProdId.Value > 0)
+            {
+                var prodOrderQty = await _db.prod_orders
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.prod_id == groupProdId.Value &&
+                        x.order_id == orderId &&
+                        (
+                            x.status == null ||
+                            x.status.ToUpper() != "CANCELLED"
+                        ))
+                    .Select(x => (decimal?)x.qty)
+                    .FirstOrDefaultAsync(ct);
+
+                if (prodOrderQty.HasValue && prodOrderQty.Value > 0)
+                    return prodOrderQty.Value;
+            }
+
+            return Math.Max(fallbackQtyPlan, 1);
         }
 
         private static Dictionary<int, int> AllocateQtyByWeights(
