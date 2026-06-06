@@ -8370,8 +8370,7 @@ namespace AMMS.Infrastructure.Repositories
             if (stage == null)
                 return;
 
-            if (stage.input_materials == null)
-                stage.input_materials = new List<StageMaterialDto>();
+            stage.input_materials ??= new List<StageMaterialDto>();
 
             var currentCode = NormDetailProcessCode(stage.process_code);
 
@@ -8385,9 +8384,13 @@ namespace AMMS.Infrastructure.Repositories
             /*
              * CASE 1: GROUP + SUB
              *
-             * Đây là case prod_id = 17.
-             * Không dùng prod.sub_product_id vì group production không có sub_product_id.
-             * Phải tính lại planned input từ task_links của group task.
+             * Fix chính cho case ghép SUB + SUB.
+             * - plannedInputQty: lấy theo logic QR prepare, có cộng hao phí sau BTP.
+             * - confirmedActualQty: chỉ có khi các task BTP của từng single_prod_id đã được confirm từ kho.
+             *
+             * Lưu ý:
+             * - Không set output_product.actual_quantity ở đây.
+             * - Chỉ set input_materials.actual_quantity của công đoạn đầu sau BTP.
              */
             if (isGroupSub)
             {
@@ -8403,53 +8406,23 @@ namespace AMMS.Infrastructure.Repositories
                 var plannedInputQty = Math.Round(plan.PlannedInputQty, 4);
                 var previousCode = plan.PreviousProcessCode;
 
-                var mainInputs = stage.input_materials
-                    .Where(x =>
-                        IsMainBtpInputForDetail(x, previousCode) ||
-                        IsLikelyBtpInputForDetail(x))
-                    .ToList();
+                var confirmedActual = await ResolveGroupSubConfirmedActualInputForDetailAsync(
+                    groupProd: prod,
+                    stage: stage,
+                    currentProcessCode: currentCode,
+                    ct: ct);
+
+                var confirmedActualQty = confirmedActual?.ActualInputQty ?? 0m;
+
+                ApplyGroupSubPlannedAndActualInputToStage(
+                    stage: stage,
+                    previousCode: previousCode,
+                    plannedInputQty: plannedInputQty,
+                    confirmedActualQty: confirmedActualQty);
 
                 /*
-                 * Nếu BuildStageIO không tạo input BTP chính thì tự thêm.
-                 */
-                if (mainInputs.Count == 0)
-                {
-                    var newInput = new StageMaterialDto
-                    {
-                        name = $"Bán thành phẩm từ công đoạn {previousCode}",
-                        code = previousCode,
-                        quantity = plannedInputQty,
-                        estimated_quantity = plannedInputQty,
-                        actual_quantity = plannedInputQty,
-                        quantity_source = "PlannedSubInputWithWaste",
-                        unit = "tờ"
-                    };
-
-                    stage.input_materials.Insert(0, newInput);
-                    mainInputs.Add(newInput);
-                }
-
-                foreach (var input in mainInputs)
-                {
-                    input.quantity = plannedInputQty;
-                    input.estimated_quantity = plannedInputQty;
-                    input.actual_quantity = plannedInputQty;
-                    input.quantity_source = "PlannedSubInputWithWaste";
-
-                    if (string.IsNullOrWhiteSpace(input.code))
-                        input.code = previousCode;
-
-                    if (string.IsNullOrWhiteSpace(input.name))
-                        input.name = $"Bán thành phẩm từ công đoạn {previousCode}";
-
-                    if (string.IsNullOrWhiteSpace(input.unit))
-                        input.unit = "tờ";
-                }
-
-                /*
-                 * Đồng bộ output estimate của stage với QR prepare.
-                 * Vì QR prepare đang validate theo planned BTP input = 6290,
-                 * detail cũng phải hiển thị PHU output estimate = 6290.
+                 * Đồng bộ estimate output với qr-prepare.
+                 * Nhưng actual output chỉ có khi chính group stage được report QR.
                  */
                 if (stage.output_product != null)
                 {
@@ -8457,10 +8430,21 @@ namespace AMMS.Infrastructure.Repositories
                     stage.output_product.estimated_quantity = plannedInputQty;
 
                     if (stage.output_product.actual_quantity <= 0)
-                        stage.output_product.quantity_source = "PlannedSubInputWithWaste";
+                    {
+                        stage.output_product.quantity_source =
+                            confirmedActualQty > 0
+                                ? "EstimatedFromConfirmedSubInput"
+                                : "PlannedSubInputWithWaste";
+                    }
                 }
 
                 stage.estimated_output_quantity = plannedInputQty;
+
+                if (stage.actual_output_quantity <= 0 &&
+                    stage.output_product?.actual_quantity > 0)
+                {
+                    stage.actual_output_quantity = stage.output_product.actual_quantity;
+                }
 
                 return;
             }
@@ -8468,7 +8452,9 @@ namespace AMMS.Infrastructure.Repositories
             /*
              * CASE 2: SINGLE + SUB
              *
-             * Với single SUB thì giữ logic lấy actual output của công đoạn trước.
+             * Giữ logic cũ, nhưng bổ sung fallback:
+             * nếu công đoạn trước là BTP đã confirm từ kho nhưng không có task_log,
+             * vẫn lấy actual theo BTP đã confirm.
              */
             var routeCodes = routeSteps == null
                 ? new List<string>()
@@ -8505,6 +8491,16 @@ namespace AMMS.Infrastructure.Repositories
                 ct);
 
             if (actualPrevQty <= 0)
+            {
+                actualPrevQty = await ResolveSingleSubConfirmedActualInputForDetailAsync(
+                    prod: prod,
+                    currentProcessCode: currentCode,
+                    routeCodes: routeCodes,
+                    subCodes: subCodes,
+                    ct: ct);
+            }
+
+            if (actualPrevQty <= 0)
                 return;
 
             actualPrevQty = Math.Round(actualPrevQty, 4);
@@ -8517,7 +8513,7 @@ namespace AMMS.Infrastructure.Repositories
                 input.quantity = actualPrevQty;
                 input.estimated_quantity = actualPrevQty;
                 input.actual_quantity = actualPrevQty;
-                input.quantity_source = "ActualPreviousStage";
+                input.quantity_source = "ActualConfirmedSubInput";
             }
 
             if (stage.output_product != null &&
@@ -8527,11 +8523,409 @@ namespace AMMS.Infrastructure.Repositories
                 stage.output_product.estimated_quantity = actualPrevQty;
 
                 if (stage.output_product.actual_quantity <= 0)
-                    stage.output_product.quantity_source = "EstimatedFromActualPreviousStage";
+                    stage.output_product.quantity_source = "EstimatedFromConfirmedSubInput";
             }
 
             if (stage.estimated_output_quantity < actualPrevQty)
                 stage.estimated_output_quantity = actualPrevQty;
+        }
+
+        private sealed class GroupSubConfirmedActualForDetail
+        {
+            public decimal ActualInputQty { get; set; }
+
+            public string PreviousProcessCode { get; set; } = "PREV";
+        }
+
+        private static void ApplyGroupSubPlannedAndActualInputToStage(
+            ProductionStageDto stage,
+            string? previousCode,
+            decimal plannedInputQty,
+            decimal confirmedActualQty)
+        {
+            if (stage == null)
+                return;
+
+            stage.input_materials ??= new List<StageMaterialDto>();
+
+            previousCode = string.IsNullOrWhiteSpace(previousCode)
+                ? "PREV"
+                : NormDetailProcessCode(previousCode);
+
+            var mainInputs = stage.input_materials
+                .Where(x =>
+                    IsMainBtpInputForDetail(x, previousCode) ||
+                    IsLikelyBtpInputForDetail(x))
+                .ToList();
+
+            /*
+             * Nếu BuildStageIO chưa tạo input BTP chính thì tự thêm.
+             */
+            if (mainInputs.Count == 0)
+            {
+                var newInput = new StageMaterialDto
+                {
+                    name = $"Bán thành phẩm từ công đoạn {previousCode}",
+                    code = previousCode,
+                    quantity = plannedInputQty,
+                    estimated_quantity = plannedInputQty,
+
+                    /*
+                     * actual_quantity chỉ set nếu BTP đã confirm thật.
+                     */
+                    actual_quantity = confirmedActualQty > 0 ? confirmedActualQty : 0m,
+
+                    quantity_source = confirmedActualQty > 0
+                        ? "ActualConfirmedSubInput"
+                        : "PlannedSubInputWithWaste",
+
+                    unit = "tờ"
+                };
+
+                stage.input_materials.Insert(0, newInput);
+                mainInputs.Add(newInput);
+            }
+
+            foreach (var input in mainInputs)
+            {
+                input.quantity = plannedInputQty;
+                input.estimated_quantity = plannedInputQty;
+
+                /*
+                 * Fix chính:
+                 * - Có confirm BTP thì actual_quantity = confirmedActualQty.
+                 * - Chưa confirm BTP thì không gán actual ảo.
+                 */
+                if (confirmedActualQty > 0 && input.actual_quantity <= 0)
+                {
+                    input.actual_quantity = confirmedActualQty;
+                    input.quantity_source = "ActualConfirmedSubInput";
+                }
+                else if (input.actual_quantity <= 0)
+                {
+                    input.quantity_source = "PlannedSubInputWithWaste";
+                }
+
+                if (string.IsNullOrWhiteSpace(input.code))
+                    input.code = previousCode;
+
+                if (string.IsNullOrWhiteSpace(input.name))
+                    input.name = $"Bán thành phẩm từ công đoạn {previousCode}";
+
+                if (string.IsNullOrWhiteSpace(input.unit))
+                    input.unit = "tờ";
+            }
+        }
+
+        private async Task<GroupSubConfirmedActualForDetail?> ResolveGroupSubConfirmedActualInputForDetailAsync(
+            production groupProd,
+            ProductionStageDto stage,
+            string currentProcessCode,
+            CancellationToken ct)
+        {
+            if (groupProd == null)
+                return null;
+
+            if (stage == null || !stage.task_id.HasValue)
+                return null;
+
+            var groupTaskId = stage.task_id.Value;
+            var currentCode = NormDetailProcessCode(currentProcessCode);
+
+            if (string.IsNullOrWhiteSpace(currentCode))
+                return null;
+
+            var links = await _db.task_links
+                .AsNoTracking()
+                .Where(x =>
+                    x.group_task_id == groupTaskId &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
+                .OrderBy(x => x.id)
+                .ToListAsync(ct);
+
+            if (links.Count == 0)
+                return null;
+
+            decimal totalConfirmedActualInput = 0m;
+            string? previousCodeForDisplay = null;
+
+            foreach (var link in links)
+            {
+                var ctx = await LoadDetailOrderEstimateContextAsync(
+                    link.order_id,
+                    ct);
+
+                if (ctx == null || ctx.route_codes.Count == 0)
+                    continue;
+
+                var currentIndex = ctx.route_codes.FindIndex(x =>
+                    string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase));
+
+                if (currentIndex <= 0)
+                    continue;
+
+                var previousCode = ctx.route_codes[currentIndex - 1];
+
+                previousCodeForDisplay ??= previousCode;
+
+                var subCodes = await ResolveLinkedSingleSubProductProcessCodesForDetailAsync(
+                    singleProdId: link.single_prod_id,
+                    routeCodes: ctx.route_codes,
+                    ct: ct);
+
+                if (subCodes.Count == 0)
+                    continue;
+
+                var subLastIndex = subCodes
+                    .Select(code => ctx.route_codes.FindIndex(x =>
+                        string.Equals(x, code, StringComparison.OrdinalIgnoreCase)))
+                    .Where(x => x >= 0)
+                    .DefaultIfEmpty(-1)
+                    .Max();
+
+                /*
+                 * Chỉ apply actual này cho công đoạn đầu tiên sau BTP.
+                 * Ví dụ:
+                 * sub = RALO,CAT,IN
+                 * current = PHU => OK
+                 * current = CAN => nếu PHU chưa report thì không dùng actual BTP để gán CAN.
+                 */
+                if (subLastIndex < 0 || currentIndex != subLastIndex + 1)
+                    continue;
+
+                var isConfirmed = await IsLinkedSubPathConfirmedForDetailAsync(
+                    singleProdId: link.single_prod_id,
+                    subCodes: subCodes,
+                    routeCodes: ctx.route_codes,
+                    ct: ct);
+
+                if (!isConfirmed)
+                    continue;
+
+                var productQty = link.qty_plan > 0
+                    ? link.qty_plan
+                    : ctx.order_qty;
+
+                if (productQty <= 0)
+                    productQty = 1;
+
+                var nUp = ctx.n_up > 0 ? ctx.n_up : 1;
+
+                /*
+                 * Đồng bộ với logic qr-prepare:
+                 * Không dùng estimate.sheets_required tổng của cả order.
+                 * Tính lại base theo qty_plan của từng order link.
+                 */
+                var sheetsBase = (int)Math.Ceiling(productQty / (decimal)nUp);
+
+                if (sheetsBase <= 0)
+                    sheetsBase = 1;
+
+                var stageQty = SubProductionQuantityHelper.ResolveStageQty(
+                    currentProcessCode: currentCode,
+                    routeProcessCodes: ctx.route_codes,
+                    productQty: productQty,
+                    nUp: nUp,
+                    explicitSheetsBase: sheetsBase,
+                    coatingType: ctx.coating_type);
+
+                /*
+                 * Giá trị actual input của công đoạn đầu sau BTP phải là input_qty,
+                 * vì đây là lượng BTP đưa vào công đoạn đó, có tính hao phí.
+                 */
+                if (stageQty.input_qty > 0)
+                    totalConfirmedActualInput += stageQty.input_qty;
+                else
+                    totalConfirmedActualInput += productQty;
+            }
+
+            totalConfirmedActualInput = Math.Round(totalConfirmedActualInput, 4);
+
+            if (totalConfirmedActualInput <= 0)
+                return null;
+
+            return new GroupSubConfirmedActualForDetail
+            {
+                ActualInputQty = totalConfirmedActualInput,
+                PreviousProcessCode = string.IsNullOrWhiteSpace(previousCodeForDisplay)
+                    ? "PREV"
+                    : previousCodeForDisplay
+            };
+        }
+
+        private async Task<bool> IsLinkedSubPathConfirmedForDetailAsync(
+            int? singleProdId,
+            IReadOnlyList<string> subCodes,
+            IReadOnlyList<string> routeCodes,
+            CancellationToken ct)
+        {
+            if (!singleProdId.HasValue || singleProdId.Value <= 0)
+                return false;
+
+            if (subCodes == null || subCodes.Count == 0)
+                return false;
+
+            var normalizedRoute = (routeCodes ?? Array.Empty<string>())
+                .Select(NormDetailProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            var requiredCodes = subCodes
+                .Select(NormDetailProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Where(x => normalizedRoute.Count == 0 || normalizedRoute.Contains(x, StringComparer.OrdinalIgnoreCase))
+                .Where(CanConfirmSubCoveredStageForDetail)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (requiredCodes.Count == 0)
+                return false;
+
+            var finishedCodes = await (
+                from t in _db.tasks.AsNoTracking()
+
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                where t.prod_id == singleProdId.Value
+
+                select new
+                {
+                    process_code = pp != null ? pp.process_code : t.name,
+                    t.status,
+                    t.end_time,
+                    t.is_taken_sub_product,
+                    t.reason
+                }
+            )
+            .ToListAsync(ct);
+
+            var finishedSet = finishedCodes
+                .Where(x =>
+                    string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                    x.end_time != null)
+                .Where(x =>
+                    x.is_taken_sub_product == true ||
+                    (
+                        x.reason != null &&
+                        x.reason.ToLower().Contains("bán thành phẩm")
+                    ))
+                .Select(x => NormDetailProcessCode(x.process_code))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            /*
+             * Tất cả công đoạn thuộc BTP path phải đã được confirm Finished.
+             */
+            return requiredCodes.All(x => finishedSet.Contains(x));
+        }
+
+        private static bool CanConfirmSubCoveredStageForDetail(string? processCode)
+        {
+            var code = NormDetailProcessCode(processCode);
+
+            return code is
+                "RALO" or
+                "CAT" or
+                "IN" or
+                "PHU" or
+                "CAN" or
+                "CAN_MANG" or
+                "BOI" or
+                "BE" or
+                "DUT";
+        }
+
+        private async Task<decimal> ResolveSingleSubConfirmedActualInputForDetailAsync(
+            production prod,
+            string currentProcessCode,
+            IReadOnlyList<string> routeCodes,
+            IReadOnlyList<string> subCodes,
+            CancellationToken ct)
+        {
+            if (prod == null)
+                return 0m;
+
+            if (!prod.order_id.HasValue || prod.order_id.Value <= 0)
+                return 0m;
+
+            var currentCode = NormDetailProcessCode(currentProcessCode);
+
+            var route = (routeCodes ?? Array.Empty<string>())
+                .Select(NormDetailProcessCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            if (route.Count == 0)
+                return 0m;
+
+            var currentIndex = route.FindIndex(x =>
+                string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase));
+
+            if (currentIndex <= 0)
+                return 0m;
+
+            var subLastIndex = subCodes
+                .Select(NormDetailProcessCode)
+                .Select(code => route.FindIndex(x =>
+                    string.Equals(x, code, StringComparison.OrdinalIgnoreCase)))
+                .Where(x => x >= 0)
+                .DefaultIfEmpty(-1)
+                .Max();
+
+            /*
+             * Chỉ công đoạn đầu tiên sau BTP mới lấy actual input từ confirm BTP.
+             */
+            if (subLastIndex < 0 || currentIndex != subLastIndex + 1)
+                return 0m;
+
+            var isConfirmed = await IsLinkedSubPathConfirmedForDetailAsync(
+                singleProdId: prod.prod_id,
+                subCodes: subCodes,
+                routeCodes: route,
+                ct: ct);
+
+            if (!isConfirmed)
+                return 0m;
+
+            var ctx = await LoadDetailOrderEstimateContextAsync(
+                prod.order_id.Value,
+                ct);
+
+            if (ctx == null)
+                return prod.sub_product_used_qty > 0 ? prod.sub_product_used_qty : 0m;
+
+            var productQty = prod.sub_product_used_qty > 0
+                ? prod.sub_product_used_qty
+                : ctx.order_qty;
+
+            if (productQty <= 0)
+                productQty = 1;
+
+            var nUp = ctx.n_up > 0 ? ctx.n_up : 1;
+
+            var sheetsBase = (int)Math.Ceiling(productQty / (decimal)nUp);
+
+            if (sheetsBase <= 0)
+                sheetsBase = 1;
+
+            var stageQty = SubProductionQuantityHelper.ResolveStageQty(
+                currentProcessCode: currentCode,
+                routeProcessCodes: route,
+                productQty: productQty,
+                nUp: nUp,
+                explicitSheetsBase: sheetsBase,
+                coatingType: ctx.coating_type);
+
+            if (stageQty.input_qty > 0)
+                return Math.Round(stageQty.input_qty, 4);
+
+            return productQty;
         }
 
         private sealed class GroupSubStagePlanForDetail

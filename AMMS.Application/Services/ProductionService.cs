@@ -4140,170 +4140,50 @@ namespace AMMS.Application.Services
             {
                 await using var tx = await _db.Database.BeginTransactionAsync(ct);
 
-                try
+                var prod = await _db.productions
+                    .FirstOrDefaultAsync(x => x.prod_id == prodId, ct);
+
+                if (prod == null)
+                    throw new InvalidOperationException("Production not found.");
+
+                if (string.Equals(prod.status, "InProcessing", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(prod.status, "Importing", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(prod.status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(prod.status, "Completed", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(prod.status, "Finished", StringComparison.OrdinalIgnoreCase))
                 {
-                    var prod = await _db.productions
-                        .FirstOrDefaultAsync(x => x.prod_id == prodId, ct);
+                    throw new InvalidOperationException(
+                        $"Production đã bắt đầu hoặc đã hoàn tất. Status={prod.status}");
+                }
 
-                    if (prod == null)
-                        throw new InvalidOperationException("Production not found.");
+                if (string.IsNullOrWhiteSpace(prod.prod_method))
+                    throw new InvalidOperationException("Production chưa được duyệt phương thức sản xuất.");
 
-                    if (string.Equals(prod.status, "InProcessing", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(prod.status, "Importing", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(prod.status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(prod.status, "Completed", StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new InvalidOperationException(
-                            $"Production đã bắt đầu hoặc đã hoàn tất. Status={prod.status}");
-                    }
+                var method = prod.prod_method.Trim().ToUpperInvariant();
 
-                    if (string.IsNullOrWhiteSpace(prod.prod_method))
-                        throw new InvalidOperationException("Production chưa được duyệt phương thức sản xuất.");
+                if (method == "BOTH" &&
+                    string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        "Không cho ghép production method BOTH vì BOTH gồm 2 nguồn input khác nhau theo ratio.");
+                }
 
-                    if (isPriority.HasValue)
-                        prod.is_priority = isPriority.Value;
-
-                    var method = prod.prod_method.Trim().ToUpperInvariant();
-
-                    if (method == "BOTH" &&
-                        string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new InvalidOperationException(
-                            "Không cho ghép production method BOTH vì BOTH gồm 2 nguồn input khác nhau theo ratio.");
-                    }
-
-                    /*
-                     * CASE 1: GROUP
-                     * - Tạo phiếu xuất kho chung.
-                     * - Lưu file vào GROUP.
-                     * - Copy file sang SINGLE member và SPLIT member.
-                     * - Copy is_priority sang các production liên quan.
-                     */
-                    if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var issueFile = await ConfirmGroupProductionIssueAsync(
-                            prod,
-                            confirmedByUserId,
-                            ct);
-
-                        prod.status = "Scheduled";
-
-                        prod.planned_start_date ??= await ResolveProductionPlannedStartFromTasksAsync(
-                            prod.prod_id,
-                            ct);
-
-                        prod.planned_end_date = await ResolveProductionPlannedEndFromTasksAsync(
-                            prod.prod_id,
-                            ct);
-
-                        await ApplyPriorityToGroupRelatedProductionsAsync(
-                            groupProdId: prod.prod_id,
-                            isPriority: prod.is_priority ?? false,
-                            ct: ct);
-
-                        await _db.SaveChangesAsync(ct);
-                        await tx.CommitAsync(ct);
-
-                        return new ConfirmProductionScheduleResponse
-                        {
-                            success = true,
-                            prod_id = prod.prod_id,
-                            order_id = null,
-                            production_code = prod.code,
-                            prod_kind = prod.prod_kind,
-                            production_method = prod.prod_method,
-                            planned_start_date = prod.planned_start_date,
-                            planned_end_date = prod.planned_end_date,
-                            issue_file = issueFile,
-                            message = "Đã xác nhận lập lịch production ghép và tạo phiếu xuất kho chung."
-                        };
-                    }
-
-                    /*
-                     * CASE 2: SINGLE / SPLIT
-                     */
-                    if (!prod.order_id.HasValue || prod.order_id.Value <= 0)
-                        throw new InvalidOperationException("Production chưa gắn order.");
-
-                    var order = await _db.orders
-                        .FirstOrDefaultAsync(x => x.order_id == prod.order_id.Value, ct)
-                        ?? throw new InvalidOperationException("Order not found.");
-
-                    if (!order.layout_confirmed)
-                        throw new InvalidOperationException("Order chưa xác nhận print-ready/layout.");
-
-                    if (!order.is_production_ready)
-                        throw new InvalidOperationException("Order chưa được duyệt phương thức sản xuất.");
-
-                    var issueFileSingleOrSplit = await ConfirmSingleOrSplitProductionIssueAsync(
+                /*
+                 * CASE 1: GROUP
+                 */
+                if (string.Equals(prod.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase))
+                {
+                    var issueFile = await ConfirmGroupProductionIssueAsync(
                         prod,
                         confirmedByUserId,
                         ct);
 
-                    var hasTasks = await _db.tasks
-                        .AsNoTracking()
-                        .AnyAsync(x => x.prod_id == prod.prod_id, ct);
-
-                    var isSplit = string.Equals(
-                        prod.prod_kind,
-                        "SPLIT",
-                        StringComparison.OrdinalIgnoreCase);
-
-                    /*
-                     * SINGLE full path thường chưa có task tại thời điểm confirm schedule.
-                     * SPLIT thì task đã được tạo từ flow group, không gọi ScheduleTasksAfterMethodAsync nữa.
-                     */
-                    if (!hasTasks && !isSplit)
-                    {
-                        await _db.SaveChangesAsync(ct);
-                        await tx.CommitAsync(ct);
-
-                        var scheduledProdId = await ScheduleTasksAfterMethodAsync(
-                            order.order_id,
-                            ct);
-
-                        var scheduledProd = await _db.productions
-                            .FirstOrDefaultAsync(x => x.prod_id == scheduledProdId, ct)
-                            ?? prod;
-
-                        scheduledProd.status = "Scheduled";
-                        scheduledProd.is_priority = prod.is_priority ?? false;
-
-                        if (string.IsNullOrWhiteSpace(scheduledProd.sub_product_issue_file))
-                            scheduledProd.sub_product_issue_file = issueFileSingleOrSplit;
-
-                        scheduledProd.planned_start_date ??= await ResolveProductionPlannedStartFromTasksAsync(
-                            scheduledProd.prod_id,
-                            ct);
-
-                        scheduledProd.planned_end_date = await ResolveProductionPlannedEndFromTasksAsync(
-                            scheduledProd.prod_id,
-                            ct);
-
-                        order.status = "Scheduled";
-
-                        await _db.SaveChangesAsync(ct);
-
-                        return new ConfirmProductionScheduleResponse
-                        {
-                            success = true,
-                            prod_id = scheduledProd.prod_id,
-                            order_id = order.order_id,
-                            production_code = scheduledProd.code,
-                            prod_kind = scheduledProd.prod_kind,
-                            production_method = scheduledProd.prod_method,
-                            planned_start_date = scheduledProd.planned_start_date,
-                            planned_end_date = scheduledProd.planned_end_date,
-                            issue_file = scheduledProd.sub_product_issue_file,
-                            message = "Đã xác nhận lập lịch, tạo task và tạo phiếu xuất kho."
-                        };
-                    }
-
                     prod.status = "Scheduled";
-                    prod.is_priority = prod.is_priority ?? false;
+                    prod.actual_start_date = null;
+                    prod.end_date = null;
 
-                    if (string.IsNullOrWhiteSpace(prod.sub_product_issue_file))
-                        prod.sub_product_issue_file = issueFileSingleOrSplit;
+                    if (isPriority.HasValue)
+                        prod.is_priority = isPriority.Value;
 
                     prod.planned_start_date ??= await ResolveProductionPlannedStartFromTasksAsync(
                         prod.prod_id,
@@ -4313,8 +4193,6 @@ namespace AMMS.Application.Services
                         prod.prod_id,
                         ct);
 
-                    order.status = "Scheduled";
-
                     await _db.SaveChangesAsync(ct);
                     await tx.CommitAsync(ct);
 
@@ -4322,22 +4200,224 @@ namespace AMMS.Application.Services
                     {
                         success = true,
                         prod_id = prod.prod_id,
-                        order_id = order.order_id,
+                        order_id = null,
                         production_code = prod.code,
                         prod_kind = prod.prod_kind,
                         production_method = prod.prod_method,
                         planned_start_date = prod.planned_start_date,
                         planned_end_date = prod.planned_end_date,
-                        issue_file = prod.sub_product_issue_file,
-                        message = "Đã xác nhận lập lịch production và tạo phiếu xuất kho."
+                        issue_file = issueFile,
+                        message = "Đã xác nhận lập lịch production ghép và tạo phiếu xuất kho chung."
                     };
                 }
-                catch
+
+                /*
+                 * CASE 2: SINGLE / SPLIT
+                 */
+                if (!prod.order_id.HasValue || prod.order_id.Value <= 0)
+                    throw new InvalidOperationException("Production chưa gắn order.");
+
+                var order = await _db.orders
+                    .FirstOrDefaultAsync(x => x.order_id == prod.order_id.Value, ct)
+                    ?? throw new InvalidOperationException("Order not found.");
+
+                if (!order.layout_confirmed)
+                    throw new InvalidOperationException("Order chưa xác nhận print-ready/layout.");
+
+                if (!order.is_production_ready)
+                    throw new InvalidOperationException("Order chưa được duyệt phương thức sản xuất.");
+
+                /*
+                 * Tạo phiếu xuất kho trước.
+                 * Với NVL: tạo phiếu NVL.
+                 * Với SUB/BOTH: tạo phiếu BTP/NVL theo logic hiện tại của bạn.
+                 */
+                var issueFileSingleOrSplit = await ConfirmSingleOrSplitProductionIssueAsync(
+                    prod,
+                    confirmedByUserId,
+                    ct);
+
+                var hasTasks = await _db.tasks
+                    .AsNoTracking()
+                    .AnyAsync(x => x.prod_id == prod.prod_id, ct);
+
+                var isSplit = string.Equals(
+                    prod.prod_kind,
+                    "SPLIT",
+                    StringComparison.OrdinalIgnoreCase);
+
+                /*
+                 * SINGLE full path thường chưa có task tại thời điểm confirm schedule.
+                 * SPLIT đã có task từ flow group, không gọi ScheduleTasksAfterMethodAsync.
+                 */
+                if (!hasTasks && !isSplit)
                 {
-                    await tx.RollbackAsync(ct);
-                    throw;
+                    /*
+                     * Commit transaction hiện tại trước vì ScheduleTasksAfterMethodAsync
+                     * có thể tự tạo task/production bằng service khác.
+                     */
+                    await _db.SaveChangesAsync(ct);
+                    await tx.CommitAsync(ct);
+
+                    var scheduledProdId = await ScheduleTasksAfterMethodAsync(
+                        order.order_id,
+                        ct);
+
+                    var finalProdId = scheduledProdId.HasValue && scheduledProdId.Value > 0
+                        ? scheduledProdId.Value
+                        : prod.prod_id;
+
+                    /*
+                     * FIX CHÍNH:
+                     * Sau khi ScheduleTasksAfterMethodAsync tạo task xong,
+                     * bắt buộc re-load production/order dạng tracking và sync Scheduled.
+                     */
+                    var scheduledProd = await SyncSingleOrSplitProductionScheduledAsync(
+                        finalProdId,
+                        order.order_id,
+                        issueFileSingleOrSplit,
+                        isPriority,
+                        ct);
+
+                    return new ConfirmProductionScheduleResponse
+                    {
+                        success = true,
+                        prod_id = scheduledProd.prod_id,
+                        order_id = order.order_id,
+                        production_code = scheduledProd.code,
+                        prod_kind = scheduledProd.prod_kind,
+                        production_method = scheduledProd.prod_method,
+                        planned_start_date = scheduledProd.planned_start_date,
+                        planned_end_date = scheduledProd.planned_end_date,
+                        issue_file = scheduledProd.sub_product_issue_file,
+                        message = "Đã xác nhận lập lịch, tạo task và chuyển order/production sang Scheduled."
+                    };
                 }
+
+                /*
+                 * SPLIT hoặc SINGLE đã có task sẵn.
+                 */
+                var syncedProd = await SyncSingleOrSplitProductionScheduledAsync(
+                    prod.prod_id,
+                    order.order_id,
+                    issueFileSingleOrSplit,
+                    isPriority,
+                    ct);
+
+                await tx.CommitAsync(ct);
+
+                return new ConfirmProductionScheduleResponse
+                {
+                    success = true,
+                    prod_id = syncedProd.prod_id,
+                    order_id = order.order_id,
+                    production_code = syncedProd.code,
+                    prod_kind = syncedProd.prod_kind,
+                    production_method = syncedProd.prod_method,
+                    planned_start_date = syncedProd.planned_start_date,
+                    planned_end_date = syncedProd.planned_end_date,
+                    issue_file = syncedProd.sub_product_issue_file,
+                    message = "Đã xác nhận lập lịch production và chuyển order/production sang Scheduled."
+                };
             });
+        }
+
+        private async Task<production> SyncSingleOrSplitProductionScheduledAsync(
+    int prodId,
+    int orderId,
+    string? issueFile,
+    bool? isPriority,
+    CancellationToken ct)
+        {
+            var prod = await _db.productions
+                .FirstOrDefaultAsync(x => x.prod_id == prodId, ct)
+                ?? throw new InvalidOperationException($"Không tìm thấy production prod_id={prodId}.");
+
+            var order = await _db.orders
+                .FirstOrDefaultAsync(x => x.order_id == orderId, ct)
+                ?? throw new InvalidOperationException($"Không tìm thấy order_id={orderId}.");
+
+            /*
+             * Chỉ sync status lập lịch.
+             * Không đụng InProcessing/Importing/Delivery/Completed.
+             */
+            if (string.Equals(prod.status, "InProcessing", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(prod.status, "Importing", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(prod.status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(prod.status, "Completed", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(prod.status, "Finished", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Không thể chuyển production sang Scheduled vì production đang ở trạng thái {prod.status}.");
+            }
+
+            prod.status = "Scheduled";
+            prod.actual_start_date = null;
+            prod.end_date = null;
+
+            if (isPriority.HasValue)
+                prod.is_priority = isPriority.Value;
+
+            if (!string.IsNullOrWhiteSpace(issueFile) &&
+                string.IsNullOrWhiteSpace(prod.sub_product_issue_file))
+            {
+                prod.sub_product_issue_file = issueFile;
+            }
+
+            prod.planned_start_date ??= await ResolveProductionPlannedStartFromTasksAsync(
+                prod.prod_id,
+                ct);
+
+            prod.planned_end_date = await ResolveProductionPlannedEndFromTasksAsync(
+                prod.prod_id,
+                ct);
+
+            /*
+             * Đây là dòng fix chính cho case order vẫn Pending.
+             */
+            if (!string.Equals(order.status, "InProcessing", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(order.status, "Importing", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(order.status, "Delivery", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(order.status, "Completed", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(order.status, "Finished", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(order.status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+            {
+                order.status = "Scheduled";
+            }
+
+            order.production_id = prod.prod_id;
+
+            await SyncOrderRequestsProcessStatusToScheduledAsync(
+                orderId,
+                ct);
+
+            await _db.SaveChangesAsync(ct);
+
+            return prod;
+        }
+
+        private async Task SyncOrderRequestsProcessStatusToScheduledAsync(
+            int orderId,
+            CancellationToken ct)
+        {
+            var requests = await _db.order_requests
+                .Where(x => x.order_id == orderId)
+                .ToListAsync(ct);
+
+            foreach (var req in requests)
+            {
+                if (string.Equals(req.process_status, "InProcessing", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(req.process_status, "Importing", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(req.process_status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(req.process_status, "Completed", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(req.process_status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(req.process_status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                req.process_status = "Scheduled";
+            }
         }
 
         private async Task ApplyPriorityToGroupRelatedProductionsAsync(
