@@ -3150,34 +3150,16 @@ namespace AMMS.Application.Services
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            /*
-             * SUB/BOTH theo logic đề xuất method:
-             * KHÔNG cộng giá trị lịch sử của BTP vào chi phí sản xuất mới.
-             *
-             * Không làm:
-             * sub.unit_cost_to_stage * subUsedQty
-             *
-             * Vì đây là giá trị tồn kho/kế toán, không phải chi phí phát sinh
-             * để sản xuất order hiện tại.
-             */
             var subRatio = orderQty <= 0
                 ? 0m
                 : subUsedQty / (decimal)orderQty;
 
-            /*
-             * Chi phí hoàn thiện phần BTP:
-             * chỉ tính vật liệu/công đoạn mà order cần nhưng sub chưa cover.
-             */
             var remainingMaterialForSubPart =
                 GetRemainingMaterialCostAfterSub(est, orderRoute, subPath) * subRatio;
 
             var remainingProcessForSubPart =
                 GetRemainingProcessCostAfterSub(processCosts, subPath) * subRatio;
 
-            /*
-             * Phần NVL trong BOTH:
-             * phần thiếu BTP phải sản xuất từ đầu theo tỷ lệ nvlQty/orderQty.
-             */
             var nvlRatio = orderQty <= 0
                 ? 0m
                 : nvlQty / (decimal)orderQty;
@@ -3228,15 +3210,6 @@ namespace AMMS.Application.Services
             var isGroup = kind == "GROUP";
             var isSplit = kind == "SPLIT";
             var isSingle = string.IsNullOrWhiteSpace(kind) || kind == "SINGLE";
-
-            /*
-             * CASE ĐẶC BIỆT:
-             * SINGLE full path bằng SUB nhưng chưa hoàn tất full path.
-             * API mark-importing lúc này chỉ xác nhận production bước đầu/chuẩn bị,
-             * không được kéo production/order lên Importing sớm.
-             *
-             * Trạng thái đúng để production manager tiếp tục chạy là InProcessing.
-             */
             if (isSingle && method == "SUB")
             {
                 var allTasksFinished = await AreAllTasksFinishedForProductionServiceAsync(
@@ -3422,11 +3395,6 @@ namespace AMMS.Application.Services
                 ? selectedSubProduct.unit_cost_to_stage * quantityIssued
                 : 0m;
 
-            /*
-             * FIX:
-             * selectedSubProduct có thể đang thiếu coating_material_code / wave_material_code.
-             * Nếu thiếu thì fallback lấy từ cost_estimate của order.
-             */
             var estimate = await LoadAcceptedEstimateForIssueReceiptAsync(
                 ord.order_id,
                 orderReq,
@@ -3646,117 +3614,6 @@ namespace AMMS.Application.Services
             public List<string> extra_stages { get; set; } = new();
         }
 
-        private static MethodCostBuildResult BuildSubOrBothMethodCostWithoutOverheadRushDiscount(
-            cost_estimate est,
-            List<EstimateProcessCostRow> processCosts,
-            List<string> orderRoute,
-            sub_product sub,
-            int subUsedQty,
-            int nvlQty,
-            int orderQty)
-        {
-            orderQty = orderQty > 0 ? orderQty : 1;
-            subUsedQty = Math.Max(subUsedQty, 0);
-            nvlQty = Math.Max(nvlQty, 0);
-
-            var subPath = SubProductCompatibilityHelper.ParseRoute(sub.product_process);
-
-            /*
-             * Các công đoạn order còn thiếu sau phần BTP.
-             */
-            var extraStagesForSubPart = orderRoute
-                .Where(x => !IsStageCoveredBySub(x, subPath))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            /*
-             * 1. Giá trị BTP đã có.
-             *
-             * unit_cost_to_stage là giá 1 sản phẩm BTP tới stage sub.product_process.
-             * Ví dụ sub RALO,CAT,IN có unit_cost_to_stage = 3300
-             * => dùng 10.000 BTP thì giá trị BTP = 3300 * 10.000.
-             */
-            var subStageUnitCost = Money(sub.unit_cost_to_stage);
-
-            if (subStageUnitCost <= 0m)
-            {
-                /*
-                 * Fallback cho dữ liệu cũ chưa có unit_cost_to_stage.
-                 * Fallback chỉ tính material/process đã cover, không overhead/rush/discount.
-                 */
-                subStageUnitCost = EstimateCoveredUnitCostFromOrderWithoutOverheadRushDiscount(
-                    est,
-                    processCosts,
-                    orderRoute,
-                    subPath,
-                    orderQty);
-            }
-
-            var subProductValue = subStageUnitCost * subUsedQty;
-
-            /*
-             * 2. Chi phí hoàn thiện phần BTP.
-             *
-             * Nếu sub đã có RALO,CAT,IN thì không tính lại:
-             * - paper_cost
-             * - ink_cost
-             * - process cost RALO/CAT/IN
-             *
-             * Chỉ tính phần order có nhưng sub chưa có.
-             */
-            var subRatio = orderQty <= 0
-                ? 0m
-                : subUsedQty / (decimal)orderQty;
-
-            var remainingMaterialForSubPart =
-                GetRemainingMaterialCostAfterSub(est, orderRoute, subPath) * subRatio;
-
-            var remainingProcessForSubPart =
-                GetRemainingProcessCostAfterSub(processCosts, subPath) * subRatio;
-
-            /*
-             * 3. Phần NVL trong BOTH.
-             *
-             * Phần này sản xuất từ đầu nên lấy full material/process theo tỷ lệ nvlQty/orderQty.
-             * Vẫn không cộng overhead/rush/discount theo yêu cầu mới.
-             */
-            var nvlRatio = orderQty <= 0
-                ? 0m
-                : nvlQty / (decimal)orderQty;
-
-            var nvlMaterialPart =
-                GetFullNvlMaterialCost(est) * nvlRatio;
-
-            var nvlProcessPart =
-                GetFullProcessCost(processCosts) * nvlRatio;
-
-            /*
-             * materialCost ở đây bao gồm:
-             * - giá trị BTP đã có
-             * - vật liệu còn phải dùng để hoàn thiện BTP
-             * - vật liệu để sản xuất phần NVL nếu là BOTH
-             */
-            var methodMaterialCost =
-                subProductValue +
-                remainingMaterialForSubPart +
-                nvlMaterialPart;
-
-            var methodProcessCost =
-                remainingProcessForSubPart +
-                nvlProcessPart;
-
-            var built = BuildMethodCostWithoutOverheadRushDiscount(
-                est,
-                methodMaterialCost,
-                methodProcessCost,
-                orderQty);
-
-            built.covered_stages = subPath;
-            built.extra_stages = extraStagesForSubPart;
-
-            return built;
-        }
-
         private static MethodCostBuildResult BuildMethodCostWithoutOverheadRushDiscount(
     cost_estimate est,
     decimal materialCost,
@@ -3822,10 +3679,6 @@ namespace AMMS.Application.Services
 
         private static decimal GetFullNvlMaterialCost(cost_estimate est)
         {
-            /*
-             * Theo file tính giá:
-             * material_cost = paper + ink + coating + mounting glue + lamination.
-             */
             var explicitSum =
                 Money(est.paper_cost) +
                 Money(est.ink_cost) +
@@ -3835,9 +3688,6 @@ namespace AMMS.Application.Services
 
             var materialCost = Money(est.material_cost);
 
-            /*
-             * Ưu tiên material_cost nếu DB đã lưu tổng lớn hơn explicitSum.
-             */
             return Math.Round(Math.Max(materialCost, explicitSum), 2);
         }
 
@@ -3868,20 +3718,12 @@ namespace AMMS.Application.Services
                 total += Money(est.ink_cost);
             }
 
-            /*
-             * Coating:
-             * Chỉ tính nếu order có PHU và sub chưa có PHU.
-             */
             if (OrderNeedsAny(orderRoute, "PHU") &&
                 !IsStageCoveredBySub("PHU", subPath))
             {
                 total += Money(est.coating_glue_cost);
             }
 
-            /*
-             * Lamination:
-             * Chỉ tính nếu order có CAN/CAN_MANG và sub chưa có.
-             */
             if (OrderNeedsAny(orderRoute, "CAN", "CAN_MANG") &&
                 !IsStageCoveredBySub("CAN", subPath) &&
                 !IsStageCoveredBySub("CAN_MANG", subPath))
@@ -3889,11 +3731,6 @@ namespace AMMS.Application.Services
                 total += Money(est.lamination_cost);
             }
 
-            /*
-             * Mounting:
-             * Chỉ tính nếu order có BOI và sub chưa có BOI.
-             * Theo file giá bạn gửi, chi phí vật liệu BOI là mounting_glue_cost.
-             */
             if (OrderNeedsAny(orderRoute, "BOI") &&
                 !IsStageCoveredBySub("BOI", subPath))
             {
@@ -3961,7 +3798,7 @@ namespace AMMS.Application.Services
                 return false;
 
             /*
-             * CAN/CAN_MANG có thể lệch mã giữa estimate và process.
+             * CAN có thể lệch mã giữa estimate và process.
              */
             if (code is "CAN" or "CAN_MANG")
             {
@@ -3994,34 +3831,18 @@ namespace AMMS.Application.Services
 
         private static bool SubAlreadyContainsPaper(List<string> subPath)
         {
-            /*
-             * RALO là bản/kẽm, chưa tính là BTP trên giấy.
-             * Từ CAT/IN trở đi thì BTP đã chứa giấy.
-             */
+
             return subPath.Any(x =>
                 x is "CAT" or "IN" or "PHU" or "CAN" or "CAN_MANG" or "BOI" or "BE" or "DUT" or "DAN");
         }
 
         private static decimal RoundTotalMoneyDownToThousands(decimal value)
         {
-            /*
-             * Làm tròn xuống hàng nghìn.
-             * Ví dụ:
-             * 7,654,321 => 7,654,000
-             * 7,654,999 => 7,654,000
-             */
+
             if (value <= 0m)
                 return 0m;
 
             return Math.Floor(value / 1000m) * 1000m;
-        }
-
-        private static decimal? RoundTotalMoneyDownToThousands(decimal? value)
-        {
-            if (!value.HasValue)
-                return null;
-
-            return RoundTotalMoneyDownToThousands(value.Value);
         }
 
         private static decimal CalculateUnitCostFromRoundedTotal(
@@ -4030,10 +3851,6 @@ namespace AMMS.Application.Services
         {
             quantity = quantity > 0 ? quantity : 1;
 
-            /*
-             * Unit cũng là VND nên trả số nguyên.
-             * Nếu bạn muốn giữ số lẻ unit cost thì bỏ Math.Round ở đây.
-             */
             return Math.Round(
                 roundedTotalCost / quantity,
                 0,
@@ -4049,10 +3866,6 @@ namespace AMMS.Application.Services
 
             orderQty = orderQty > 0 ? orderQty : 1;
 
-            /*
-             * 1. Làm tròn total_cost của từng method xuống hàng nghìn.
-             * 2. Tính lại unit_cost từ total_cost đã làm tròn.
-             */
             foreach (var option in options)
             {
                 if (option.total_cost > 0m)
@@ -4069,10 +3882,6 @@ namespace AMMS.Application.Services
                 }
             }
 
-            /*
-             * 3. Tính lại saving dựa trên total_cost đã làm tròn.
-             * Không dùng saving cũ vì saving cũ đang tính từ số chưa làm tròn.
-             */
             var nvl = options.FirstOrDefault(x =>
                 string.Equals(x.method, "NVL", StringComparison.OrdinalIgnoreCase));
 
@@ -4306,11 +4115,6 @@ namespace AMMS.Application.Services
                 if (!order.is_production_ready)
                     throw new InvalidOperationException("Order chưa được duyệt phương thức sản xuất.");
 
-                /*
-                 * Tạo phiếu xuất kho trước.
-                 * Với NVL: tạo phiếu NVL.
-                 * Với SUB/BOTH: tạo phiếu BTP/NVL theo logic hiện tại của bạn.
-                 */
                 var issueFileSingleOrSplit = await ConfirmSingleOrSplitProductionIssueAsync(
                     prod,
                     confirmedByUserId,
@@ -4325,16 +4129,8 @@ namespace AMMS.Application.Services
                     "SPLIT",
                     StringComparison.OrdinalIgnoreCase);
 
-                /*
-                 * SINGLE full path thường chưa có task tại thời điểm confirm schedule.
-                 * SPLIT đã có task từ flow group, không gọi ScheduleTasksAfterMethodAsync.
-                 */
                 if (!hasTasks && !isSplit)
                 {
-                    /*
-                     * Commit transaction hiện tại trước vì ScheduleTasksAfterMethodAsync
-                     * có thể tự tạo task/production bằng service khác.
-                     */
                     await _db.SaveChangesAsync(ct);
                     await tx.CommitAsync(ct);
 
@@ -4346,11 +4142,6 @@ namespace AMMS.Application.Services
                         ? scheduledProdId.Value
                         : prod.prod_id;
 
-                    /*
-                     * FIX CHÍNH:
-                     * Sau khi ScheduleTasksAfterMethodAsync tạo task xong,
-                     * bắt buộc re-load production/order dạng tracking và sync Scheduled.
-                     */
                     var scheduledProd = await SyncSingleOrSplitProductionScheduledAsync(
                         finalProdId,
                         order.order_id,
@@ -4416,10 +4207,6 @@ namespace AMMS.Application.Services
                 .FirstOrDefaultAsync(x => x.order_id == orderId, ct)
                 ?? throw new InvalidOperationException($"Không tìm thấy order_id={orderId}.");
 
-            /*
-             * Chỉ sync status lập lịch.
-             * Không đụng InProcessing/Importing/Delivery/Completed.
-             */
             if (string.Equals(prod.status, "InProcessing", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(prod.status, "Importing", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(prod.status, "Delivery", StringComparison.OrdinalIgnoreCase) ||
@@ -4499,59 +4286,6 @@ namespace AMMS.Application.Services
             }
         }
 
-        private async Task ApplyPriorityToGroupRelatedProductionsAsync(
-    int groupProdId,
-    bool isPriority,
-    CancellationToken ct)
-        {
-            var memberRows = await _db.prod_orders
-                .AsNoTracking()
-                .Where(x =>
-                    x.prod_id == groupProdId &&
-                    (
-                        x.status == null ||
-                        x.status != "Cancelled"
-                    ))
-                .Select(x => new
-                {
-                    x.order_id,
-                    x.single_prod_id
-                })
-                .ToListAsync(ct);
-
-            var orderIds = memberRows
-                .Where(x => x.order_id > 0)
-                .Select(x => x.order_id)
-                .Distinct()
-                .ToList();
-
-            var singleProdIds = memberRows
-                .Where(x => x.single_prod_id.HasValue && x.single_prod_id.Value > 0)
-                .Select(x => x.single_prod_id!.Value)
-                .Distinct()
-                .ToList();
-
-            var relatedProds = await _db.productions
-                .Where(x =>
-                    x.prod_id == groupProdId ||
-                    singleProdIds.Contains(x.prod_id) ||
-                    (
-                        x.order_id.HasValue &&
-                        orderIds.Contains(x.order_id.Value) &&
-                        (
-                            x.prod_kind == "SINGLE" ||
-                            x.prod_kind == "SPLIT" ||
-                            x.prod_kind == null
-                        )
-                    ))
-                .ToListAsync(ct);
-
-            foreach (var related in relatedProds)
-            {
-                related.is_priority = isPriority;
-            }
-        }
-
         private async Task<DateTime?> ResolveProductionPlannedEndFromTasksAsync(
     int prodId,
     CancellationToken ct)
@@ -4570,67 +4304,6 @@ namespace AMMS.Application.Services
                 .Where(x => x.prod_id == prodId)
                 .MinAsync(x => x.planned_start_time, ct);
         }
-
-        private async Task IssueSubProductIfNeededOnScheduleAsync(
-    production prod,
-    order order,
-    order_request orderReq,
-    string method,
-    int? userId,
-    CancellationToken ct)
-        {
-            method = (method ?? "").Trim().ToUpperInvariant();
-
-            if (method != "SUB" && method != "BOTH")
-                return;
-
-            if (!prod.sub_product_id.HasValue || prod.sub_product_id.Value <= 0)
-                throw new InvalidOperationException("Production dùng SUB/BOTH nhưng chưa có sub_product_id.");
-
-            if (prod.sub_product_used_qty <= 0)
-                throw new InvalidOperationException("Production dùng SUB/BOTH nhưng sub_product_used_qty không hợp lệ.");
-
-            var sub = await _db.sub_products
-                .FirstOrDefaultAsync(x => x.id == prod.sub_product_id.Value, ct)
-
-                ?? throw new InvalidOperationException("Không tìm thấy sub_product.");
-
-            if (sub.is_active != true || sub.is_imported != true)
-                throw new InvalidOperationException("Bán thành phẩm chưa active hoặc chưa được nhập kho.");
-
-            if (sub.quantity < prod.sub_product_used_qty)
-            {
-                throw new InvalidOperationException(
-                    $"Không đủ tồn BTP. sub_id={sub.id}, tồn={sub.quantity}, cần={prod.sub_product_used_qty}.");
-            }
-
-            sub.quantity -= prod.sub_product_used_qty;
-            sub.updated_at = AppTime.NowVnUnspecified();
-
-            await _db.stock_moves.AddAsync(new stock_move
-            {
-                material_id = null,
-                sub_product_id = sub.id,
-                type = "OUT",
-                qty = prod.sub_product_used_qty,
-                ref_doc = $"PROD-BTP-ISSUE-{prod.prod_id}",
-                user_id = userId,
-                move_date = AppTime.NowVnUnspecified(),
-                note =
-                    $"Xuất bán thành phẩm cho production. " +
-                    $"prod_id={prod.prod_id}, order_id={order.order_id}, sub_id={sub.id}, method={method}"
-            }, ct);
-
-            prod.sub_product_issue_file = await CreateAndUploadSubProductIssueFileAsync(
-                prod,
-                order,
-                orderReq,
-                sub,
-                prod.sub_product_used_qty,
-                $"Xuất BTP khi GM xác nhận lập lịch. Method={method}.",
-                ct);
-        }
-
         private async Task<ProductionMethodAvailability> ResolveProductionMethodAvailabilityAsync(
     order ord,
     order_request req,
@@ -4649,12 +4322,6 @@ namespace AMMS.Application.Services
             if (orderQty <= 0)
                 throw new InvalidOperationException("Số lượng order không hợp lệ.");
 
-            /*
-             * Dùng lại logic cũ trong GetProductionReadyAsync / SetProductionReadyAsync:
-             * - NVL đủ khi material đủ + máy đủ
-             * - SUB đủ khi có sub_product đủ quantity + máy đủ
-             * - BOTH đủ khi có sub_product partial + NVL phần còn lại đủ + máy đủ
-             */
             var fullMaterials = await GetMaterialReadinessAsync(
                 orderId,
                 overrideOrderQty: null,
@@ -4733,10 +4400,6 @@ namespace AMMS.Application.Services
             int? matchedSubProductId = null;
             var matchedSubProductQty = 0;
 
-            /*
-             * matched_sub_product_id chỉ cần cho SUB/BOTH.
-             * Nếu chỉ có NVL thì để null.
-             */
             if (canUseSub)
             {
                 matchedSubProductId = bestSubEnoughOption?.Sub.id;
@@ -4803,10 +4466,6 @@ namespace AMMS.Application.Services
                     };
                 }
 
-                /*
-                 * Chỉ xử lý order đang Pending.
-                 * Nếu order đã Scheduled/InProcessing/Importing thì không auto sửa method nữa.
-                 */
                 if (!string.Equals(ord.status, "Pending", StringComparison.OrdinalIgnoreCase))
                 {
                     await tx.CommitAsync(ct);

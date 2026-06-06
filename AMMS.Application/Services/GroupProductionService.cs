@@ -63,11 +63,6 @@ namespace AMMS.Application.Services
     string? processCodes,
     CancellationToken ct = default)
         {
-            /*
-             * FE mới không cần API này nữa.
-             * Giữ lại để backward compatibility.
-             * Candidate được flatten từ SuggestAsync để không lệch logic.
-             */
             var suggestions = await SuggestAsync(
                 productTypeId,
                 processCodes,
@@ -138,10 +133,6 @@ namespace AMMS.Application.Services
         {
             var today = AppTime.NowVnUnspecified().Date;
 
-            /*
-             * Nếu muốn chỉ hiện đơn giao >= 7 ngày thì giữ minDeliveryDate.
-             * Nếu muốn single preview hiện cả đơn gấp thì chỉ check delivery_date != null.
-             */
             var minDeliveryDate = today.AddDays(MinProductionDays);
 
             selectedCodes = NormalizeSelectedCodesForGroup(selectedCodes);
@@ -210,9 +201,6 @@ namespace AMMS.Application.Services
 
             selectedCodes = NormalizeSelectedCodesForGroup(selectedCodes);
 
-            /*
-             * Nếu FE truyền processCodes thì process đó bắt buộc phải là PHU/CAN/BOI.
-             */
             if (selectedCodes.Count > 0)
                 EnsureOnlyGroupableDept2Codes(selectedCodes);
 
@@ -261,11 +249,6 @@ namespace AMMS.Application.Services
                 .Where(x =>
                     !productTypeId.HasValue ||
                     x.Item.product_type_id == productTypeId.Value)
-
-                /*
-                 * - NVL/SUB được phép ghép chung.
-                 * - BOTH không được ghép.
-                 */
                 .Where(x =>
                 {
                     var method = ResolveRowProductionMethodOrNull(x);
@@ -343,9 +326,6 @@ namespace AMMS.Application.Services
                 selectedCodes,
                 ct);
 
-            /*
-             * Preview này đã được ApplyMachineScheduleToPreviewAsync ở PreviewAsync.
-             */
             var preview = await PreviewAsync(req, ct);
 
             if (string.Equals(preview.suggestion_type, "SINGLE_PREVIEW", StringComparison.OrdinalIgnoreCase))
@@ -439,10 +419,6 @@ namespace AMMS.Application.Services
                     .OrderBy(x => x.seq_num)
                     .ToListAsync(ct);
 
-                /*
-                 * Tạo task SINGLE_PRIVATE cho từng order trước công đoạn ghép.
-                 * Hàm này dùng preview.private_stages đã được scheduler tính lại.
-                 */
                 await EnsureSinglePrivateTasksBeforeGroupAsync(
                     rows,
                     plan,
@@ -760,9 +736,6 @@ namespace AMMS.Application.Services
                     .Where(x => x.prod_id == row.SingleProd.prod_id)
                     .ToListAsync(ct);
 
-                /*
-                 * Nếu production đã có task cũ nhưng chưa chạy, xóa để tạo lại đúng preview.
-                 */
                 var hasProgress = existingTasks.Any(x =>
                     string.Equals(x.status, "Ready", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
@@ -947,132 +920,6 @@ namespace AMMS.Application.Services
                 $"Process chọn=[{string.Join(",", selectedCodes)}]. " +
                 $"Suggestion hợp lệ: {validSuggestionText}");
         }
-
-        private async Task EnsureSingleHeadTasksBeforeGroupAsync(
-    List<GroupOrderRow> rows,
-    List<string> selectedGroupCodes,
-    List<product_type_process> allSteps,
-    GroupProductionConfirmPreviewResponse preview,
-    CancellationToken ct)
-        {
-            var selectedSet = selectedGroupCodes
-                .Select(NormProcessCode)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            var now = AppTime.NowVnUnspecified();
-
-            foreach (var row in rows)
-            {
-                var route = row.RouteCodes
-                    .Select(NormProcessCode)
-                    .Where(x => !string.IsNullOrWhiteSpace(x))
-                    .ToList();
-
-                var firstGroupIndex = route.FindIndex(x => selectedSet.Contains(x));
-
-                if (firstGroupIndex <= 0)
-                    continue;
-
-                var headCodes = route
-                    .Take(firstGroupIndex)
-                    .ToList();
-
-                var existingCodes = await _db.tasks
-                    .AsNoTracking()
-                    .Include(x => x.process)
-                    .Where(x => x.prod_id == row.SingleProd.prod_id)
-                    .Select(x => x.process != null ? x.process.process_code : null)
-                    .ToListAsync(ct);
-
-                var existingSet = existingCodes
-                    .Select(NormProcessCode)
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-                var method = ResolveRowProductionMethodOrThrow(row);
-
-                var subCoveredCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-                if ((method == "SUB" || method == "BOTH") &&
-                    row.SingleProd.sub_product_id.HasValue)
-                {
-                    var subPath = await _db.sub_products
-                        .AsNoTracking()
-                        .Where(x => x.id == row.SingleProd.sub_product_id.Value)
-                        .Select(x => x.product_process)
-                        .FirstOrDefaultAsync(ct);
-
-                    subCoveredCodes = ParseProcessCodes(subPath)
-                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                }
-
-                var headStart = preview.suggested_planned_start_date;
-                var headEnd = preview.dept1_private_stage.planned_end_date;
-
-                var headSteps = allSteps
-                    .Where(x => headCodes.Contains(
-                        NormProcessCode(x.process_code),
-                        StringComparer.OrdinalIgnoreCase))
-                    .OrderBy(x => x.seq_num)
-                    .ToList();
-
-                var totalMinutes = Math.Max(1, (int)(headEnd - headStart).TotalMinutes);
-                var minutesPerTask = Math.Max(1, totalMinutes / Math.Max(1, headSteps.Count));
-
-                for (var i = 0; i < headSteps.Count; i++)
-                {
-                    var step = headSteps[i];
-                    var code = NormProcessCode(step.process_code);
-
-                    if (existingSet.Contains(code))
-                        continue;
-
-                    var isFinishedBySub =
-                        method == "SUB" &&
-                        subCoveredCodes.Contains(code);
-
-                    var start = headStart.AddMinutes(minutesPerTask * i);
-                    var end = i == headSteps.Count - 1
-                        ? headEnd
-                        : headStart.AddMinutes(minutesPerTask * (i + 1));
-
-                    var task = new task
-                    {
-                        prod_id = row.SingleProd.prod_id,
-                        process_id = step.process_id,
-                        seq_num = step.seq_num,
-                        name = step.process_name ?? step.process_code ?? code,
-
-                        status = isFinishedBySub ? "Finished" : "Unassigned",
-
-                        machine = ResolveTaskMachineFromProcess(step),
-                        input_mode = "MANUAL",
-
-                        start_time = isFinishedBySub ? now : null,
-                        end_time = isFinishedBySub ? now : null,
-
-                        planned_start_time = start,
-                        planned_end_time = end,
-
-                        reason = isFinishedBySub
-                            ? "Bán thành phẩm đã cover công đoạn này khi lập lịch group."
-                            : "Task SINGLE trước công đoạn ghép.",
-
-                        is_taken_sub_product = isFinishedBySub
-                    };
-
-                    await _db.tasks.AddAsync(task, ct);
-                }
-
-                row.SingleProd.planned_start_date ??= headStart;
-                row.SingleProd.planned_end_date = headEnd;
-                row.SingleProd.status = "Scheduled";
-
-                EnsureSingleMemberApprovalFlow(row.SingleProd);
-            }
-
-            await _db.SaveChangesAsync(ct);
-        }
-
         private async Task<production> CreateDepartmentGroupProductionAsync(
     SuggestionBatchPreviewDto batch,
     List<GroupOrderRow> members,
@@ -1332,11 +1179,6 @@ namespace AMMS.Application.Services
 
             var finalSuggestions = new List<SuggestedGroupProductionDto>();
 
-            /*
-             * Rule mới:
-             * Group theo product_type_id.
-             * Không group theo prod_method nữa.
-             */
             foreach (var productTypeGroup in allRows
                 .Where(x => x.Item != null)
                 .Where(x => x.Item.product_type_id.HasValue)
@@ -1403,9 +1245,6 @@ namespace AMMS.Application.Services
                     }
                 }
 
-                /*
-                 * Order không nằm trong group hợp lệ vẫn hiện SINGLE_PREVIEW.
-                 */
                 var singleRows = rowsOfOneProductType
                     .Where(x => !groupedOrderIds.Contains(x.Order.order_id))
                     .OrderBy(x => x.Order.delivery_date)
@@ -1416,10 +1255,6 @@ namespace AMMS.Application.Services
                 {
                     var method = ResolveRowProductionMethodOrNull(row);
 
-                    /*
-                     * BOTH không đưa vào suggestion group.
-                     * BOTH sẽ đi flow single riêng.
-                     */
                     if (method == "BOTH")
                         continue;
 
@@ -1504,11 +1339,6 @@ namespace AMMS.Application.Services
 
             try
             {
-                /*
-                 * QUAN TRỌNG:
-                 * Đây là preview nội bộ khi SuggestAsync đang build suggestion.
-                 * Không gọi validate-against-current-suggestion nữa, vì chính suggestion này đang được build.
-                 */
                 var preview = await PreviewCoreAsync(
                     new CreateGroupProductionRequest
                     {
@@ -1546,10 +1376,6 @@ namespace AMMS.Application.Services
             }
             catch (Exception ex)
             {
-                /*
-                 * Không để null list.
-                 * Nếu còn lỗi, FE vẫn nhận được order/suggest_process, nhưng biết rõ lỗi ở preview_error.
-                 */
                 suggestion.can_group = false;
                 suggestion.create_group_allowed = false;
                 suggestion.preview = null;
@@ -1653,12 +1479,6 @@ namespace AMMS.Application.Services
             var daysLate = Math.Max(
                 0,
                 (plannedEnd.Date - commonDeadline.Date).Days);
-
-            /*
-             * FIX CHÍNH:
-             * Trước đây SINGLE_PREVIEW không set preview nên response trả preview = null.
-             * Bây giờ tạo preview đầy đủ giống cấu trúc API preview.
-             */
             var preview = new GroupProductionConfirmPreviewResponse
             {
                 suggestion_type = "SINGLE_PREVIEW",
@@ -1940,9 +1760,6 @@ namespace AMMS.Application.Services
             if (selectedCodes.Count == 0 || rows.Count < 2)
                 return new List<SuggestedGroupProductionDto>();
 
-            /*
-             * Chỉ lấy order có đủ toàn bộ selectedCodes.
-             */
             var rowsHavingAllCodes = rows
                 .Where(row => selectedCodes.All(code =>
                     row.RouteCodes.Contains(code, StringComparer.OrdinalIgnoreCase)))
@@ -1953,10 +1770,6 @@ namespace AMMS.Application.Services
 
             var result = new List<SuggestedGroupProductionDto>();
 
-            /*
-             * Nhóm theo material key tổng hợp của toàn bộ selected codes.
-             * Không nhóm theo prod_method.
-             */
             var materialGroups = rowsHavingAllCodes
                 .GroupBy(row => BuildCompositeGroupMaterialKey(selectedCodes, row))
                 .Where(g => g.Count() >= 2)
@@ -2026,7 +1839,7 @@ namespace AMMS.Application.Services
                 rows,
                 possibleGroupCodes);
         }
-       
+
         private static string? CombineMaterialKeys(
             string? a,
             string? b)
@@ -2234,9 +2047,11 @@ namespace AMMS.Application.Services
 
             var stages = new List<GroupProductionStageDto>();
 
-            var previousOutputQty = prod.group_total_qty > 0
-                ? (decimal)prod.group_total_qty
-                : orderRows.Sum(x => x.qty);
+            var previousEstimatedOutputQty = prod.group_total_qty > 0
+    ? (decimal)prod.group_total_qty
+    : orderRows.Sum(x => x.qty);
+
+            var previousActualOutputQty = 0m;
 
             var previousOutputName = "Bán thành phẩm từ các order ghép";
 
@@ -2267,20 +2082,10 @@ namespace AMMS.Application.Services
                     task.process?.process_code,
                     task.process?.process_name,
                     baseGroupQty,
-                    previousOutputQty,
+                    previousEstimatedOutputQty,
                     previousOutputName,
                     taskLogs);
 
-                /*
-                 * FIX CHÍNH:
-                 * Luôn lấy estimate từ qr-prepare bundle trước.
-                 * Nhờ vậy task chưa finish/chưa có log vẫn hiển thị estimated input material.
-                 *
-                 * Ví dụ task CAN chưa finish:
-                 * - BuildGroupStageIO cũ tạo LAMINATION estimated_qty = 0
-                 * - qrBundle.consumable_materials có MANG_12MIC estimated_input_qty
-                 * - Sau merge, detail sẽ hiển thị Màng cán 12 mic estimated_qty đúng.
-                 */
                 var qrBundle = await _scanSvc.GetTaskQrMaterialBundleAsync(
                     task.task_id,
                     ct);
@@ -2291,29 +2096,14 @@ namespace AMMS.Application.Services
                     qrBundle,
                     task.process?.process_code,
                     task.process?.process_name,
-                    previousOutputQty,
+                    previousEstimatedOutputQty,
                     previousOutputName);
 
-                /*
-                 * Log thực tế vẫn apply sau cùng để override actual_qty.
-                 * Estimate giữ theo qr-prepare nếu log chưa có.
-                 */
                 ApplyTaskLogJsonToGroupStageIo(
                     io.inputs,
                     io.outputs,
                     taskLogs);
 
-                /*
-                 * FIX GROUP SUB + SUB:
-                 * Nếu các công đoạn BTP của từng single_prod_id đã được confirm từ kho,
-                 * thì công đoạn group đầu tiên sau BTP phải hiển thị input_materials.actual_qty.
-                 *
-                 * Lưu ý:
-                 * - Không set output actual của group task.
-                 * - Chỉ set actual_qty cho dòng BTP input chính.
-                 * - Logic này chạy sau ApplyQrPrepareEstimateToGroupStageIo để đồng bộ estimate với QR prepare.
-                 * - Logic này chạy sau ApplyTaskLogJsonToGroupStageIo để không ghi đè actual từ QR report thật.
-                 */
                 await ApplyConfirmedSubActualToGroupFirstStageInputAsync(
                     groupProd: prod,
                     groupTask: task,
@@ -2322,16 +2112,12 @@ namespace AMMS.Application.Services
                     qrBundle: qrBundle,
                     ct: ct);
 
-                /*
-                 * actualOutput ưu tiên output_json.
-                 * Nếu output_json trống thì fallback qty_good.
-                 */
                 var actualOutput = ResolveGroupActualOutputQty(taskLogs);
 
                 var estimatedOutputQty = ResolveEstimatedGroupOutputQty(
                     io.outputs,
                     io.estimatedOutputQty,
-                    previousOutputQty);
+                    previousEstimatedOutputQty);
 
                 var stage = new GroupProductionStageDto
                 {
@@ -2362,24 +2148,27 @@ namespace AMMS.Application.Services
 
                 stages.Add(stage);
 
-                /*
-                 * Previous stage cho stage kế tiếp:
-                 * ưu tiên output_json actual > qty_good > estimated.
-                 */
                 var firstOutput = io.outputs.FirstOrDefault();
 
-                previousOutputQty =
-    stage.actual_output_qty > 0
-        ? stage.actual_output_qty
-        : firstOutput?.estimated_qty > 0
-            ? firstOutput.estimated_qty
-            : estimatedOutputQty;
+                previousEstimatedOutputQty = ResolveGroupStageEstimatedOutputForNext(
+                    stage,
+                    firstOutput,
+                    estimatedOutputQty);
+
+                previousActualOutputQty = ResolveGroupStageActualOutputForNext(
+                    stage,
+                    firstOutput);
 
                 previousOutputName =
                     firstOutput?.name
                     ?? $"BTP sau {task.process?.process_code}";
             }
+
             NormalizeGroupDetailStagesBySequentialFlow(stages);
+
+
+            NormalizeGroupDetailEstimatedQtyByGroupAnchor(stages);
+
             var previousStageContext = await BuildPreviousStageContextForGroupAsync(
                 prod,
                 tasks,
@@ -2442,6 +2231,206 @@ namespace AMMS.Application.Services
             };
         }
 
+        private static void NormalizeGroupDetailEstimatedQtyByGroupAnchor(
+    List<GroupProductionStageDto>? stages)
+        {
+            if (stages == null || stages.Count == 0)
+                return;
+
+            var orderedStages = stages
+                .Where(x => x != null)
+                .OrderBy(x => x.seq_num ?? int.MaxValue)
+                .ThenBy(x => x.task_id)
+                .ToList();
+
+            if (orderedStages.Count == 0)
+                return;
+
+            var anchorEstimateQty = ResolveGroupStableEstimateAnchorQty(orderedStages);
+
+            if (anchorEstimateQty <= 0)
+                return;
+
+            decimal previousActualOutputQty = 0m;
+
+            for (var i = 0; i < orderedStages.Count; i++)
+            {
+                var stage = orderedStages[i];
+
+                stage.estimated_output_qty = RoundQty(anchorEstimateQty);
+
+                ApplyGroupStableEstimateToPrevInput(
+                    stage,
+                    anchorEstimateQty,
+                    i == 0 ? null : previousActualOutputQty);
+
+                ApplyGroupStableEstimateToMainOutput(
+                    stage,
+                    anchorEstimateQty);
+
+                previousActualOutputQty = ResolveGroupStageActualOutputForNextStable(
+                    stage);
+            }
+        }
+
+        private static decimal ResolveGroupStableEstimateAnchorQty(
+            List<GroupProductionStageDto> orderedStages)
+        {
+            if (orderedStages == null || orderedStages.Count == 0)
+                return 0m;
+
+            var firstStage = orderedStages.FirstOrDefault();
+
+            var fromFirstStage = ResolveGroupStageEstimatedQtyForAnchor(firstStage);
+
+            if (fromFirstStage > 0)
+                return RoundQty(fromFirstStage);
+
+            var maxEstimate = orderedStages
+                .Select(ResolveGroupStageEstimatedQtyForAnchor)
+                .Where(x => x > 0)
+                .DefaultIfEmpty(0m)
+                .Max();
+
+            return maxEstimate > 0
+                ? RoundQty(maxEstimate)
+                : 0m;
+        }
+
+        private static decimal ResolveGroupStageEstimatedQtyForAnchor(
+            GroupProductionStageDto? stage)
+        {
+            if (stage == null)
+                return 0m;
+
+            if (stage.estimated_output_qty > 0)
+                return stage.estimated_output_qty;
+
+            var fromOutput = stage.outputs?
+                .Where(x => x != null && x.estimated_qty > 0)
+                .Select(x => x.estimated_qty)
+                .DefaultIfEmpty(0m)
+                .Max() ?? 0m;
+
+            if (fromOutput > 0)
+                return fromOutput;
+
+            var fromPrevInput = stage.input_materials?
+                .Where(x => IsPreviousStageInputMaterial(x.code, x.name))
+                .Where(x => x.estimated_qty > 0)
+                .Select(x => x.estimated_qty)
+                .DefaultIfEmpty(0m)
+                .Max() ?? 0m;
+
+            return fromPrevInput;
+        }
+
+        private static void ApplyGroupStableEstimateToPrevInput(
+            GroupProductionStageDto stage,
+            decimal anchorEstimateQty,
+            decimal? previousActualOutputQty)
+        {
+            if (stage == null)
+                return;
+
+            stage.input_materials ??= new List<GroupStageMaterialDto>();
+
+            var prevInput = stage.input_materials
+                .FirstOrDefault(x => IsPreviousStageInputMaterial(x.code, x.name));
+
+            if (prevInput == null)
+                return;
+
+            prevInput.code = "PREV";
+
+            prevInput.estimated_qty = RoundQty(anchorEstimateQty);
+
+            if (previousActualOutputQty.HasValue && previousActualOutputQty.Value > 0)
+            {
+                prevInput.actual_qty = RoundQty(previousActualOutputQty.Value);
+            }
+
+            if (string.IsNullOrWhiteSpace(prevInput.unit))
+                prevInput.unit = "sp";
+        }
+
+        private static void ApplyGroupStableEstimateToMainOutput(
+            GroupProductionStageDto stage,
+            decimal anchorEstimateQty)
+        {
+            if (stage == null)
+                return;
+
+            if (stage.outputs == null || stage.outputs.Count == 0)
+                return;
+
+            var currentCode = NormGroupDetailCode(stage.process_code);
+
+            var mainOutput = stage.outputs
+                .FirstOrDefault(x =>
+                    SameGroupDetailCode(x.code, currentCode));
+
+            if (mainOutput == null)
+            {
+                mainOutput = stage.outputs.FirstOrDefault();
+            }
+
+            if (mainOutput == null)
+                return;
+
+            mainOutput.estimated_qty = RoundQty(anchorEstimateQty);
+        }
+
+        private static decimal ResolveGroupStageActualOutputForNextStable(
+            GroupProductionStageDto stage)
+        {
+            if (stage == null)
+                return 0m;
+
+            if (stage.actual_output_qty > 0)
+                return RoundQty(stage.actual_output_qty);
+
+            var fromOutput = stage.outputs?
+                .Where(x => x != null && x.actual_qty > 0)
+                .Select(x => x.actual_qty)
+                .DefaultIfEmpty(0m)
+                .Max() ?? 0m;
+
+            return fromOutput > 0
+                ? RoundQty(fromOutput)
+                : 0m;
+        }
+
+        private static decimal ResolveGroupStageEstimatedOutputForNext(
+    GroupProductionStageDto stage,
+    GroupStageMaterialDto? firstOutput,
+    decimal fallbackEstimatedOutputQty)
+        {
+            if (firstOutput != null && firstOutput.estimated_qty > 0)
+                return RoundQty(firstOutput.estimated_qty);
+
+            if (stage != null && stage.estimated_output_qty > 0)
+                return RoundQty(stage.estimated_output_qty);
+
+            if (fallbackEstimatedOutputQty > 0)
+                return RoundQty(fallbackEstimatedOutputQty);
+
+            return 0m;
+        }
+
+        private static decimal ResolveGroupStageActualOutputForNext(
+            GroupProductionStageDto stage,
+            GroupStageMaterialDto? firstOutput)
+        {
+            if (stage != null && stage.actual_output_qty > 0)
+                return RoundQty(stage.actual_output_qty);
+
+            if (firstOutput != null && firstOutput.actual_qty > 0)
+                return RoundQty(firstOutput.actual_qty);
+
+            return 0m;
+        }
+
         private sealed class GroupDetailOrderEstimateContext
         {
             public int order_id { get; set; }
@@ -2469,10 +2458,6 @@ namespace AMMS.Application.Services
             if (inputs == null)
                 return;
 
-            /*
-             * Chỉ xử lý đúng case GROUP + SUB.
-             * Không ảnh hưởng NVL-NVL, NVL-SUB, BOTH, group đã report QR.
-             */
             var isGroupSub =
                 string.Equals(groupProd.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(groupProd.prod_method, "SUB", StringComparison.OrdinalIgnoreCase);
@@ -2485,10 +2470,6 @@ namespace AMMS.Application.Services
             if (string.IsNullOrWhiteSpace(currentCode))
                 return;
 
-            /*
-             * Nếu group task đã report QR thật thì actual input đã lấy từ reference_input_json.
-             * Không ghi đè nữa.
-             */
             var hasActualFromQrReport = inputs.Any(x =>
                 IsGroupBtpInputForConfirmedSubActual(x) &&
                 x.actual_qty > 0);
@@ -2510,10 +2491,6 @@ namespace AMMS.Application.Services
             if (links.Count == 0)
                 return;
 
-            /*
-             * Chỉ hiện actual_qty khi tất cả order trong group đã confirm xong BTP path.
-             * Nếu chỉ confirm một phần thì không set actual để tránh FE hiểu là group stage đã đủ input.
-             */
             decimal totalActualInputQty = 0m;
             string? previousCodeForDisplay = null;
             var confirmedLinkCount = 0;
@@ -2533,10 +2510,6 @@ namespace AMMS.Application.Services
                 if (singleProd == null)
                     return;
 
-                /*
-                 * Case user đang hỏi là SUB + SUB.
-                 * Nếu member là NVL thì không dùng logic confirm BTP ở đây.
-                 */
                 if (!string.Equals(singleProd.prod_method, "SUB", StringComparison.OrdinalIgnoreCase))
                     return;
 
@@ -2575,16 +2548,6 @@ namespace AMMS.Application.Services
 
                 var subLastIndex = subIndexes.Max();
 
-                /*
-                 * Chỉ set actual cho công đoạn đầu tiên sau BTP.
-                 *
-                 * Ví dụ:
-                 * sub_product.product_process = RALO,CAT,IN
-                 * current group stage = PHU => OK
-                 *
-                 * Nếu current = CAN mà PHU là công đoạn trước đó thì không set actual từ BTP nữa,
-                 * vì CAN phải chờ PHU report thật.
-                 */
                 if (currentIndex != subLastIndex + 1)
                     return;
 
@@ -2607,11 +2570,6 @@ namespace AMMS.Application.Services
 
                 var nUp = ctx.n_up > 0 ? ctx.n_up : 1;
 
-                /*
-                 * Đồng bộ với qr-prepare:
-                 * Không dùng est.sheets_required của flow NVL từ đầu.
-                 * Với SUB downstream, tính lại sheetsBase theo qty_plan / n_up.
-                 */
                 var sheetsBase = Math.Max(
                     1,
                     (int)Math.Ceiling(productQty / (decimal)nUp));
@@ -2624,9 +2582,6 @@ namespace AMMS.Application.Services
                     explicitSheetsBase: sheetsBase,
                     coatingType: ctx.coating_type);
 
-                /*
-                 * actual input của công đoạn đầu sau BTP = input_qty có hao phí.
-                 */
                 var actualForThisOrder =
                     stageQty.input_qty > 0
                         ? stageQty.input_qty
@@ -2645,10 +2600,6 @@ namespace AMMS.Application.Services
             if (totalActualInputQty <= 0)
                 return;
 
-            /*
-             * Nếu qr-prepare đã trả estimated input thì lấy estimate đó làm chuẩn hiển thị,
-             * còn actual lấy theo confirmed BTP path.
-             */
             var estimatedFromQr = ResolveGroupReferenceEstimatedQtyFromQrBundle(qrBundle);
 
             var estimatedQty = estimatedFromQr > 0
@@ -2696,16 +2647,6 @@ namespace AMMS.Application.Services
                 ? "PREV"
                 : NormGroupDetailCode(previousCode);
 
-            /*
-             * Tìm dòng BTP input chính.
-             * Dòng này có thể đang là:
-             * - PREV
-             * - IN
-             * - CAT
-             * - hoặc name chứa "Bán thành phẩm..."
-             *
-             * Nhưng response cuối cùng phải trả code = PREV.
-             */
             var mainInput = inputs.FirstOrDefault(x => IsGroupPrevInputCode(x.code))
                 ?? inputs.FirstOrDefault(x => SameGroupDetailCode(x.code, previousCode))
                 ?? inputs.FirstOrDefault(IsGroupBtpInputForConfirmedSubActual);
@@ -2714,10 +2655,6 @@ namespace AMMS.Application.Services
             {
                 inputs.Insert(0, new GroupStageMaterialDto
                 {
-                    /*
-                     * FIX CHÍNH:
-                     * Không set code = previousCode.
-                     */
                     code = "PREV",
 
                     name = $"Bán thành phẩm từ công đoạn {previousCode}",
@@ -2730,34 +2667,17 @@ namespace AMMS.Application.Services
                 return;
             }
 
-            /*
-             * FIX CHÍNH:
-             * Dù previousCode là IN, CAT, PHU...
-             * response vẫn giữ code = PREV.
-             */
             mainInput.code = "PREV";
 
             mainInput.estimated_qty = Math.Round(estimatedQty, 4);
             mainInput.actual_qty = Math.Round(actualQty, 4);
 
-            /*
-             * Name vẫn giữ ý nghĩa thật.
-             * Ví dụ PHU sau BTP IN:
-             * code = PREV
-             * name = Bán thành phẩm in
-             */
             if (string.IsNullOrWhiteSpace(mainInput.name))
                 mainInput.name = $"Bán thành phẩm từ công đoạn {previousCode}";
 
             if (string.IsNullOrWhiteSpace(mainInput.unit))
                 mainInput.unit = previousCode is "BE" or "DUT" or "DAN" ? "sp" : "tờ";
 
-            /*
-             * Optional cleanup:
-             * Nếu trước đó response bị tạo 2 dòng BTP, ví dụ PREV và IN,
-             * giữ lại dòng mainInput, xóa dòng BTP trùng còn lại.
-             * Không xóa NVL như KEO_PHU_NUOC, MANG_12MIC, SONG_B_NAU...
-             */
             var duplicateBtpInputs = inputs
                 .Where(x => !ReferenceEquals(x, mainInput))
                 .Where(x =>
@@ -2768,10 +2688,6 @@ namespace AMMS.Application.Services
 
             foreach (var duplicate in duplicateBtpInputs)
             {
-                /*
-                 * Chỉ xóa nếu nó thật sự là dòng BTP/reference,
-                 * không phải vật tư kho.
-                 */
                 var code = NormGroupDetailCode(duplicate.code);
 
                 if (code is "KEO_PHU_NUOC" or "KEO_PHU_DAU" or "KEO_PHU_UV" or
@@ -2906,9 +2822,6 @@ namespace AMMS.Application.Services
 
             var result = new List<string>();
 
-            /*
-             * Cách chuẩn: lấy product_process từ sub_product đã dùng.
-             */
             if (singleProd.sub_product_id.HasValue && singleProd.sub_product_id.Value > 0)
             {
                 var csv = await _db.sub_products
@@ -2920,10 +2833,6 @@ namespace AMMS.Application.Services
                 result = ParseGroupDetailRoute(csv);
             }
 
-            /*
-             * Fallback: nếu sub_product_id null hoặc data cũ không có product_process,
-             * lấy các task đã Finished từ BTP trong single production.
-             */
             if (result.Count == 0)
             {
                 var finishedBySub = await (
@@ -2959,9 +2868,6 @@ namespace AMMS.Application.Services
                     .ToList();
             }
 
-            /*
-             * Chỉ giữ process có nằm trong route thật.
-             */
             var routeSet = (routeCodes ?? Array.Empty<string>())
                 .Select(NormGroupDetailCode)
                 .Where(x => !string.IsNullOrWhiteSpace(x))
@@ -3038,16 +2944,12 @@ namespace AMMS.Application.Services
         {
             var code = NormGroupDetailCode(processCode);
 
-            /*
-             * DAN là thành phẩm cuối, không tính là BTP confirm từ kho.
-             */
             return code is
                 "RALO" or
                 "CAT" or
                 "IN" or
                 "PHU" or
                 "CAN" or
-                "CAN_MANG" or
                 "BOI" or
                 "BE" or
                 "DUT";
@@ -3086,12 +2988,6 @@ namespace AMMS.Application.Services
             {
                 var currentStage = orderedStages[i];
 
-                /*
-                 * Công đoạn đầu tiên giữ estimate đã tính từ QR prepare.
-                 * Ví dụ PHU:
-                 * - estimated = tổng BTP từ IN/SUB
-                 * - actual = output thực tế khi đã báo cáo
-                 */
                 if (i == 0)
                 {
                     SyncCurrentStageOutputEstimate(
@@ -3103,109 +2999,103 @@ namespace AMMS.Application.Services
 
                 var previousStage = orderedStages[i - 1];
 
-                /*
-                 * Công đoạn sau phải lấy output khả dụng của công đoạn trước:
-                 * - nếu công đoạn trước đã Finished và có actual_output_qty > 0: lấy actual
-                 * - nếu chưa Finished: lấy estimated_output_qty
-                 */
-                var sequentialInputQty = ResolveSequentialInputQtyFromPreviousStage(
+                var previousEstimatedOutput = ResolveEstimatedOutputForGroupSequentialFlow(
                     previousStage);
 
-                if (sequentialInputQty <= 0)
-                {
-                    SyncCurrentStageOutputEstimate(
-                        currentStage,
-                        currentStage.estimated_output_qty);
+                var previousActualOutput = ResolveActualOutputForGroupSequentialFlow(
+                    previousStage);
 
-                    continue;
+                if (currentStage.estimated_output_qty <= 0 && previousEstimatedOutput > 0)
+                {
+                    currentStage.estimated_output_qty = RoundQty(previousEstimatedOutput);
                 }
 
-                var oldEstimatedQty = ResolveOldEstimatedQtyBeforeNormalize(
-                    currentStage);
-
-                /*
-                 * FIX CHÍNH:
-                 * estimated_output_qty của công đoạn hiện tại phải đi theo flow.
-                 *
-                 * Ví dụ:
-                 * PHU actual = 5090
-                 * => CAN estimated_output_qty = 5090
-                 *
-                 * CAN chưa Finished
-                 * => BOI estimated_output_qty = CAN estimated_output_qty = 5090
-                 */
-                currentStage.estimated_output_qty = RoundQty(sequentialInputQty);
-
-                /*
-                 * Input PREV/BTP của công đoạn hiện tại cũng phải đồng bộ.
-                 * Ví dụ CAN input "Bán thành phẩm phủ" = 5090.
-                 */
-                SyncPreviousStageInputMaterial(
+                SyncPreviousStageInputMaterialKeepEstimate(
                     currentStage,
-                    sequentialInputQty);
+                    previousEstimatedOutput,
+                    previousActualOutput);
 
-                /*
-                 * Output estimated của chính công đoạn hiện tại đồng bộ với estimated_output_qty.
-                 */
                 SyncCurrentStageOutputEstimate(
                     currentStage,
-                    sequentialInputQty);
-
-                /*
-                 * Vật tư tiêu hao như màng/keo/sóng nếu đang lấy theo estimate cũ
-                 * thì scale lại theo số lượng mới để màn hình không bị lệch.
-                 *
-                 * Ví dụ CAN:
-                 * old estimated = 4626
-                 * new estimated = 5090
-                 * MANG_12MIC sẽ được scale theo 5090 / 4626.
-                 */
-                ScaleConsumableMaterialEstimateByQtyRatio(
-                    currentStage,
-                    oldEstimatedQty,
-                    sequentialInputQty);
+                    currentStage.estimated_output_qty);
             }
         }
 
-        private static decimal ResolveSequentialInputQtyFromPreviousStage(
-            GroupProductionStageDto? previousStage)
+        private static decimal ResolveEstimatedOutputForGroupSequentialFlow(
+    GroupProductionStageDto stage)
         {
-            if (previousStage == null)
+            if (stage == null)
                 return 0m;
 
-            /*
-             * Ưu tiên actual_output_qty vì đây là số lượng thực tế sau khi báo cáo.
-             */
-            if (previousStage.actual_output_qty > 0)
-                return previousStage.actual_output_qty;
+            var outputEstimated = stage.outputs?
+                .Where(x => x != null && x.estimated_qty > 0)
+                .Select(x => x.estimated_qty)
+                .DefaultIfEmpty(0m)
+                .Max() ?? 0m;
 
-            /*
-             * Nếu chưa báo cáo thì dùng estimated_output_qty.
-             */
-            if (previousStage.estimated_output_qty > 0)
-                return previousStage.estimated_output_qty;
+            if (outputEstimated > 0)
+                return RoundQty(outputEstimated);
 
-            /*
-             * Fallback từ outputs.
-             */
-            if (previousStage.outputs != null && previousStage.outputs.Count > 0)
-            {
-                var outputQty = previousStage.outputs
-                    .Where(x => x != null)
-                    .Select(x =>
-                        x.actual_qty > 0
-                            ? x.actual_qty
-                            : x.estimated_qty)
-                    .DefaultIfEmpty(0m)
-                    .Max();
-
-                if (outputQty > 0)
-                    return outputQty;
-            }
+            if (stage.estimated_output_qty > 0)
+                return RoundQty(stage.estimated_output_qty);
 
             return 0m;
         }
 
+        private static decimal ResolveActualOutputForGroupSequentialFlow(
+            GroupProductionStageDto stage)
+        {
+            if (stage == null)
+                return 0m;
+
+            if (stage.actual_output_qty > 0)
+                return RoundQty(stage.actual_output_qty);
+
+            var outputActual = stage.outputs?
+                .Where(x => x != null && x.actual_qty > 0)
+                .Select(x => x.actual_qty)
+                .DefaultIfEmpty(0m)
+                .Max() ?? 0m;
+
+            if (outputActual > 0)
+                return RoundQty(outputActual);
+
+            return 0m;
+        }
+
+        private static void SyncPreviousStageInputMaterialKeepEstimate(
+            GroupProductionStageDto stage,
+            decimal previousEstimatedOutput,
+            decimal previousActualOutput)
+        {
+            if (stage.input_materials == null || stage.input_materials.Count == 0)
+                return;
+
+            foreach (var input in stage.input_materials)
+            {
+                if (!IsPreviousStageInputMaterial(input.code, input.name))
+                    continue;
+                input.code = "PREV";
+
+                if (input.estimated_qty <= 0 && previousEstimatedOutput > 0)
+                {
+                    input.estimated_qty = RoundQty(previousEstimatedOutput);
+                }
+
+                /*
+                 * actual_qty mới được lấy theo actual thật của công đoạn trước.
+                 */
+                if (previousActualOutput > 0)
+                {
+                    input.actual_qty = RoundQty(previousActualOutput);
+                }
+                else
+                {
+
+                    input.actual_qty = 0m;
+                }
+            }
+        }
         private static decimal ResolveOldEstimatedQtyBeforeNormalize(
             GroupProductionStageDto stage)
         {
@@ -3232,29 +3122,6 @@ namespace AMMS.Application.Services
 
             return outputEstimated;
         }
-
-        private static void SyncPreviousStageInputMaterial(
-            GroupProductionStageDto stage,
-            decimal sequentialInputQty)
-        {
-            if (stage.input_materials == null || stage.input_materials.Count == 0)
-                return;
-
-            foreach (var input in stage.input_materials)
-            {
-                if (!IsPreviousStageInputMaterial(input.code, input.name))
-                    continue;
-
-                input.estimated_qty = RoundQty(sequentialInputQty);
-
-                /*
-                 * actual_qty ở input PREV nghĩa là BTP thực tế đang có từ công đoạn trước.
-                 * Vì vậy cho bằng sequentialInputQty để FE mở chi tiết cũng đúng.
-                 */
-                input.actual_qty = RoundQty(sequentialInputQty);
-            }
-        }
-
         private static void SyncCurrentStageOutputEstimate(
             GroupProductionStageDto stage,
             decimal estimatedQty)
@@ -3268,58 +3135,11 @@ namespace AMMS.Application.Services
             {
                 var outputCode = NormGroupDetailCode(output.code);
 
-                /*
-                 * Chỉ sync output chính của công đoạn hiện tại.
-                 * Ví dụ stage CAN thì sync output code CAN.
-                 */
                 if (!string.Equals(outputCode, currentCode, StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 output.estimated_qty = RoundQty(estimatedQty);
 
-                /*
-                 * Không sửa output.actual_qty.
-                 * actual_qty phải lấy từ task_log/output_json sau khi báo cáo.
-                 */
-            }
-        }
-
-        private static void ScaleConsumableMaterialEstimateByQtyRatio(
-            GroupProductionStageDto stage,
-            decimal oldEstimatedQty,
-            decimal newEstimatedQty)
-        {
-            if (stage.input_materials == null || stage.input_materials.Count == 0)
-                return;
-
-            if (oldEstimatedQty <= 0 || newEstimatedQty <= 0)
-                return;
-
-            /*
-             * Nếu không thay đổi số lượng thì không scale.
-             */
-            if (Math.Abs(oldEstimatedQty - newEstimatedQty) < 0.0001m)
-                return;
-
-            var ratio = newEstimatedQty / oldEstimatedQty;
-
-            if (ratio <= 0)
-                return;
-
-            foreach (var input in stage.input_materials)
-            {
-                /*
-                 * PREV/BTP đã sync riêng, không scale thêm.
-                 */
-                if (IsPreviousStageInputMaterial(input.code, input.name))
-                    continue;
-
-                /*
-                 * Chỉ scale estimated của NVL/vật tư tiêu hao.
-                 * actual_qty chỉ được lấy từ log, không tự sửa.
-                 */
-                if (input.estimated_qty > 0)
-                    input.estimated_qty = RoundQty(input.estimated_qty * ratio);
             }
         }
 
@@ -3372,27 +3192,15 @@ namespace AMMS.Application.Services
                 productTypeName,
                 ct);
 
-            /*
-             * 1. Private stages: lấy từ single production của từng order.
-             * Đây là các batch riêng trước group, ví dụ RALO,CAT,IN.
-             */
             var privateStages = await BuildPrivateStagesForExistingGroupDetailAsync(
                 orderRows,
                 ct);
 
-            /*
-             * 2. Group stage: lấy từ chính group production hiện tại.
-             * Đây là batch GROUP chung, ví dụ PHU,CAN,BOI.
-             */
             var groupStages = await BuildGroupStagesForExistingGroupDetailAsync(
                 groupProd,
                 orderRows,
                 ct);
 
-            /*
-             * 3. Split stages: lấy từ các SPLIT production của từng order.
-             * Đây là các batch riêng sau group, ví dụ BE,DUT,DAN.
-             */
             var splitStages = await BuildSplitStagesForExistingGroupDetailAsync(
                 groupProd,
                 orderRows,
@@ -3420,19 +3228,6 @@ namespace AMMS.Application.Services
                 ? timeline.Max(x => x.planned_end_date)
                 : groupProd.planned_end_date ?? start;
 
-            /*
-             * FIX LỖI LINQ:
-             * Không dùng:
-             * .Select(x => x.delivery_date!.Value)
-             * .DefaultIfEmpty(end)
-             * .MinAsync(ct)
-             *
-             * Vì EF Core/Npgsql không translate được DefaultIfEmpty(end).
-             *
-             * Cách an toàn:
-             * - Query delivery_date ra list trước.
-             * - Nếu không có ngày giao thì fallback = end.
-             */
             var deliveryDates = orderIds.Count == 0
                 ? new List<DateTime>()
                 : await _db.orders
@@ -3468,9 +3263,6 @@ namespace AMMS.Application.Services
             {
                 suggestion_type = "GROUP_WITH_AUTO_SPLIT",
 
-                /*
-                 * Đây là detail của group đã tạo rồi, không phải suggestion để create tiếp.
-                 */
                 can_group = false,
                 create_group_allowed = false,
 
@@ -3741,14 +3533,6 @@ namespace AMMS.Application.Services
             var code = NormGroupDetailCode(input.code);
             var name = NormGroupDetailCode(input.name);
 
-            /*
-             * BTP input chính của công đoạn group:
-             * - PREV
-             * - IN
-             * - PHU
-             * - CAN...
-             * - hoặc tên có Bán thành phẩm/BTP
-             */
             if (code is "PREV" or "INPUT" or "BTP" or "REFERENCE")
                 return true;
 
@@ -3774,10 +3558,6 @@ namespace AMMS.Application.Services
                 if (stage == null)
                     continue;
 
-                /*
-                 * estimated_output_qty đã được merge từ qr-prepare.
-                 * Với case của bạn PHU/CAN = 6290.
-                 */
                 if (stage.estimated_output_qty > 0)
                     candidates.Add(stage.estimated_output_qty);
 
@@ -3877,14 +3657,6 @@ namespace AMMS.Application.Services
             if (orderIds.Count == 0)
                 return result;
 
-            /*
-             * Vì schema hiện chưa có field parent_group_prod_id,
-             * tạm xác định SPLIT theo:
-             * - cùng order_id
-             * - prod_kind = SPLIT
-             * - không Cancelled
-             * - planned_start_date >= group.planned_end_date hoặc trong vùng kế hoạch của group.
-             */
             var groupEnd = groupProd.planned_end_date ?? groupProd.planned_start_date;
 
             var splitProds = await _db.productions
@@ -4019,23 +3791,12 @@ namespace AMMS.Application.Services
                 prod,
                 orderRows);
 
-            /*
-             * Chỉ GROUP + SUB mới đổi total_qty theo số lượng đã cộng hao phí.
-             * Các case khác giữ nguyên group_total_qty để tránh ảnh hưởng flow NVL/BOTH.
-             */
             if (!IsGroupSubProductionForDetail(prod))
                 return baseQty;
 
             var qtyWithWaste = ResolveGroupSubQtyWithWasteFromStages(
                 stages);
 
-            /*
-             * Không bao giờ để total_qty nhỏ hơn tổng quantity order ghép.
-             * Ví dụ:
-             * baseQty = 6000
-             * qtyWithWaste = 6290
-             * => total_qty = 6290
-             */
             var finalQty = Math.Max(
                 baseQty,
                 CeilPositiveInt(qtyWithWaste, baseQty));
@@ -4084,33 +3845,16 @@ namespace AMMS.Application.Services
             if (qrBundle == null)
                 return;
 
-            /*
-             * 1. Merge BTP/reference input estimate.
-             * Đây là dòng "BTP sau phủ" hoặc "Bán thành phẩm từ công đoạn IN".
-             */
             ApplyQrReferenceInputEstimateToGroupInputs(
                 inputs,
                 qrBundle.reference_inputs,
                 previousOutputQty,
                 previousOutputName);
 
-            /*
-             * 2. Merge NVL/consumable estimate.
-             * Đây là các dòng như:
-             * - KEO_PHU_NUOC
-             * - MANG_12MIC
-             * - KEO_BOI
-             * - WAVE...
-             */
             ApplyQrConsumableEstimateToGroupInputs(
                 inputs,
                 qrBundle.consumable_materials);
 
-            /*
-             * 3. Đồng bộ output estimate.
-             * Nếu BTP input estimate là 6290 thì output estimate của task cũng nên là 6290,
-             * trừ khi sau này có rule riêng làm giảm output.
-             */
             ApplyQrEstimateToGroupOutputs(
                 outputs,
                 qrBundle.reference_inputs,
@@ -4136,10 +3880,6 @@ namespace AMMS.Application.Services
 
             if (refs.Count > 0)
             {
-                /*
-                 * Với GROUP + SUB, qr-prepare đã normalize:
-                 * estimated_qty = planned BTP input có hao phí.
-                 */
                 estimateQty = refs.Sum(x =>
                     x.estimated_qty > 0
                         ? x.estimated_qty
@@ -4157,13 +3897,6 @@ namespace AMMS.Application.Services
 
             var firstRef = refs.FirstOrDefault();
 
-            /*
-             * FIX:
-             * Vẫn dùng reference input để lấy estimate/name/unit,
-             * nhưng KHÔNG dùng firstRef.input_code để set code.
-             *
-             * Code của dòng BTP đầu vào trong group detail luôn giữ là PREV.
-             */
             var input = inputs.FirstOrDefault(x =>
                 IsGroupPrevInputCode(x.code) ||
                 IsLikelyGroupBtpInput(x) ||
@@ -4173,13 +3906,6 @@ namespace AMMS.Application.Services
             {
                 input = new GroupStageMaterialDto
                 {
-                    /*
-                     * FIX CHÍNH:
-                     * Không dùng:
-                     * code = firstRef?.input_code ?? "PREV"
-                     *
-                     * Vì nếu firstRef.input_code = IN thì response sẽ ra code = IN.
-                     */
                     code = "PREV",
 
                     name =
@@ -4202,11 +3928,6 @@ namespace AMMS.Application.Services
                 return;
             }
 
-            /*
-             * FIX CHÍNH:
-             * Dòng input BTP chính luôn trả code PREV.
-             * Name vẫn có thể là "Bán thành phẩm in" để FE biết PREV là từ IN.
-             */
             input.code = "PREV";
 
             input.estimated_qty = estimateQty;
@@ -4220,13 +3941,6 @@ namespace AMMS.Application.Services
                 input.unit = firstRef!.unit;
             else if (string.IsNullOrWhiteSpace(input.unit))
                 input.unit = "tờ";
-
-            /*
-             * Không set actual_qty ở đây.
-             * actual_qty sẽ do:
-             * - ApplyTaskLogJsonToGroupStageIo nếu group task report QR thật
-             * - ApplyConfirmedSubActualToGroupFirstStageInputAsync nếu BTP đã confirm từ kho
-             */
         }
 
         private static void ApplyQrConsumableEstimateToGroupInputs(
@@ -4266,10 +3980,6 @@ namespace AMMS.Application.Services
                     continue;
                 }
 
-                /*
-                 * Nếu BuildGroupStageIO tạo placeholder như LAMINATION/COATING,
-                 * đổi sang material thật để FE thấy rõ.
-                 */
                 if (!string.IsNullOrWhiteSpace(mat.material_code))
                     input.code = mat.material_code;
 
@@ -4281,10 +3991,6 @@ namespace AMMS.Application.Services
 
                 input.estimated_qty = estimatedQty;
 
-                /*
-                 * Không set actual_qty ở đây.
-                 * actual_qty sẽ được ApplyTaskLogJsonToGroupStageIo set từ material_usage_json.
-                 */
             }
         }
 
@@ -4328,10 +4034,6 @@ namespace AMMS.Application.Services
                 return;
             }
 
-            /*
-             * Chỉ update estimate.
-             * actual_qty sẽ được set từ output_json/qty_good sau khi task finish.
-             */
             output.estimated_qty = estimatedInputQty;
 
             if (string.IsNullOrWhiteSpace(output.name))
@@ -4366,13 +4068,6 @@ namespace AMMS.Application.Services
                 return true;
             }
 
-            /*
-             * Match placeholder cũ:
-             * - COATING -> KEO_PHU_NUOC
-             * - LAMINATION -> MANG_12MIC
-             * - KEO_BOI -> keo bồi
-             * - WAVE -> sóng carton
-             */
             if (IsGroupCoatingCode(inputCode) && IsQrCoatingMaterial(matCode, matName))
                 return true;
 
@@ -4454,19 +4149,6 @@ namespace AMMS.Application.Services
                    c.Contains("WAVE") ||
                    n.Contains("SONG") ||
                    n.Contains("WAVE");
-        }
-
-        private static string NormalizeGroupUnit(string? unit)
-        {
-            if (string.IsNullOrWhiteSpace(unit))
-                return "tờ";
-
-            var u = unit.Trim();
-
-            if (string.Equals(u, "sp", StringComparison.OrdinalIgnoreCase))
-                return "tờ";
-
-            return u;
         }
 
         private static string ResolveGroupOutputNameForDetail(
@@ -4594,9 +4276,7 @@ namespace AMMS.Application.Services
 
             var commonDeadline = ResolveCommonDeadline(rows);
             var suggestedStart = await ResolveSuggestedStartBySystemAsync(ct);
-            /*
-             * Stage 1: mỗi order có 1 private stage riêng.
-             */
+
             var privateStages = BuildPrivateStagesBeforeGroup(
                 rows,
                 plan,
@@ -4624,9 +4304,6 @@ namespace AMMS.Application.Services
                 ? suggestedStart
                 : privateStages.Max(x => x.planned_end_date);
 
-            /*
-             * Stage 2: group stage bắt đầu sau khi tất cả private stage xong.
-             */
             var groupStages = new List<GroupProductionScheduleStageDto>();
 
             foreach (var segment in groupSegments)
@@ -4653,9 +4330,6 @@ namespace AMMS.Application.Services
                 ? privateEnd
                 : groupStages.Max(x => x.planned_end_date);
 
-            /*
-             * Stage 3: split stage bắt đầu sau group.
-             */
             var splitStages = new List<GroupProductionScheduleStageDto>();
 
             foreach (var segment in plan.Where(x => !x.IsGroup))
@@ -4772,9 +4446,6 @@ namespace AMMS.Application.Services
 
             var start = now.AddMinutes((double)(resolvedHours * 60m));
 
-            /*
-             * Không cho preview start cùng ngày tạo.
-             */
             if (start.Date <= now.Date)
                 start = now.Date.AddDays(1);
 
@@ -4848,10 +4519,6 @@ namespace AMMS.Application.Services
 
             var suggestedStart = await ResolveSuggestedStartBySystemAsync(ct);
 
-            /*
-             * Đây chỉ là mốc thô ban đầu.
-             * PreviewAsync sẽ gọi ApplyMachineScheduleToPreviewAsync để tính lại theo máy.
-             */
             var plannedEnd = suggestedStart.AddDays(MinProductionDays);
 
             var tasks = await BuildTaskPreviewDtosAsync(
@@ -5043,61 +4710,6 @@ namespace AMMS.Application.Services
             }
         }
 
-
-        private static List<string> BuildPrivateBeforeFirstGroupCodes(
-    List<GroupOrderRow> rows,
-    List<ProductionPlanSegment> plan)
-        {
-            var groupedCodeByOrderId = plan
-                .Where(x => x.IsGroup)
-                .SelectMany(segment => segment.Members.Select(member => new
-                {
-                    order_id = member.Order.order_id,
-                    codes = segment.ProcessCodes
-                }))
-                .GroupBy(x => x.order_id)
-                .ToDictionary(
-                    g => g.Key,
-                    g => g.SelectMany(x => x.codes)
-                        .Select(NormProcessCode)
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .ToList());
-
-            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var row in rows)
-            {
-                if (!groupedCodeByOrderId.TryGetValue(row.Order.order_id, out var groupedCodes) ||
-                    groupedCodes.Count == 0)
-                    continue;
-
-                var firstGroupedIndex = row.RouteCodes
-                    .Select((code, index) => new
-                    {
-                        code = NormProcessCode(code),
-                        index
-                    })
-                    .Where(x => groupedCodes.Contains(x.code, StringComparer.OrdinalIgnoreCase))
-                    .Select(x => x.index)
-                    .DefaultIfEmpty(-1)
-                    .Min();
-
-                if (firstGroupedIndex <= 0)
-                    continue;
-
-                foreach (var code in row.RouteCodes.Take(firstGroupedIndex))
-                {
-                    var norm = NormProcessCode(code);
-                    if (!string.IsNullOrWhiteSpace(norm))
-                        result.Add(norm);
-                }
-            }
-
-            return result
-                .OrderBy(FullRouteIndex)
-                .ToList();
-        }
-
         private async Task ValidateManualSelectionMatchesCurrentSuggestionAsync(
     List<int> selectedOrderIds,
     List<string> selectedCodes,
@@ -5171,10 +4783,6 @@ namespace AMMS.Application.Services
 
             EnsureOnlyGroupableDept2Codes(selectedCodes);
 
-            /*
-             * Load các order Pending đủ điều kiện.
-             * Hàm này đã loại BOTH và giữ NVL/SUB.
-             */
             var allCleanRows = await LoadCleanRowsForSuggestionAsync(
                 productTypeId: null,
                 selectedCodes: selectedCodes,
@@ -5185,12 +4793,6 @@ namespace AMMS.Application.Services
 
             var result = new List<SuggestedGroupProductionDto>();
 
-            /*
-             * Logic mới:
-             * - Chỉ group theo product_type.
-             * - Không group theo prod_method.
-             * - NVL + SUB được ghép chung.
-             */
             foreach (var productTypeGroup in allCleanRows
                 .Where(x => x.Item != null)
                 .Where(x => x.Item.product_type_id.HasValue)
@@ -5252,33 +4854,7 @@ namespace AMMS.Application.Services
             if (selectedSet.Count < 2)
                 return false;
 
-            /*
-             * Quan trọng:
-             * Không check bằng nhau nữa.
-             * Chỉ cần selected là tập con của suggestion.
-             */
             return selectedSet.All(suggestionSet.Contains);
-        }
-
-        private static bool SameProcessSet(
-    List<string>? a,
-    List<string> b)
-        {
-            var aa = (a ?? new List<string>())
-                .Select(NormProcessCode)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(FullRouteIndex)
-                .ToList();
-
-            var bb = b
-                .Select(NormProcessCode)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(FullRouteIndex)
-                .ToList();
-
-            return aa.SequenceEqual(bb, StringComparer.OrdinalIgnoreCase);
         }
 
         private static bool IsSelectedProcessSubsetOfSuggestion(
@@ -5543,14 +5119,6 @@ namespace AMMS.Application.Services
                 _ => "Khác"
             };
         }
-
-        private static bool RequiresSameMaterialKey(string processCode)
-        {
-            var code = NormProcessCode(processCode);
-
-            return code is "PHU" or "CAN" or "CAN_MANG" or "BOI";
-        }
-
         private async Task<PreviousProcessTaskRef?> FindPreviousProcessTaskForOrderAsync(
     int orderId,
     string previousProcessCode,
@@ -5884,16 +5452,6 @@ namespace AMMS.Application.Services
                 .ToList();
         }
 
-        private static int DepartmentOrder(string departmentCode)
-        {
-            return departmentCode switch
-            {
-                "DEPT_1" => 1,
-                "DEPT_2" => 2,
-                "DEPT_3" => 3,
-                _ => 99
-            };
-        }
 
         private static string SafeKey(string? value)
         {
@@ -5937,16 +5495,6 @@ namespace AMMS.Application.Services
         }
 
         private async Task<List<GroupOrderRow>> LoadGroupOrderRowsAsync(
-    List<int> orderIds,
-    CancellationToken ct)
-        {
-            return await LoadGroupOrderRowsAsync(
-                orderIds,
-                selectedCodes: new List<string>(),
-                ct);
-        }
-
-        private async Task<List<GroupOrderRow>> LoadGroupOrderRowsAsync(
             List<int> orderIds,
             List<string>? selectedCodes,
             CancellationToken ct)
@@ -5985,12 +5533,6 @@ namespace AMMS.Application.Services
                 .Distinct()
                 .ToList();
 
-            /*
-             * FIX:
-             * HasAnyStartedTask không còn check giống nhau cho mọi method.
-             * NVL: check toàn bộ task.
-             * SUB: chỉ check task công đoạn đang group.
-             */
             var startedSingleProdIds = await LoadSingleProdIdsHavingStartedTaskAsync(
                 singleProdIds,
                 selectedCodes,
@@ -6039,10 +5581,6 @@ namespace AMMS.Application.Services
                     ? itemRouteCodes
                     : estimateRouteCodes;
 
-                /*
-                 * Chỉ để response dễ đọc.
-                 * Không SaveChanges ở đây.
-                 */
                 if (itemRouteCodes.Count == 0 && estimateRouteCodes.Count > 0)
                 {
                     row.item.production_process = est?.production_processes;
@@ -6073,26 +5611,11 @@ namespace AMMS.Application.Services
             return null;
         }
 
-        private static List<string> NormalizeSelectedCodesForGroup(
-            IEnumerable<string>? selectedCodes)
-        {
-            return (selectedCodes ?? Enumerable.Empty<string>())
-                .Select(NormProcessCode)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(FullRouteIndex)
-                .ToList();
-        }
-
         private static List<string> ResolveSubTaskCheckCodesForGroup(
             List<string>? selectedCodes)
         {
             var codes = NormalizeSelectedCodesForGroup(selectedCodes);
 
-            /*
-             * Nếu FE không truyền processCodes thì API auto suggest Dept2.
-             * Với SUB, chỉ check Dept2 vì Dept1 có thể đã Finished do dùng BTP.
-             */
             if (codes.Count == 0)
             {
                 return Dept2Codes
@@ -6120,10 +5643,6 @@ namespace AMMS.Application.Services
             if (string.IsNullOrWhiteSpace(s))
                 return false;
 
-            /*
-             * Chỉ Unassigned/null được xem là chưa bắt đầu.
-             * Ready cũng xem là đã bắt đầu vì task đã được mở/giữ máy/cho phép report.
-             */
             return s != "UNASSIGNED";
         }
 
@@ -6223,11 +5742,6 @@ namespace AMMS.Application.Services
                 if (string.IsNullOrWhiteSpace(processCode))
                     processCode = NormProcessCode(task.task_name);
 
-                /*
-                 * CASE NVL:
-                 * Check toàn bộ task như logic cũ.
-                 * Nếu bất kỳ task nào đã Ready/Finished/log/start/end thì loại production.
-                 */
                 if (method == "NVL")
                 {
                     if (IsTaskStartedForGrouping(
@@ -6242,11 +5756,6 @@ namespace AMMS.Application.Services
                     continue;
                 }
 
-                /*
-                 * CASE SUB:
-                 * Cho phép RALO/CAT/IN đã Finished vì đó là phần lấy BTP.
-                 * Chỉ check các công đoạn group đang xét, mặc định là Dept2.
-                 */
                 if (method == "SUB")
                 {
                     if (!subTaskCheckCodes.Contains(
@@ -6268,11 +5777,6 @@ namespace AMMS.Application.Services
                     continue;
                 }
 
-                /*
-                 * CASE BOTH hoặc method khác:
-                 * Giữ chặt như NVL để tránh group sai khi một phần đã chạy.
-                 * Nếu sau này muốn BOTH riêng thì tách tiếp.
-                 */
                 if (IsTaskStartedForGrouping(
                     task.status,
                     task.start_time,
@@ -6329,14 +5833,6 @@ namespace AMMS.Application.Services
                 return new List<ProductionPlanSegment>();
             }
 
-            /*
-             * Rule mới:
-             * PHU/CAN/BOI nếu cùng bộ selectedCodes và cùng material key tổng hợp
-             * thì gom thành 1 GROUP segment.
-             *
-             * Ví dụ selectedCodes = PHU,CAN
-             * => tạo 1 GROUP production có 2 task PHU, CAN.
-             */
             var rowsHavingAllGroupCodes = rows
                 .Where(r => groupCodes.All(code =>
                     r.RouteCodes.Contains(code, StringComparer.OrdinalIgnoreCase)))
@@ -6380,11 +5876,6 @@ namespace AMMS.Application.Services
                 });
             }
 
-            /*
-             * Các công đoạn sau GROUP:
-             * - Tách riêng từng order.
-             * - BE,DUT,DAN giống RALO,CAT,IN: mỗi order 1 production riêng.
-             */
             var groupedCodeByOrderId = result
                 .Where(x => x.IsGroup)
                 .SelectMany(segment => segment.Members.Select(member => new
@@ -6451,11 +5942,6 @@ namespace AMMS.Application.Services
                 .ToList();
         }
 
-        private static DateTime DateOnlyStart(DateTime value)
-        {
-            return value.Date;
-        }
-
         private static DateTime MaxDate(DateTime a, DateTime b)
         {
             return a >= b ? a : b;
@@ -6479,9 +5965,6 @@ namespace AMMS.Application.Services
             var earliestDelivery = MinDate(rows.Select(x => x.Order.delivery_date));
             var minDeadline = AppTime.NowVnUnspecified().Date.AddDays(MinProductionDays);
 
-            /*
-             * Nếu đơn giao quá gấp, vẫn giữ rule tối thiểu 7 ngày.
-             */
             return MaxDate(earliestDelivery, minDeadline);
         }
 
@@ -6550,55 +6033,6 @@ namespace AMMS.Application.Services
                 return split.planned_start_date;
 
             return preview.suggested_planned_start_date;
-        }
-
-        private static DateTime ResolveStageEnd(
-            GroupProductionConfirmPreviewResponse preview,
-            ProductionPlanSegment segment)
-        {
-            if (segment.IsGroup)
-            {
-                var matched = preview.group_stages.FirstOrDefault(x =>
-                    SameOrderSet(
-                        x.order_ids,
-                        segment.Members.Select(m => m.Order.order_id).ToList())
-                    &&
-                    SameProcessCodes(
-                        x.process_codes,
-                        segment.ProcessCodes));
-
-                if (matched != null)
-                    return matched.planned_end_date;
-
-                return ResolveStageStart(preview, segment).AddDays(Dept2Days);
-            }
-
-            var orderIds = segment.Members
-                .Select(x => x.Order.order_id)
-                .Distinct()
-                .ToList();
-
-            var split = preview.split_stages.FirstOrDefault(x =>
-                SameOrderSet(x.order_ids, orderIds) &&
-                SameProcessCodes(x.process_codes, segment.ProcessCodes));
-
-            if (split != null)
-                return split.planned_end_date;
-
-            return ResolveStageStart(preview, segment).AddDays(Dept3Days);
-        }
-
-        private static int GetGlobalRouteIndex(
-            List<GroupOrderRow> rows,
-            string processCode)
-        {
-            var indexes = rows
-                .Select(r => r.RouteCodes.FindIndex(x =>
-                    string.Equals(x, processCode, StringComparison.OrdinalIgnoreCase)))
-                .Where(x => x >= 0)
-                .ToList();
-
-            return indexes.Count == 0 ? 999 : indexes.Min();
         }
 
         private static string ShortDepartmentCode(string? departmentCode)
@@ -6865,90 +6299,6 @@ namespace AMMS.Application.Services
             }
         }
 
-        private async Task<string> GenerateShortProductionCodeAsync(
-            string prefix,
-            string? departmentCode,
-            CancellationToken ct)
-        {
-            var safePrefix = (prefix ?? "PRD")
-                .Trim()
-                .ToUpperInvariant();
-
-            if (safePrefix.Length > 3)
-                safePrefix = safePrefix[..3];
-
-            if (safePrefix.Length < 3)
-                safePrefix = safePrefix.PadRight(3, 'X');
-
-            var dept = ShortDepartmentCode(departmentCode);
-
-            for (var i = 0; i < 20; i++)
-            {
-                var now = AppTime.NowVnUnspecified();
-
-                var code = $"{safePrefix}{dept}{now:MMddHHmmss}{Random.Shared.Next(100, 999)}";
-
-                if (code.Length > 20)
-                    code = code[..20];
-
-                var exists = await _db.productions
-                    .AsNoTracking()
-                    .AnyAsync(x => x.code == code, ct);
-
-                if (!exists)
-                    return code;
-            }
-
-            var fallback = $"{safePrefix}{dept}{Random.Shared.Next(100000000, 999999999)}";
-
-            return fallback.Length <= 20
-                ? fallback
-                : fallback[..20];
-        }
-
-        private static List<ProductionPlanSegment> MergeAdjacentSegments(
-    List<ProductionPlanSegment> segments)
-        {
-            var result = new List<ProductionPlanSegment>();
-
-            foreach (var seg in segments)
-            {
-                var last = result.LastOrDefault();
-
-                if (last != null &&
-                    last.DepartmentCode == seg.DepartmentCode &&
-                    SameMembers(last.Members, seg.Members) &&
-                    CanMergeSegmentKey(last.MaterialKey, seg.MaterialKey))
-                {
-                    last.ProcessCodes = last.ProcessCodes
-                        .Concat(seg.ProcessCodes)
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .OrderBy(FullRouteIndex)
-                        .ToList();
-
-                    last.MaterialKey = CombineMaterialKeys(
-                        last.MaterialKey,
-                        seg.MaterialKey);
-
-                    continue;
-                }
-
-                result.Add(new ProductionPlanSegment
-                {
-                    DepartmentCode = seg.DepartmentCode,
-                    DepartmentName = seg.DepartmentName,
-                    ProcessCodes = seg.ProcessCodes
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .OrderBy(FullRouteIndex)
-                        .ToList(),
-                    Members = seg.Members.ToList(),
-                    MaterialKey = seg.MaterialKey
-                });
-            }
-
-            return result;
-        }
-
         private static bool CanMergeSegmentKey(string? a, string? b)
         {
             if (string.IsNullOrWhiteSpace(a) && string.IsNullOrWhiteSpace(b))
@@ -7031,48 +6381,6 @@ namespace AMMS.Application.Services
                 $"Chỉ cho phép SUB/NVL/BOTH trước khi ghép đơn.");
         }
 
-        private static string ResolveSegmentProductionMethodOrThrow(ProductionPlanSegment segment)
-        {
-            if (segment == null)
-                throw new InvalidOperationException("segment is required.");
-
-            if (segment.Members == null || segment.Members.Count == 0)
-                throw new InvalidOperationException("Segment không có order member.");
-
-            var invalidMembers = segment.Members
-                .Where(x => ResolveRowProductionMethodOrNull(x) == null)
-                .Select(x =>
-                    $"order_id={x.Order.order_id}, single_prod_id={x.SingleProd.prod_id}, prod_method={ShowText(x.SingleProd.prod_method)}")
-                .ToList();
-
-            if (invalidMembers.Count > 0)
-            {
-                throw new InvalidOperationException(
-                    "Không thể tạo production GROUP/SPLIT vì có order chưa có prod_method hợp lệ SUB/NVL/BOTH. " +
-                    $"Chi tiết: {string.Join(" | ", invalidMembers)}");
-            }
-
-            var methods = segment.Members
-                .Select(ResolveRowProductionMethodOrThrow)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            if (methods.Count != 1)
-            {
-                var detail = segment.Members
-                    .Select(x =>
-                        $"order_id={x.Order.order_id}, single_prod_id={x.SingleProd.prod_id}, prod_method={ShowText(x.SingleProd.prod_method)}")
-                    .ToList();
-
-                throw new InvalidOperationException(
-                    "Không thể tạo production GROUP/SPLIT từ các order có prod_method khác nhau. " +
-                    "Các order trong cùng GROUP/SPLIT bắt buộc phải cùng prod_method SUB/NVL/BOTH. " +
-                    $"Chi tiết: {string.Join(" | ", detail)}");
-            }
-
-            return methods[0];
-        }
-
         private static void ValidateRowsHaveGroupableProductionMethodOrThrow(
     List<GroupOrderRow> rows,
     string actionName)
@@ -7148,10 +6456,6 @@ namespace AMMS.Application.Services
 
         private string BuildGroupPlanKey(string processCode, GroupOrderRow row)
         {
-            /*
-             * - NVL và SUB có thể ghép chung nếu cùng product_type,
-             *   cùng công đoạn groupable, cùng nhóm vật tư/kỹ thuật.
-             */
             var materialKey = ResolveMaterialGroupKey(processCode, row);
 
             return materialKey;
@@ -7184,7 +6488,7 @@ namespace AMMS.Application.Services
                 $"Chi tiết: {string.Join(" | ", invalidRows)}");
         }
 
-    private static bool IsGroupableDept2Process(string? processCode)
+        private static bool IsGroupableDept2Process(string? processCode)
         {
             var code = NormProcessCode(processCode);
 
@@ -7192,18 +6496,6 @@ namespace AMMS.Application.Services
                 code,
                 StringComparer.OrdinalIgnoreCase);
         }
-
-        private static bool IsPrivateOrderProcess(string? processCode)
-        {
-            var code = NormProcessCode(processCode);
-
-            /*
-             * Tất cả công đoạn không thuộc PHU/CAN/BOI đều không tạo GROUP.
-             * Chúng sẽ nằm trong SINGLE private hoặc SPLIT riêng từng order.
-             */
-            return !IsGroupableDept2Process(code);
-        }
-
 
         private static List<string> NormalizeSelectedCodesForGroup(List<string>? selectedCodes)
         {
@@ -7260,9 +6552,6 @@ namespace AMMS.Application.Services
             if (methods.Count == 1)
                 return methods[0]!;
 
-            /*
-             * Có cả NVL và SUB.
-             */
             return "MIXED";
         }
 
@@ -7441,12 +6730,6 @@ namespace AMMS.Application.Services
 
             var reservations = new List<MachineReservationDto>();
 
-            /*
-             * Mỗi order có mốc sẵn sàng riêng.
-             * - SINGLE_PRIVATE chạy trước.
-             * - GROUP chỉ chạy sau khi các SINGLE_PRIVATE liên quan đã xong.
-             * - SPLIT chạy sau GROUP.
-             */
             var allOrderIds = preview.order_ids
                 .Where(x => x > 0)
                 .Distinct()
@@ -7707,13 +6990,6 @@ namespace AMMS.Application.Services
                 if (string.IsNullOrWhiteSpace(code))
                     continue;
 
-                /*
-                 * Tạm dùng quantity làm chuẩn chung.
-                 * Nếu sau này bạn muốn chính xác hơn:
-                 * - RALO dùng number_of_plates
-                 * - CAT/IN/PHU/CAN/BOI dùng sheets_total
-                 * - DAN dùng thành phẩm
-                 */
                 result[code] = Math.Max(1m, quantity);
             }
 
@@ -7826,31 +7102,17 @@ namespace AMMS.Application.Services
                 ProductionApprovalFlowHelper.WaitingManager => ProductionApprovalFlowHelper.WaitingManager,
                 ProductionApprovalFlowHelper.ManualManager => ProductionApprovalFlowHelper.ManualManager,
                 ProductionApprovalFlowHelper.ManualGeneralManager => ProductionApprovalFlowHelper.ManualGeneralManager,
-
-                /*
-                 * Không tạo tên mới.
-                 * Nếu data cũ có giá trị lạ thì ép về MANUAL_GENERAL_MANAGER.
-                 */
                 _ => ProductionApprovalFlowHelper.ManualGeneralManager
             };
         }
 
         private static string ResolveGroupProductionApprovalFlow()
         {
-            /*
-             * Lệnh GROUP chỉ được tạo sau khi GM xác nhận lập lịch ghép,
-             * nên dùng tên cũ MANUAL_GENERAL_MANAGER.
-             */
             return ProductionApprovalFlowHelper.ManualGeneralManager;
         }
 
         private static string ResolveSplitProductionApprovalFlow(production? sourceSingleProd)
         {
-            /*
-             * SPLIT phát sinh từ flow group.
-             * Nếu SINGLE gốc đã có flow hợp lệ thì giữ lại.
-             * Nếu SINGLE gốc null thì fallback MANUAL_GENERAL_MANAGER.
-             */
             return NormalizeProductionApprovalFlowOrDefault(
                 sourceSingleProd?.production_approval_flow);
         }
@@ -7867,10 +7129,6 @@ namespace AMMS.Application.Services
                 return;
             }
 
-            /*
-             * SINGLE gốc được đưa vào kế hoạch ghép nhưng field đang null.
-             * Không thêm tên mới, dùng tên cũ.
-             */
             singleProd.production_approval_flow = ProductionApprovalFlowHelper.ManualGeneralManager;
         }
     }
