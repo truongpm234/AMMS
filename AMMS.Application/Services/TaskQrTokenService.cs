@@ -768,12 +768,6 @@ namespace AMMS.Application.Services
                 .Select((ch, idx) => new { ch, idx })
                 .ToDictionary(x => x.ch, x => x.idx);
 
-            /*
-             * Decode tolerant:
-             * - Máy/người nhập O thì hiểu là 0.
-             * - I/L thì hiểu là 1.
-             * Token generate ra sẽ không bao giờ dùng O/I/L.
-             */
             map['O'] = map['0'];
             map['I'] = map['1'];
             map['L'] = map['1'];
