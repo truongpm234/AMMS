@@ -45,19 +45,18 @@ namespace AMMS.API.Controllers
             return Unauthorized(new { message = "Email/UserName hoặc mật khẩu không đúng" });
         }
 
-
         [HttpPost("/login-with-google")]
         public async Task<IActionResult> GoogleLogin(GoogleLoginRequestDto req)
         {
-            var payload = await _googleAuthService.VerifyToken(req.id_token);
-
-            if (payload.EmailVerified)
+            try
             {
+                var payload = await _googleAuthService.VerifyToken(req.id_token);
+
                 var token = _jwt.GenerateTokenForGoogle(
-                payload.Email,
-                payload.Name,
-                payload.Subject
-            );
+                    payload.Email,
+                    payload.Name,
+                    payload.Subject
+                );
 
                 return Ok(new
                 {
@@ -67,7 +66,10 @@ namespace AMMS.API.Controllers
                     avatar = payload.Picture
                 });
             }
-            return BadRequest();
+            catch (Exception ex)
+            {
+                return StatusCode(500, ex.ToString());
+            }
         }
 
         [HttpPost("/register")]
