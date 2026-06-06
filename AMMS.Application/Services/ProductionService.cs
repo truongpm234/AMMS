@@ -194,6 +194,17 @@ namespace AMMS.Application.Services
                 }
             }
 
+            if (!isGroupProduction &&
+    prod.order_id.HasValue &&
+    string.Equals(prod.prod_kind, "SINGLE", StringComparison.OrdinalIgnoreCase) &&
+    string.Equals(prod.prod_method, "SUB", StringComparison.OrdinalIgnoreCase))
+            {
+                await ApplySubProductToScheduledSingleSubProductionAsync(
+                    prod.order_id.Value,
+                    prod.prod_id,
+                    ct);
+            }
+
             /*
              * Quan trọng cho GROUP/SPLIT:
              * Chặn start nếu công đoạn trước đó chưa xong.
@@ -887,9 +898,6 @@ namespace AMMS.Application.Services
             }
             else if (method == "SUB")
             {
-                if (!matchedSubProductId.HasValue || matchedSubProductId.Value <= 0)
-                    throw new InvalidOperationException("Auto SUB thiếu sub_product_id.");
-
                 prod.sub_product_id = matchedSubProductId.Value;
                 prod.sub_product_used_qty = orderQty;
                 prod.nvl_qty = 0;
@@ -1444,19 +1452,31 @@ namespace AMMS.Application.Services
 
             if (string.Equals(response.production_method, "SUB", StringComparison.OrdinalIgnoreCase) &&
                 response.success &&
-                response.prod_id > 0 &&
-                string.IsNullOrWhiteSpace(response.sub_product_issue_file))
+                response.prod_id > 0)
             {
-                var issueFile = await CreateAndUploadSubProductIssueFileByProdIdAsync(
+                /*
+                 * Nếu task đã tồn tại thì auto finish ngay.
+                 * Nếu task chưa tồn tại thì hàm này không làm gì,
+                 * ScheduleTasksAfterMethodAsync sẽ gọi lại sau khi tạo task.
+                 */
+                await ApplySubProductToScheduledSingleSubProductionAsync(
+                    response.order_id,
                     response.prod_id,
-                    "Manager duyệt phương thức sản xuất SUB.",
                     ct);
 
-                response.sub_product_issue_file = issueFile;
-
-                if (!string.IsNullOrWhiteSpace(issueFile))
+                if (string.IsNullOrWhiteSpace(response.sub_product_issue_file))
                 {
-                    response.message = "Đã duyệt sản xuất bằng bán thành phẩm.";
+                    var issueFile = await CreateAndUploadSubProductIssueFileByProdIdAsync(
+                        response.prod_id,
+                        "Manager duyệt phương thức sản xuất SUB.",
+                        ct);
+
+                    response.sub_product_issue_file = issueFile;
+
+                    if (!string.IsNullOrWhiteSpace(issueFile))
+                    {
+                        response.message = "Đã duyệt sản xuất bằng bán thành phẩm.";
+                    }
                 }
             }
 
@@ -1672,11 +1692,23 @@ namespace AMMS.Application.Services
                 .Select(x => x.production_process)
                 .FirstOrDefaultAsync(ct);
 
-            return await _scheduling.ScheduleOrderAsync(
+            var scheduledProdId = await _scheduling.ScheduleOrderAsync(
                 orderId: orderId,
                 productTypeId: productTypeId.Value,
                 productionProcessCsv: productionProcessCsv,
                 managerId: prod.manager_id ?? 3);
+
+            /*
+             * FIX CHÍNH:
+             * ScheduleOrderAsync vừa tạo/sync task.
+             * Nếu production là SINGLE + SUB thì phải auto Finished các công đoạn đã được BTP cover.
+             */
+            await ApplySubProductToScheduledSingleSubProductionAsync(
+                orderId,
+                scheduledProdId,
+                ct);
+
+            return scheduledProdId;
         }
 
         private async Task<sub_product> ResolveValidSubProductAsync(
@@ -1827,29 +1859,42 @@ namespace AMMS.Application.Services
         }
 
         private async Task ApplySubProductToExistingTasksAsync(
-            production prod,
-            sub_product selectedSubProduct,
-            int orderQty,
-            CancellationToken ct)
+    production prod,
+    sub_product selectedSubProduct,
+    int orderQty,
+    CancellationToken ct)
         {
             /*
-             * SUB:
-             * Nếu production đã có task shell rồi,
-             * các công đoạn đã được bán thành phẩm cover sẽ được tự Finished.
-             *
-             * Ví dụ sub_product.product_process = "RALO,CAT,IN"
-             * thì các task RALO/CAT/IN trong production sẽ Finished tự động.
+             * Chỉ áp dụng cho production SINGLE + SUB.
+             * Không ảnh hưởng NVL, BOTH, GROUP, SPLIT.
              */
+            if (prod == null || selectedSubProduct == null)
+                return;
+
+            var prodKind = (prod.prod_kind ?? "").Trim().ToUpperInvariant();
+            var prodMethod = (prod.prod_method ?? "").Trim().ToUpperInvariant();
+
+            var isSingle =
+                string.IsNullOrWhiteSpace(prodKind) ||
+                string.Equals(prodKind, "SINGLE", StringComparison.OrdinalIgnoreCase);
+
+            if (!isSingle)
+                return;
+
+            if (!string.Equals(prodMethod, "SUB", StringComparison.OrdinalIgnoreCase))
+                return;
+
             if (prod.is_full_process != false)
+                return;
+
+            if (!prod.order_id.HasValue || prod.order_id.Value <= 0)
                 return;
 
             if (string.IsNullOrWhiteSpace(selectedSubProduct.product_process))
                 return;
 
-            if (!prod.order_id.HasValue)
-                return;
-
-            var selectedCodes = ParseSubProductProcessCodes(selectedSubProduct.product_process);
+            var selectedCodes = ParseSubProductProcessCodes(
+                selectedSubProduct.product_process);
 
             if (selectedCodes.Count == 0)
                 return;
@@ -1861,21 +1906,23 @@ namespace AMMS.Application.Services
                 .ThenBy(x => x.task_id)
                 .ToListAsync(ct);
 
+            /*
+             * Nếu task chưa được tạo thì return.
+             * Sau khi schedule tạo task xong, ScheduleTasksAfterMethodAsync sẽ gọi lại hàm này.
+             */
             if (tasks.Count == 0)
                 return;
 
             /*
-             * Tìm công đoạn cuối cùng đã được bán thành phẩm cover.
+             * FIX:
+             * Nếu sub_product.product_process = RALO,CAT,IN thì finish RALO,CAT,IN.
+             * Nếu data cũ chỉ lưu IN thì vẫn hiểu là cover từ đầu route đến IN.
              */
-            var maxCompletedSeq = tasks
-                .Where(x => selectedCodes.Contains(
-                    NormProcessCodeForSubProduct(x.process?.process_code)))
-                .Select(x => x.seq_num)
-                .Where(x => x.HasValue)
-                .Select(x => (int?)x!.Value)
-                .Max();
+            var coveredCodes = BuildCoveredCodesFromSubProductPath(
+                tasks,
+                selectedCodes);
 
-            if (!maxCompletedSeq.HasValue)
+            if (coveredCodes.Count == 0)
                 return;
 
             var now = AppTime.NowVnUnspecified();
@@ -1893,16 +1940,60 @@ namespace AMMS.Application.Services
             {
                 var t = tasks[i];
 
-                if (!t.seq_num.HasValue)
+                var processCode = NormProcessCodeForSubProduct(
+                    t.process?.process_code);
+
+                if (string.IsNullOrWhiteSpace(processCode))
                     continue;
 
-                if (t.seq_num.Value > maxCompletedSeq.Value)
+                if (!coveredCodes.Contains(processCode))
                     continue;
 
-                if (string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase))
+                /*
+                 * Không auto finish công đoạn thành phẩm cuối.
+                 * BTP không nên cover DAN.
+                 */
+                if (!CanAutoFinishBySubProductStage(processCode))
                     continue;
 
-                var processCode = t.process?.process_code;
+                /*
+                 * Không đụng task đã chạy thật.
+                 */
+                var hasRealFinishLog = await _db.task_logs
+                    .AsNoTracking()
+                    .AnyAsync(x =>
+                        x.task_id == t.task_id &&
+                        x.action_type == "Finished" &&
+                        (
+                            x.scanned_code == null ||
+                            !x.scanned_code.StartsWith("SUB_PRODUCT-")
+                        ),
+                        ct);
+
+                if (hasRealFinishLog)
+                    continue;
+
+                /*
+                 * Nếu đã auto finish rồi thì bỏ qua, tránh tạo log trùng.
+                 */
+                if (string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase) &&
+                    t.is_taken_sub_product == true)
+                {
+                    continue;
+                }
+
+                /*
+                 * Chỉ auto finish task chưa chạy.
+                 * Không tự đổi task Ready/InProcessing để tránh lệch máy bận/rảnh.
+                 */
+                if (!string.IsNullOrWhiteSpace(t.status) &&
+                    !string.Equals(t.status, "Unassigned", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(t.status, "Pending", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(t.status, "Scheduled", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
 
                 var qtyGood = ResolveQtyGoodForSubProductTask(
                     processCode,
@@ -1911,7 +2002,7 @@ namespace AMMS.Application.Services
                     qtyCtx);
 
                 if (qtyGood <= 0)
-                    qtyGood = orderQty;
+                    qtyGood = orderQty > 0 ? orderQty : qtyCtx.order_qty;
 
                 t.status = "Finished";
                 t.start_time ??= now;
@@ -1919,21 +2010,176 @@ namespace AMMS.Application.Services
                 t.reason = reason;
                 t.is_taken_sub_product = true;
 
-                await _db.task_logs.AddAsync(new task_log
+                var hasAutoLog = await _db.task_logs
+                    .AsNoTracking()
+                    .AnyAsync(x =>
+                        x.task_id == t.task_id &&
+                        x.action_type == "Finished" &&
+                        x.scanned_code != null &&
+                        x.scanned_code.StartsWith("SUB_PRODUCT-"),
+                        ct);
+
+                if (!hasAutoLog)
                 {
-                    task_id = t.task_id,
-                    scanned_code = $"SUB_PRODUCT-{selectedSubProduct.id}-TASK-{t.task_id}",
-                    action_type = "Finished",
-                    qty_good = qtyGood,
-                    log_time = now,
-                    scanned_by_user_id = null,
-                    reason = reason,
-                    material_usage_json = null,
-                    reference_input_json = null,
-                    output_json = null,
-                    report_image_url = null
-                }, ct);
+                    await _db.task_logs.AddAsync(new task_log
+                    {
+                        task_id = t.task_id,
+                        scanned_code = $"SUB_PRODUCT-{selectedSubProduct.id}-TASK-{t.task_id}",
+                        action_type = "Finished",
+                        qty_good = qtyGood,
+                        log_time = now,
+                        scanned_by_user_id = null,
+                        reason = reason,
+                        material_usage_json = null,
+                        reference_input_json = null,
+                        output_json = null,
+                        report_image_url = null
+                    }, ct);
+                }
             }
+        }
+
+        private static HashSet<string> BuildCoveredCodesFromSubProductPath(
+    List<task> tasks,
+    HashSet<string> selectedCodes)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (tasks == null || tasks.Count == 0)
+                return result;
+
+            if (selectedCodes == null || selectedCodes.Count == 0)
+                return result;
+
+            var routeCodes = tasks
+                .Select(x => NormProcessCodeForSubProduct(x.process?.process_code))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            if (routeCodes.Count == 0)
+                return result;
+
+            /*
+             * Nếu sub_product.product_process đầy đủ: RALO,CAT,IN
+             * => selectedCodes có RALO/CAT/IN.
+             *
+             * Nếu data cũ chỉ lưu: IN
+             * => vẫn lấy prefix từ đầu route đến IN.
+             */
+            var selectedIndexes = routeCodes
+                .Select((code, index) => new { code, index })
+                .Where(x => selectedCodes.Contains(x.code))
+                .Select(x => x.index)
+                .ToList();
+
+            if (selectedIndexes.Count == 0)
+                return result;
+
+            var maxCoveredIndex = selectedIndexes.Max();
+
+            for (var i = 0; i <= maxCoveredIndex && i < routeCodes.Count; i++)
+            {
+                var code = routeCodes[i];
+
+                if (CanAutoFinishBySubProductStage(code))
+                    result.Add(code);
+            }
+
+            return result;
+        }
+
+        private static bool CanAutoFinishBySubProductStage(string? processCode)
+        {
+            var code = NormProcessCodeForSubProduct(processCode);
+
+            return code is
+                "RALO" or
+                "CAT" or
+                "IN" or
+                "PHU" or
+                "CAN" or
+                "CAN_MANG" or
+                "BOI" or
+                "BE" or
+                "DUT";
+        }
+
+        private async Task ApplySubProductToScheduledSingleSubProductionAsync(
+    int orderId,
+    int? scheduledProdId,
+    CancellationToken ct)
+        {
+            production? prod = null;
+
+            if (scheduledProdId.HasValue && scheduledProdId.Value > 0)
+            {
+                prod = await _db.productions
+                    .FirstOrDefaultAsync(x =>
+                        x.prod_id == scheduledProdId.Value &&
+                        x.order_id == orderId,
+                        ct);
+            }
+
+            prod ??= await _db.productions
+                .Where(x =>
+                    x.order_id == orderId &&
+                    x.prod_kind == "SINGLE" &&
+                    x.prod_method == "SUB")
+                .OrderByDescending(x => x.prod_id)
+                .FirstOrDefaultAsync(ct);
+
+            if (prod == null)
+                return;
+
+            if (!string.Equals(prod.prod_kind, "SINGLE", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (!string.Equals(prod.prod_method, "SUB", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (!prod.sub_product_id.HasValue || prod.sub_product_id.Value <= 0)
+                return;
+
+            var selectedSubProduct = await _db.sub_products
+                .FirstOrDefaultAsync(x => x.id == prod.sub_product_id.Value, ct);
+
+            if (selectedSubProduct == null)
+                return;
+
+            var orderQty = prod.sub_product_used_qty;
+
+            if (orderQty <= 0)
+            {
+                orderQty = await _db.order_items
+                    .AsNoTracking()
+                    .Where(x => x.order_id == orderId)
+                    .OrderBy(x => x.item_id)
+                    .Select(x => x.quantity)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            if (orderQty <= 0)
+            {
+                var reqQty = await _db.order_requests
+                    .AsNoTracking()
+                    .Where(x => x.order_id == orderId)
+                    .OrderByDescending(x => x.order_request_id)
+                    .Select(x => x.quantity)
+                    .FirstOrDefaultAsync(ct);
+
+                orderQty = reqQty ?? 0;
+            }
+
+            if (orderQty <= 0)
+                orderQty = 1;
+
+            await ApplySubProductToExistingTasksAsync(
+                prod,
+                selectedSubProduct,
+                orderQty,
+                ct);
+
+            await _db.SaveChangesAsync(ct);
         }
 
         private static string NormProcessCodeForSubProduct(string? code)
@@ -6350,6 +6596,364 @@ namespace AMMS.Application.Services
             }
 
             return text;
+        }
+
+        private static readonly HashSet<string> SubAutoFinishAllowedCodes = new(
+    StringComparer.OrdinalIgnoreCase)
+{
+    "RALO",
+    "CAT",
+    "IN",
+    "PHU",
+    "CAN",
+    "CAN_MANG",
+    "BOI",
+    "BE",
+    "DUT"
+};
+
+        private static string NormSubRouteCode(string? value)
+        {
+            return (value ?? "")
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+        }
+
+        private static List<string> ParseSubRouteCsv(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormSubRouteCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndexForSubAutoFinish)
+                .ToList();
+        }
+
+        private static int FullRouteIndexForSubAutoFinish(string? code)
+        {
+            return NormSubRouteCode(code) switch
+            {
+                "RALO" => 1,
+                "CAT" => 2,
+                "IN" => 3,
+                "PHU" => 4,
+                "CAN" => 5,
+                "BOI" => 6,
+                "BE" => 7,
+                "DUT" => 8,
+                "DAN" => 9,
+                _ => 999
+            };
+        }
+
+        private static bool IsSubSingleProduction(production prod)
+        {
+            if (prod == null)
+                return false;
+
+            var kind = NormSubRouteCode(prod.prod_kind);
+            var method = NormSubRouteCode(prod.prod_method);
+
+            var isSingle =
+                string.IsNullOrWhiteSpace(kind) ||
+                kind == "SINGLE";
+
+            return isSingle && method == "SUB";
+        }
+
+        private async Task<List<string>> ResolveOrderRouteCodesForSubAutoFinishAsync(
+            int orderId,
+            CancellationToken ct)
+        {
+            var item = await _db.order_items
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderBy(x => x.item_id)
+                .Select(x => new
+                {
+                    x.product_type_id,
+                    x.production_process
+                })
+                .FirstOrDefaultAsync(ct);
+
+            var fromOrderItem = ParseSubRouteCsv(item?.production_process);
+
+            if (fromOrderItem.Count > 0)
+                return fromOrderItem;
+
+            if (item?.product_type_id == null || item.product_type_id.Value <= 0)
+                return new List<string>();
+
+            return await _db.product_type_processes
+                .AsNoTracking()
+                .Where(x =>
+                    x.product_type_id == item.product_type_id.Value &&
+                    (x.is_active ?? true))
+                .OrderBy(x => x.seq_num)
+                .Select(x => x.process_code)
+                .ToListAsync(ct)
+                .ContinueWith(t =>
+                    t.Result
+                        .Select(NormSubRouteCode)
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(FullRouteIndexForSubAutoFinish)
+                        .ToList(),
+                    ct);
+        }
+
+        private async Task<List<string>> ResolveSubProductRouteCodesForSubAutoFinishAsync(
+            int subProductId,
+            CancellationToken ct)
+        {
+            if (subProductId <= 0)
+                return new List<string>();
+
+            var csv = await _db.sub_products
+                .AsNoTracking()
+                .Where(x => x.id == subProductId)
+                .Select(x => x.product_process)
+                .FirstOrDefaultAsync(ct);
+
+            return ParseSubRouteCsv(csv);
+        }
+
+        private static HashSet<string> ResolveCoveredCodesForSubAutoFinish(
+            List<string> orderRoute,
+            List<string> subRoute)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (orderRoute == null || orderRoute.Count == 0)
+                return result;
+
+            if (subRoute == null || subRoute.Count == 0)
+                return result;
+
+            var orderSet = orderRoute.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var subSet = subRoute.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var code in orderRoute)
+            {
+                var norm = NormSubRouteCode(code);
+
+                if (!SubAutoFinishAllowedCodes.Contains(norm))
+                    continue;
+
+                if (!orderSet.Contains(norm))
+                    continue;
+
+                if (!subSet.Contains(norm))
+                    continue;
+
+                result.Add(norm);
+            }
+
+            return result;
+        }
+
+        private async Task<int> ResolveSubAutoFinishQtyAsync(
+            production prod,
+            order_request? req,
+            string processCode,
+            CancellationToken ct)
+        {
+            var code = NormSubRouteCode(processCode);
+
+            /*
+             * RALO output là số bản kẽm, không phải số lượng sản phẩm.
+             */
+            if (code == "RALO")
+            {
+                var plateQty = req?.number_of_plates ?? 0;
+
+                if (plateQty > 0)
+                    return plateQty;
+            }
+
+            if (prod.sub_product_used_qty > 0)
+                return prod.sub_product_used_qty;
+
+            if (prod.order_id.HasValue)
+            {
+                var orderQty = await _db.order_items
+                    .AsNoTracking()
+                    .Where(x => x.order_id == prod.order_id.Value)
+                    .OrderBy(x => x.item_id)
+                    .Select(x => (int?)x.quantity)
+                    .FirstOrDefaultAsync(ct);
+
+                if (orderQty.HasValue && orderQty.Value > 0)
+                    return orderQty.Value;
+            }
+
+            if (req?.quantity.HasValue == true && req.quantity.Value > 0)
+                return req.quantity.Value;
+
+            return 1;
+        }
+
+        private async Task<bool> TaskHasRealFinishLogAsync(
+            int taskId,
+            CancellationToken ct)
+        {
+            /*
+             * Nếu task đã được scan thật thì không được overwrite.
+             * Chỉ auto mark task chưa có log thật.
+             */
+            return await _db.task_logs
+                .AsNoTracking()
+                .AnyAsync(x =>
+                    x.task_id == taskId &&
+                    x.action_type == "Finished" &&
+                    (
+                        x.scanned_code == null ||
+                        !x.scanned_code.StartsWith("SUB_PRODUCT-")
+                    ),
+                    ct);
+        }
+
+        private async Task<int> ApplySubSingleCoveredTasksFromSubProductAsync(
+            int prodId,
+            CancellationToken ct)
+        {
+            var prod = await _db.productions
+                .FirstOrDefaultAsync(x => x.prod_id == prodId, ct);
+
+            if (prod == null)
+                return 0;
+
+            if (!IsSubSingleProduction(prod))
+                return 0;
+
+            if (!prod.order_id.HasValue || prod.order_id.Value <= 0)
+                return 0;
+
+            if (!prod.sub_product_id.HasValue || prod.sub_product_id.Value <= 0)
+                return 0;
+
+            var req = await _db.order_requests
+                .AsNoTracking()
+                .Where(x => x.order_id == prod.order_id.Value)
+                .OrderByDescending(x => x.order_request_id)
+                .FirstOrDefaultAsync(ct);
+
+            var orderRoute = await ResolveOrderRouteCodesForSubAutoFinishAsync(
+                prod.order_id.Value,
+                ct);
+
+            var subRoute = await ResolveSubProductRouteCodesForSubAutoFinishAsync(
+                prod.sub_product_id.Value,
+                ct);
+
+            var coveredCodes = ResolveCoveredCodesForSubAutoFinish(
+                orderRoute,
+                subRoute);
+
+            if (coveredCodes.Count == 0)
+                return 0;
+
+            var tasks = await _db.tasks
+                .Include(x => x.process)
+                .Where(x => x.prod_id == prod.prod_id)
+                .OrderBy(x => x.seq_num)
+                .ThenBy(x => x.task_id)
+                .ToListAsync(ct);
+
+            if (tasks.Count == 0)
+                return 0;
+
+            var now = AppTime.NowVnUnspecified();
+            var changed = 0;
+
+            foreach (var t in tasks)
+            {
+                var code = NormSubRouteCode(t.process?.process_code);
+
+                if (string.IsNullOrWhiteSpace(code))
+                    continue;
+
+                if (!coveredCodes.Contains(code))
+                    continue;
+
+                /*
+                 * Không đụng task đang được ghép hoặc task đã có log scan thật.
+                 */
+                if (string.Equals(t.status, "GroupedWaiting", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (await TaskHasRealFinishLogAsync(t.task_id, ct))
+                    continue;
+
+                if (string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase) &&
+                    t.is_taken_sub_product == true)
+                {
+                    continue;
+                }
+
+                /*
+                 * Chỉ auto finish task chưa chạy.
+                 * Nếu task đã Ready/InProcessing theo máy thì không tự đổi để tránh lệch máy bận/rảnh.
+                 */
+                if (!string.IsNullOrWhiteSpace(t.status) &&
+                    !string.Equals(t.status, "Unassigned", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(t.status, "Pending", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(t.status, "Scheduled", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(t.status, "Finished", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var qtyGood = await ResolveSubAutoFinishQtyAsync(
+                    prod,
+                    req,
+                    code,
+                    ct);
+
+                t.status = "Finished";
+                t.start_time ??= now;
+                t.end_time = now;
+                t.is_taken_sub_product = true;
+                t.reason = "Công đoạn đã được cover bởi bán thành phẩm trong kho";
+
+                var hasSubLog = await _db.task_logs
+                    .AnyAsync(x =>
+                        x.task_id == t.task_id &&
+                        x.action_type == "Finished" &&
+                        x.scanned_code != null &&
+                        x.scanned_code.StartsWith("SUB_PRODUCT-"),
+                        ct);
+
+                if (!hasSubLog)
+                {
+                    await _db.task_logs.AddAsync(new task_log
+                    {
+                        task_id = t.task_id,
+                        scanned_code = $"SUB_PRODUCT-{prod.sub_product_id}-{t.task_id}",
+                        action_type = "Finished",
+                        qty_good = qtyGood,
+                        scanned_by_user_id = prod.manager_id,
+                        log_time = now,
+                        reason =
+                            $"Auto Finished do production dùng bán thành phẩm. " +
+                            $"prod_id={prod.prod_id}, order_id={prod.order_id}, " +
+                            $"sub_product_id={prod.sub_product_id}, covered_process={code}.",
+                        reference_input_json = null,
+                        output_json = null,
+                        material_usage_json = null
+                    }, ct);
+                }
+
+                changed++;
+            }
+
+            return changed;
         }
     }
 }
