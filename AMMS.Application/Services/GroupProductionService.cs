@@ -2304,6 +2304,25 @@ namespace AMMS.Application.Services
                     taskLogs);
 
                 /*
+                 * FIX GROUP SUB + SUB:
+                 * Nếu các công đoạn BTP của từng single_prod_id đã được confirm từ kho,
+                 * thì công đoạn group đầu tiên sau BTP phải hiển thị input_materials.actual_qty.
+                 *
+                 * Lưu ý:
+                 * - Không set output actual của group task.
+                 * - Chỉ set actual_qty cho dòng BTP input chính.
+                 * - Logic này chạy sau ApplyQrPrepareEstimateToGroupStageIo để đồng bộ estimate với QR prepare.
+                 * - Logic này chạy sau ApplyTaskLogJsonToGroupStageIo để không ghi đè actual từ QR report thật.
+                 */
+                await ApplyConfirmedSubActualToGroupFirstStageInputAsync(
+                    groupProd: prod,
+                    groupTask: task,
+                    inputs: io.inputs,
+                    outputs: io.outputs,
+                    qrBundle: qrBundle,
+                    ct: ct);
+
+                /*
                  * actualOutput ưu tiên output_json.
                  * Nếu output_json trống thì fallback qty_good.
                  */
@@ -2421,6 +2440,631 @@ namespace AMMS.Application.Services
 
                 preview = preview
             };
+        }
+
+        private sealed class GroupDetailOrderEstimateContext
+        {
+            public int order_id { get; set; }
+
+            public int order_qty { get; set; }
+
+            public int n_up { get; set; } = 1;
+
+            public string? coating_type { get; set; }
+
+            public List<string> route_codes { get; set; } = new();
+        }
+
+        private async Task ApplyConfirmedSubActualToGroupFirstStageInputAsync(
+            production groupProd,
+            task groupTask,
+            List<GroupStageMaterialDto> inputs,
+            List<GroupStageMaterialDto> outputs,
+            TaskQrMaterialBundleDto? qrBundle,
+            CancellationToken ct)
+        {
+            if (groupProd == null || groupTask == null)
+                return;
+
+            if (inputs == null)
+                return;
+
+            /*
+             * Chỉ xử lý đúng case GROUP + SUB.
+             * Không ảnh hưởng NVL-NVL, NVL-SUB, BOTH, group đã report QR.
+             */
+            var isGroupSub =
+                string.Equals(groupProd.prod_kind, "GROUP", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(groupProd.prod_method, "SUB", StringComparison.OrdinalIgnoreCase);
+
+            if (!isGroupSub)
+                return;
+
+            var currentCode = NormGroupDetailCode(groupTask.process?.process_code);
+
+            if (string.IsNullOrWhiteSpace(currentCode))
+                return;
+
+            /*
+             * Nếu group task đã report QR thật thì actual input đã lấy từ reference_input_json.
+             * Không ghi đè nữa.
+             */
+            var hasActualFromQrReport = inputs.Any(x =>
+                IsGroupBtpInputForConfirmedSubActual(x) &&
+                x.actual_qty > 0);
+
+            if (hasActualFromQrReport)
+                return;
+
+            var links = await _db.task_links
+                .AsNoTracking()
+                .Where(x =>
+                    x.group_task_id == groupTask.task_id &&
+                    (
+                        x.status == null ||
+                        x.status.ToUpper() != "CANCELLED"
+                    ))
+                .OrderBy(x => x.id)
+                .ToListAsync(ct);
+
+            if (links.Count == 0)
+                return;
+
+            /*
+             * Chỉ hiện actual_qty khi tất cả order trong group đã confirm xong BTP path.
+             * Nếu chỉ confirm một phần thì không set actual để tránh FE hiểu là group stage đã đủ input.
+             */
+            decimal totalActualInputQty = 0m;
+            string? previousCodeForDisplay = null;
+            var confirmedLinkCount = 0;
+
+            foreach (var link in links)
+            {
+                if (link.single_prod_id <= 0 || link.order_id <= 0)
+                    return;
+
+                var singleProd = await _db.productions
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x =>
+                        x.prod_id == link.single_prod_id &&
+                        x.order_id == link.order_id,
+                        ct);
+
+                if (singleProd == null)
+                    return;
+
+                /*
+                 * Case user đang hỏi là SUB + SUB.
+                 * Nếu member là NVL thì không dùng logic confirm BTP ở đây.
+                 */
+                if (!string.Equals(singleProd.prod_method, "SUB", StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                var ctx = await LoadGroupDetailOrderEstimateContextAsync(
+                    link.order_id,
+                    ct);
+
+                if (ctx == null || ctx.route_codes.Count == 0)
+                    return;
+
+                var currentIndex = ctx.route_codes.FindIndex(x =>
+                    string.Equals(x, currentCode, StringComparison.OrdinalIgnoreCase));
+
+                if (currentIndex <= 0)
+                    return;
+
+                var previousCode = ctx.route_codes[currentIndex - 1];
+                previousCodeForDisplay ??= previousCode;
+
+                var subCodes = await ResolveSingleSubProductCodesForGroupDetailAsync(
+                    singleProd,
+                    ctx.route_codes,
+                    ct);
+
+                if (subCodes.Count == 0)
+                    return;
+
+                var subIndexes = subCodes
+                    .Select(code => ctx.route_codes.FindIndex(routeCode =>
+                        string.Equals(routeCode, code, StringComparison.OrdinalIgnoreCase)))
+                    .Where(index => index >= 0)
+                    .ToList();
+
+                if (subIndexes.Count == 0)
+                    return;
+
+                var subLastIndex = subIndexes.Max();
+
+                /*
+                 * Chỉ set actual cho công đoạn đầu tiên sau BTP.
+                 *
+                 * Ví dụ:
+                 * sub_product.product_process = RALO,CAT,IN
+                 * current group stage = PHU => OK
+                 *
+                 * Nếu current = CAN mà PHU là công đoạn trước đó thì không set actual từ BTP nữa,
+                 * vì CAN phải chờ PHU report thật.
+                 */
+                if (currentIndex != subLastIndex + 1)
+                    return;
+
+                var confirmed = await IsSingleSubPathConfirmedForGroupDetailAsync(
+                    singleProdId: singleProd.prod_id,
+                    requiredSubCodes: subCodes,
+                    ct: ct);
+
+                if (!confirmed)
+                    return;
+
+                var productQty = link.qty_plan > 0
+                    ? link.qty_plan
+                    : singleProd.sub_product_used_qty > 0
+                        ? singleProd.sub_product_used_qty
+                        : ctx.order_qty;
+
+                if (productQty <= 0)
+                    productQty = 1;
+
+                var nUp = ctx.n_up > 0 ? ctx.n_up : 1;
+
+                /*
+                 * Đồng bộ với qr-prepare:
+                 * Không dùng est.sheets_required của flow NVL từ đầu.
+                 * Với SUB downstream, tính lại sheetsBase theo qty_plan / n_up.
+                 */
+                var sheetsBase = Math.Max(
+                    1,
+                    (int)Math.Ceiling(productQty / (decimal)nUp));
+
+                var stageQty = SubProductionQuantityHelper.ResolveStageQty(
+                    currentProcessCode: currentCode,
+                    routeProcessCodes: ctx.route_codes.Cast<string?>().ToList(),
+                    productQty: productQty,
+                    nUp: nUp,
+                    explicitSheetsBase: sheetsBase,
+                    coatingType: ctx.coating_type);
+
+                /*
+                 * actual input của công đoạn đầu sau BTP = input_qty có hao phí.
+                 */
+                var actualForThisOrder =
+                    stageQty.input_qty > 0
+                        ? stageQty.input_qty
+                        : productQty;
+
+                if (actualForThisOrder <= 0)
+                    return;
+
+                totalActualInputQty += actualForThisOrder;
+                confirmedLinkCount++;
+            }
+
+            if (confirmedLinkCount != links.Count)
+                return;
+
+            if (totalActualInputQty <= 0)
+                return;
+
+            /*
+             * Nếu qr-prepare đã trả estimated input thì lấy estimate đó làm chuẩn hiển thị,
+             * còn actual lấy theo confirmed BTP path.
+             */
+            var estimatedFromQr = ResolveGroupReferenceEstimatedQtyFromQrBundle(qrBundle);
+
+            var estimatedQty = estimatedFromQr > 0
+                ? estimatedFromQr
+                : totalActualInputQty;
+
+            estimatedQty = RoundQty(estimatedQty);
+            totalActualInputQty = RoundQty(totalActualInputQty);
+
+            ApplyConfirmedActualQtyToGroupBtpInput(
+                inputs: inputs,
+                previousCode: previousCodeForDisplay,
+                estimatedQty: estimatedQty,
+                actualQty: totalActualInputQty);
+        }
+
+        private static decimal ResolveGroupReferenceEstimatedQtyFromQrBundle(
+            TaskQrMaterialBundleDto? qrBundle)
+        {
+            if (qrBundle?.reference_inputs == null || qrBundle.reference_inputs.Count == 0)
+                return 0m;
+
+            var qty = qrBundle.reference_inputs
+                .Where(x => x != null)
+                .Sum(x =>
+                    x.estimated_qty > 0
+                        ? x.estimated_qty
+                        : x.actual_qty_prev_stage);
+
+            return qty > 0
+                ? RoundQty(qty)
+                : 0m;
+        }
+
+        private static void ApplyConfirmedActualQtyToGroupBtpInput(
+    List<GroupStageMaterialDto> inputs,
+    string? previousCode,
+    decimal estimatedQty,
+    decimal actualQty)
+        {
+            if (inputs == null)
+                return;
+
+            previousCode = string.IsNullOrWhiteSpace(previousCode)
+                ? "PREV"
+                : NormGroupDetailCode(previousCode);
+
+            /*
+             * Tìm dòng BTP input chính.
+             * Dòng này có thể đang là:
+             * - PREV
+             * - IN
+             * - CAT
+             * - hoặc name chứa "Bán thành phẩm..."
+             *
+             * Nhưng response cuối cùng phải trả code = PREV.
+             */
+            var mainInput = inputs.FirstOrDefault(x => IsGroupPrevInputCode(x.code))
+                ?? inputs.FirstOrDefault(x => SameGroupDetailCode(x.code, previousCode))
+                ?? inputs.FirstOrDefault(IsGroupBtpInputForConfirmedSubActual);
+
+            if (mainInput == null)
+            {
+                inputs.Insert(0, new GroupStageMaterialDto
+                {
+                    /*
+                     * FIX CHÍNH:
+                     * Không set code = previousCode.
+                     */
+                    code = "PREV",
+
+                    name = $"Bán thành phẩm từ công đoạn {previousCode}",
+                    unit = previousCode is "BE" or "DUT" or "DAN" ? "sp" : "tờ",
+
+                    estimated_qty = Math.Round(estimatedQty, 4),
+                    actual_qty = Math.Round(actualQty, 4)
+                });
+
+                return;
+            }
+
+            /*
+             * FIX CHÍNH:
+             * Dù previousCode là IN, CAT, PHU...
+             * response vẫn giữ code = PREV.
+             */
+            mainInput.code = "PREV";
+
+            mainInput.estimated_qty = Math.Round(estimatedQty, 4);
+            mainInput.actual_qty = Math.Round(actualQty, 4);
+
+            /*
+             * Name vẫn giữ ý nghĩa thật.
+             * Ví dụ PHU sau BTP IN:
+             * code = PREV
+             * name = Bán thành phẩm in
+             */
+            if (string.IsNullOrWhiteSpace(mainInput.name))
+                mainInput.name = $"Bán thành phẩm từ công đoạn {previousCode}";
+
+            if (string.IsNullOrWhiteSpace(mainInput.unit))
+                mainInput.unit = previousCode is "BE" or "DUT" or "DAN" ? "sp" : "tờ";
+
+            /*
+             * Optional cleanup:
+             * Nếu trước đó response bị tạo 2 dòng BTP, ví dụ PREV và IN,
+             * giữ lại dòng mainInput, xóa dòng BTP trùng còn lại.
+             * Không xóa NVL như KEO_PHU_NUOC, MANG_12MIC, SONG_B_NAU...
+             */
+            var duplicateBtpInputs = inputs
+                .Where(x => !ReferenceEquals(x, mainInput))
+                .Where(x =>
+                    IsGroupPrevInputCode(x.code) ||
+                    SameGroupDetailCode(x.code, previousCode) ||
+                    IsGroupBtpInputForConfirmedSubActual(x))
+                .ToList();
+
+            foreach (var duplicate in duplicateBtpInputs)
+            {
+                /*
+                 * Chỉ xóa nếu nó thật sự là dòng BTP/reference,
+                 * không phải vật tư kho.
+                 */
+                var code = NormGroupDetailCode(duplicate.code);
+
+                if (code is "KEO_PHU_NUOC" or "KEO_PHU_DAU" or "KEO_PHU_UV" or
+                    "MANG_12MIC" or "SONG_B_NAU" or "SONG_E_NAU" or "SONG_E_MOC" or
+                    "KEO_BOI" or "INK" or "PLATE" or "PAPER")
+                {
+                    continue;
+                }
+
+                inputs.Remove(duplicate);
+            }
+        }
+
+        private static bool IsGroupBtpInputForConfirmedSubActual(
+            GroupStageMaterialDto input)
+        {
+            if (input == null)
+                return false;
+
+            var code = NormGroupDetailCode(input.code);
+            var name = NormGroupDetailCode(input.name);
+
+            if (code is "PREV" or "INPUT" or "BTP" or "REFERENCE" or "REFERENCE_INPUT")
+                return true;
+
+            if (code is "RALO" or "CAT" or "IN" or "PHU" or "CAN" or "CAN_MANG" or "BOI" or "BE" or "DUT" or "DAN")
+                return true;
+
+            return name.Contains("BAN_THANH_PHAM") ||
+                   name.Contains("BTP") ||
+                   name.Contains("CONG_DOAN") ||
+                   name.Contains("GIAY_DA_CAT");
+        }
+
+        private async Task<GroupDetailOrderEstimateContext?> LoadGroupDetailOrderEstimateContextAsync(
+            int orderId,
+            CancellationToken ct)
+        {
+            if (orderId <= 0)
+                return null;
+
+            var item = await _db.order_items
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderBy(x => x.item_id)
+                .Select(x => new
+                {
+                    x.product_type_id,
+                    x.quantity,
+                    x.production_process
+                })
+                .FirstOrDefaultAsync(ct);
+
+            var req = await _db.order_requests
+                .AsNoTracking()
+                .Where(x => x.order_id == orderId)
+                .OrderByDescending(x => x.order_request_id)
+                .FirstOrDefaultAsync(ct);
+
+            cost_estimate? est = null;
+
+            if (req?.accepted_estimate_id.HasValue == true &&
+                req.accepted_estimate_id.Value > 0)
+            {
+                est = await _db.cost_estimates
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x =>
+                        x.estimate_id == req.accepted_estimate_id.Value &&
+                        x.order_request_id == req.order_request_id,
+                        ct);
+            }
+
+            if (est == null && req != null)
+            {
+                est = await _db.cost_estimates
+                    .AsNoTracking()
+                    .Where(x => x.order_request_id == req.order_request_id)
+                    .OrderByDescending(x => x.is_active)
+                    .ThenByDescending(x => x.estimate_id)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            var route = ParseGroupDetailRoute(item?.production_process);
+
+            if (route.Count == 0)
+                route = ParseGroupDetailRoute(est?.production_processes);
+
+            if (route.Count == 0 && item?.product_type_id != null && item.product_type_id.Value > 0)
+            {
+                var fromProductType = await _db.product_type_processes
+                    .AsNoTracking()
+                    .Where(x =>
+                        x.product_type_id == item.product_type_id.Value &&
+                        (x.is_active ?? true))
+                    .OrderBy(x => x.seq_num)
+                    .Select(x => x.process_code)
+                    .ToListAsync(ct);
+
+                route = fromProductType
+                    .Select(NormGroupDetailCode)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .ToList();
+            }
+
+            var orderQty = item?.quantity ?? req?.quantity ?? 0;
+
+            if (orderQty <= 0)
+                orderQty = 1;
+
+            var nUp = est?.n_up ?? 1;
+
+            if (nUp <= 0)
+                nUp = 1;
+
+            return new GroupDetailOrderEstimateContext
+            {
+                order_id = orderId,
+                order_qty = orderQty,
+                n_up = nUp,
+                coating_type = est?.coating_type,
+                route_codes = route
+            };
+        }
+
+        private async Task<List<string>> ResolveSingleSubProductCodesForGroupDetailAsync(
+            production singleProd,
+            IReadOnlyList<string> routeCodes,
+            CancellationToken ct)
+        {
+            if (singleProd == null)
+                return new List<string>();
+
+            var result = new List<string>();
+
+            /*
+             * Cách chuẩn: lấy product_process từ sub_product đã dùng.
+             */
+            if (singleProd.sub_product_id.HasValue && singleProd.sub_product_id.Value > 0)
+            {
+                var csv = await _db.sub_products
+                    .AsNoTracking()
+                    .Where(x => x.id == singleProd.sub_product_id.Value)
+                    .Select(x => x.product_process)
+                    .FirstOrDefaultAsync(ct);
+
+                result = ParseGroupDetailRoute(csv);
+            }
+
+            /*
+             * Fallback: nếu sub_product_id null hoặc data cũ không có product_process,
+             * lấy các task đã Finished từ BTP trong single production.
+             */
+            if (result.Count == 0)
+            {
+                var finishedBySub = await (
+                    from t in _db.tasks.AsNoTracking()
+
+                    join pp0 in _db.product_type_processes.AsNoTracking()
+                        on t.process_id equals pp0.process_id into ppj
+                    from pp in ppj.DefaultIfEmpty()
+
+                    where t.prod_id == singleProd.prod_id &&
+                          (
+                              t.is_taken_sub_product == true ||
+                              (
+                                  t.reason != null &&
+                                  t.reason.ToLower().Contains("bán thành phẩm")
+                              )
+                          ) &&
+                          (
+                              t.status == "Finished" ||
+                              t.end_time != null
+                          )
+
+                    orderby t.seq_num, t.task_id
+
+                    select pp != null ? pp.process_code : t.name
+                )
+                .ToListAsync(ct);
+
+                result = finishedBySub
+                    .Select(NormGroupDetailCode)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+
+            /*
+             * Chỉ giữ process có nằm trong route thật.
+             */
+            var routeSet = (routeCodes ?? Array.Empty<string>())
+                .Select(NormGroupDetailCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (routeSet.Count > 0)
+            {
+                result = result
+                    .Where(x => routeSet.Contains(x))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(FullRouteIndex)
+                    .ToList();
+            }
+
+            return result;
+        }
+
+        private async Task<bool> IsSingleSubPathConfirmedForGroupDetailAsync(
+            int singleProdId,
+            IReadOnlyList<string> requiredSubCodes,
+            CancellationToken ct)
+        {
+            if (singleProdId <= 0)
+                return false;
+
+            var required = (requiredSubCodes ?? Array.Empty<string>())
+                .Select(NormGroupDetailCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Where(CanConfirmSubStageForGroupDetail)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (required.Count == 0)
+                return false;
+
+            var taskRows = await (
+                from t in _db.tasks.AsNoTracking()
+
+                join pp0 in _db.product_type_processes.AsNoTracking()
+                    on t.process_id equals pp0.process_id into ppj
+                from pp in ppj.DefaultIfEmpty()
+
+                where t.prod_id == singleProdId
+
+                select new
+                {
+                    process_code = pp != null ? pp.process_code : t.name,
+                    t.status,
+                    t.end_time,
+                    t.is_taken_sub_product,
+                    t.reason
+                }
+            )
+            .ToListAsync(ct);
+
+            var confirmedSet = taskRows
+                .Where(x =>
+                    string.Equals(x.status, "Finished", StringComparison.OrdinalIgnoreCase) ||
+                    x.end_time != null)
+                .Where(x =>
+                    x.is_taken_sub_product == true ||
+                    (
+                        x.reason != null &&
+                        x.reason.ToLower().Contains("bán thành phẩm")
+                    ))
+                .Select(x => NormGroupDetailCode(x.process_code))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return required.All(x => confirmedSet.Contains(x));
+        }
+
+        private static bool CanConfirmSubStageForGroupDetail(string? processCode)
+        {
+            var code = NormGroupDetailCode(processCode);
+
+            /*
+             * DAN là thành phẩm cuối, không tính là BTP confirm từ kho.
+             */
+            return code is
+                "RALO" or
+                "CAT" or
+                "IN" or
+                "PHU" or
+                "CAN" or
+                "CAN_MANG" or
+                "BOI" or
+                "BE" or
+                "DUT";
+        }
+
+        private static List<string> ParseGroupDetailRoute(string? csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv))
+                return new List<string>();
+
+            return csv
+                .Split(new[] { ',', ';', '|', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormGroupDetailCode)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(FullRouteIndex)
+                .ToList();
         }
 
         private static void NormalizeGroupDetailStagesBySequentialFlow(
@@ -3475,11 +4119,14 @@ namespace AMMS.Application.Services
         }
 
         private static void ApplyQrReferenceInputEstimateToGroupInputs(
-            List<GroupStageMaterialDto> inputs,
-            IReadOnlyList<TaskReferenceInputDto>? referenceInputs,
-            decimal previousOutputQty,
-            string? previousOutputName)
+    List<GroupStageMaterialDto> inputs,
+    IReadOnlyList<TaskReferenceInputDto>? referenceInputs,
+    decimal previousOutputQty,
+    string? previousOutputName)
         {
+            if (inputs == null)
+                return;
+
             var refs = referenceInputs?
                 .Where(x => x != null)
                 .Where(x => x.estimated_qty > 0 || x.actual_qty_prev_stage > 0)
@@ -3510,6 +4157,13 @@ namespace AMMS.Application.Services
 
             var firstRef = refs.FirstOrDefault();
 
+            /*
+             * FIX:
+             * Vẫn dùng reference input để lấy estimate/name/unit,
+             * nhưng KHÔNG dùng firstRef.input_code để set code.
+             *
+             * Code của dòng BTP đầu vào trong group detail luôn giữ là PREV.
+             */
             var input = inputs.FirstOrDefault(x =>
                 IsGroupPrevInputCode(x.code) ||
                 IsLikelyGroupBtpInput(x) ||
@@ -3519,44 +4173,59 @@ namespace AMMS.Application.Services
             {
                 input = new GroupStageMaterialDto
                 {
-                    code = firstRef?.input_code ?? "PREV",
-                    name = firstRef?.input_name
-                           ?? previousOutputName
-                           ?? "Bán thành phẩm từ công đoạn trước",
-                    unit = firstRef?.unit ?? "tờ",
+                    /*
+                     * FIX CHÍNH:
+                     * Không dùng:
+                     * code = firstRef?.input_code ?? "PREV"
+                     *
+                     * Vì nếu firstRef.input_code = IN thì response sẽ ra code = IN.
+                     */
+                    code = "PREV",
+
+                    name =
+                        !string.IsNullOrWhiteSpace(firstRef?.input_name)
+                            ? firstRef!.input_name
+                            : !string.IsNullOrWhiteSpace(previousOutputName)
+                                ? previousOutputName
+                                : "Bán thành phẩm đầu vào",
+
+                    unit =
+                        !string.IsNullOrWhiteSpace(firstRef?.unit)
+                            ? firstRef!.unit
+                            : "tờ",
+
                     estimated_qty = estimateQty,
-                    actual_qty = 0
+                    actual_qty = 0m
                 };
 
                 inputs.Insert(0, input);
                 return;
             }
 
-            if (!string.IsNullOrWhiteSpace(firstRef?.input_code) &&
-                IsGroupPrevInputCode(input.code))
-            {
-                /*
-                 * Nếu đang là PREV thì có thể giữ PREV hoặc đổi sang IN/PHU.
-                 * Để ít ảnh hưởng FE, giữ code PREV nếu FE đang dùng PREV.
-                 */
-                input.code = string.IsNullOrWhiteSpace(input.code)
-                    ? firstRef.input_code
-                    : input.code;
-            }
-
-            if (!string.IsNullOrWhiteSpace(firstRef?.input_name))
-                input.name = firstRef.input_name;
-            else if (!string.IsNullOrWhiteSpace(previousOutputName))
-                input.name = previousOutputName;
-
-            if (!string.IsNullOrWhiteSpace(firstRef?.unit))
-                input.unit = NormalizeGroupUnit(firstRef.unit);
+            /*
+             * FIX CHÍNH:
+             * Dòng input BTP chính luôn trả code PREV.
+             * Name vẫn có thể là "Bán thành phẩm in" để FE biết PREV là từ IN.
+             */
+            input.code = "PREV";
 
             input.estimated_qty = estimateQty;
 
+            if (!string.IsNullOrWhiteSpace(firstRef?.input_name))
+                input.name = firstRef!.input_name;
+            else if (string.IsNullOrWhiteSpace(input.name) && !string.IsNullOrWhiteSpace(previousOutputName))
+                input.name = previousOutputName;
+
+            if (!string.IsNullOrWhiteSpace(firstRef?.unit))
+                input.unit = firstRef!.unit;
+            else if (string.IsNullOrWhiteSpace(input.unit))
+                input.unit = "tờ";
+
             /*
              * Không set actual_qty ở đây.
-             * actual_qty chỉ lấy từ log sau khi task finish.
+             * actual_qty sẽ do:
+             * - ApplyTaskLogJsonToGroupStageIo nếu group task report QR thật
+             * - ApplyConfirmedSubActualToGroupFirstStageInputAsync nếu BTP đã confirm từ kho
              */
         }
 
