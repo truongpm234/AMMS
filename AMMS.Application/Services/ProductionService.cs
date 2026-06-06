@@ -3393,13 +3393,13 @@ namespace AMMS.Application.Services
         }
 
         private async Task<string?> CreateAndUploadSubProductIssueFileAsync(
-            production prod,
-            order ord,
-            order_request? orderReq,
-            sub_product selectedSubProduct,
-            int quantityIssued,
-            string reason,
-            CancellationToken ct)
+    production prod,
+    order ord,
+    order_request? orderReq,
+    sub_product selectedSubProduct,
+    int quantityIssued,
+    string reason,
+    CancellationToken ct)
         {
             if (!string.IsNullOrWhiteSpace(prod.sub_product_issue_file))
                 return prod.sub_product_issue_file;
@@ -3422,6 +3422,85 @@ namespace AMMS.Application.Services
                 ? selectedSubProduct.unit_cost_to_stage * quantityIssued
                 : 0m;
 
+            /*
+             * FIX:
+             * selectedSubProduct có thể đang thiếu coating_material_code / wave_material_code.
+             * Nếu thiếu thì fallback lấy từ cost_estimate của order.
+             */
+            var estimate = await LoadAcceptedEstimateForIssueReceiptAsync(
+                ord.order_id,
+                orderReq,
+                ct);
+
+            var subProcess = selectedSubProduct.product_process;
+
+            var paperCode = FirstNotBlankForIssueReceipt(
+                selectedSubProduct.paper_material_code,
+                estimate?.paper_code,
+                estimate?.paper_alternative);
+
+            var coatingCode = FirstNotBlankForIssueReceipt(
+                selectedSubProduct.coating_material_code,
+                HasStageForIssueReceipt(subProcess, "PHU")
+                    ? ResolveCoatingMaterialCodeForIssueReceipt(estimate)
+                    : null);
+
+            var laminationCode = FirstNotBlankForIssueReceipt(
+                selectedSubProduct.lamination_material_code,
+                HasStageForIssueReceipt(subProcess, "CAN", "CAN_MANG")
+                    ? ResolveLaminationMaterialCodeForIssueReceipt(estimate)
+                    : null);
+
+            var waveCode = FirstNotBlankForIssueReceipt(
+                selectedSubProduct.wave_material_code,
+                HasStageForIssueReceipt(subProcess, "BOI")
+                    ? ResolveWaveMaterialCodeForIssueReceipt(estimate)
+                    : null);
+
+            var materialSignature = FirstNotBlankForIssueReceipt(
+                selectedSubProduct.material_signature,
+                BuildMaterialSignatureForIssueReceipt(
+                    paperCode,
+                    coatingCode,
+                    laminationCode,
+                    waveCode));
+
+            /*
+             * Nếu sub_product cũ thiếu dữ liệu thì lưu ngược lại.
+             * Lần sau tạo/hiển thị sẽ không bị trống nữa.
+             */
+            if (string.IsNullOrWhiteSpace(selectedSubProduct.paper_material_code) &&
+                !string.IsNullOrWhiteSpace(paperCode))
+            {
+                selectedSubProduct.paper_material_code = paperCode;
+            }
+
+            if (string.IsNullOrWhiteSpace(selectedSubProduct.coating_material_code) &&
+                !string.IsNullOrWhiteSpace(coatingCode))
+            {
+                selectedSubProduct.coating_material_code = coatingCode;
+            }
+
+            if (string.IsNullOrWhiteSpace(selectedSubProduct.lamination_material_code) &&
+                !string.IsNullOrWhiteSpace(laminationCode))
+            {
+                selectedSubProduct.lamination_material_code = laminationCode;
+            }
+
+            if (string.IsNullOrWhiteSpace(selectedSubProduct.wave_material_code) &&
+                !string.IsNullOrWhiteSpace(waveCode))
+            {
+                selectedSubProduct.wave_material_code = waveCode;
+            }
+
+            if (string.IsNullOrWhiteSpace(selectedSubProduct.material_signature) &&
+                !string.IsNullOrWhiteSpace(materialSignature))
+            {
+                selectedSubProduct.material_signature = materialSignature;
+            }
+
+            selectedSubProduct.updated_at = now;
+
             var pdfBytes = SubProductIssueReceiptPdfHelper.GeneratePdf(
                 new SubProductIssueReceiptPdfModel
                 {
@@ -3443,11 +3522,11 @@ namespace AMMS.Application.Services
 
                     product_process = selectedSubProduct.product_process,
 
-                    paper_material_code = selectedSubProduct.paper_material_code,
-                    coating_material_code = selectedSubProduct.coating_material_code,
-                    lamination_material_code = selectedSubProduct.lamination_material_code,
-                    wave_material_code = selectedSubProduct.wave_material_code,
-                    material_signature = selectedSubProduct.material_signature,
+                    paper_material_code = paperCode,
+                    coating_material_code = coatingCode,
+                    lamination_material_code = laminationCode,
+                    wave_material_code = waveCode,
+                    material_signature = materialSignature,
 
                     quantity_issued = quantityIssued,
                     quantity_after_issue = selectedSubProduct.quantity,
@@ -6954,6 +7033,179 @@ namespace AMMS.Application.Services
             }
 
             return changed;
+        }
+
+        private static string? FirstNotBlankForIssueReceipt(params string?[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value.Trim();
+            }
+
+            return null;
+        }
+
+        private static List<string> ParseProcessCodesForIssueReceipt(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return new List<string>();
+
+            return raw
+                .Split(new[] { ',', ';', '|', '/', '\\', '\n', '\r', '\t' },
+                    StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim().ToUpperInvariant().Replace(" ", "_").Replace("-", "_"))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static bool HasStageForIssueReceipt(string? processCsv, params string[] codes)
+        {
+            var stages = ParseProcessCodesForIssueReceipt(processCsv);
+
+            if (stages.Count == 0)
+                return false;
+
+            var checkSet = codes
+                .Select(x => (x ?? "").Trim().ToUpperInvariant().Replace(" ", "_").Replace("-", "_"))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return stages.Any(x => checkSet.Contains(x));
+        }
+
+        private static bool IsNoCoatingType(string? coatingType)
+        {
+            if (string.IsNullOrWhiteSpace(coatingType))
+                return true;
+
+            var value = coatingType
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(" ", "_")
+                .Replace("-", "_");
+
+            return value is
+                "NO" or
+                "NONE" or
+                "NULL" or
+                "KHONG" or
+                "KHÔNG" or
+                "KHONG_PHU" or
+                "KHÔNG_PHỦ" or
+                "NO_COATING" or
+                "KHONG_CO" or
+                "KHÔNG_CÓ";
+        }
+
+        private static string? ResolveCoatingMaterialCodeForIssueReceipt(cost_estimate? estimate)
+        {
+            if (estimate == null)
+                return null;
+
+            if (!string.IsNullOrWhiteSpace(estimate.coating_material_code))
+                return estimate.coating_material_code.Trim();
+
+            if (!string.IsNullOrWhiteSpace(estimate.coating_type) &&
+                !IsNoCoatingType(estimate.coating_type))
+            {
+                return estimate.coating_type.Trim();
+            }
+
+            return null;
+        }
+
+        private static string? ResolveWaveMaterialCodeForIssueReceipt(cost_estimate? estimate)
+        {
+            if (estimate == null)
+                return null;
+
+            var wave = EstimateMaterialAlternativeHelper.ResolveWaveType(
+                estimate.wave_alternative,
+                estimate.wave_type);
+
+            if (!string.IsNullOrWhiteSpace(wave))
+                return wave.Trim();
+
+            return FirstNotBlankForIssueReceipt(
+                estimate.wave_alternative,
+                estimate.wave_type);
+        }
+
+        private static string? ResolveLaminationMaterialCodeForIssueReceipt(cost_estimate? estimate)
+        {
+            if (estimate == null)
+                return null;
+
+            return FirstNotBlankForIssueReceipt(
+                estimate.lamination_material_code,
+                estimate.lamination_material_name);
+        }
+
+        private static string BuildMaterialSignatureForIssueReceipt(
+            string? paperCode,
+            string? coatingCode,
+            string? laminationCode,
+            string? waveCode)
+        {
+            var parts = new List<string>();
+
+            if (!string.IsNullOrWhiteSpace(paperCode))
+                parts.Add($"PAPER={paperCode.Trim()}");
+
+            if (!string.IsNullOrWhiteSpace(coatingCode))
+                parts.Add($"COATING={coatingCode.Trim()}");
+
+            if (!string.IsNullOrWhiteSpace(laminationCode))
+                parts.Add($"LAMINATION={laminationCode.Trim()}");
+
+            if (!string.IsNullOrWhiteSpace(waveCode))
+                parts.Add($"WAVE={waveCode.Trim()}");
+
+            return string.Join("|", parts);
+        }
+
+        private async Task<cost_estimate?> LoadAcceptedEstimateForIssueReceiptAsync(
+            int orderId,
+            order_request? orderReq,
+            CancellationToken ct)
+        {
+            var req = orderReq;
+
+            if (req == null)
+            {
+                req = await _db.order_requests
+                    .AsNoTracking()
+                    .Where(x => x.order_id == orderId)
+                    .OrderByDescending(x => x.order_request_id)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            if (req == null)
+                return null;
+
+            cost_estimate? estimate = null;
+
+            if (req.accepted_estimate_id.HasValue &&
+                req.accepted_estimate_id.Value > 0)
+            {
+                estimate = await _db.cost_estimates
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x =>
+                        x.estimate_id == req.accepted_estimate_id.Value &&
+                        x.order_request_id == req.order_request_id,
+                        ct);
+            }
+
+            estimate ??= await _db.cost_estimates
+                .AsNoTracking()
+                .Where(x => x.order_request_id == req.order_request_id)
+                .OrderByDescending(x => x.is_active)
+                .ThenByDescending(x => x.estimate_id)
+                .FirstOrDefaultAsync(ct);
+
+            return estimate;
         }
     }
 }
