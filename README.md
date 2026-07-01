@@ -2,6 +2,7 @@
 
 <div align="center">
   <h3>A Custom B2C Manufacturing Execution System for Dai Phuc Hai Packaging</h3>
+  <p><strong>🌐 Live Demo: <a href="https://daiphuchai.vercel.app" target="_blank">daiphuchai.vercel.app</a></strong></p>
 </div>
 
 ## 📌 Project Overview
