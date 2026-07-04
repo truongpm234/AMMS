@@ -68,7 +68,7 @@ This project focuses on solving complex enterprise manufacturing challenges rath
 | Staff Dan | staff dan | 1 |
 
 ### 🌐 Website Demo
-*Flow quy trình xử lý được mô tả trong ảnh dưới đây:*
+*The process flow is illustrated in the image below:*
 
 ![Flow Quy Trình](./flow.png) <!-- Bạn hãy đổi tên file hoặc đường dẫn ảnh cho phù hợp nếu cần -->
 
