@@ -45,6 +45,8 @@ namespace AMMS.API.Controllers
             return Unauthorized(new { message = "Email/UserName hoặc mật khẩu không đúng" });
         }
 
+
+        [AllowAnonymous]
         [HttpPost("/login-with-google")]
         public async Task<IActionResult> GoogleLogin(GoogleLoginRequestDto req)
         {
@@ -52,11 +54,15 @@ namespace AMMS.API.Controllers
             {
                 var payload = await _googleAuthService.VerifyToken(req.id_token);
 
+                Console.WriteLine("VERIFY OK");
+
                 var token = _jwt.GenerateTokenForGoogle(
                     payload.Email,
                     payload.Name,
                     payload.Subject
                 );
+
+                Console.WriteLine("JWT OK");
 
                 return Ok(new
                 {
@@ -68,7 +74,14 @@ namespace AMMS.API.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, ex.ToString());
+                Console.WriteLine("GOOGLE LOGIN ERROR:");
+                Console.WriteLine(ex.ToString());
+
+                return StatusCode(500, new
+                {
+                    error = ex.Message,
+                    detail = ex.InnerException?.Message
+                });
             }
         }
 
