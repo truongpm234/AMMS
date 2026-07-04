@@ -55,6 +55,8 @@ This project focuses on solving complex enterprise manufacturing challenges rath
 ### 📱 Mobile App Demo
 **Link APK Mobile Demo:** [Download APK](https://drive.google.com/file/d/1PmFxWP1O4I2V0M8fo4nqTqgOnuhA1JmN/view?usp=sharing)
 
+> **Note:** When testing the production stages on the mobile app, you must strictly follow this exact sequence to match the manufacturing process: **Ralo ➔ Cắt ➔ In ➔ Phủ ➔ Cán ➔ Bồi ➔ Bế ➔ Dứt ➔ Dán**.
+
 | Role | Username | Password |
 | :--- | :--- | :--- |
 | Staff Ralo | staff ralo | 1 |
@@ -70,7 +72,7 @@ This project focuses on solving complex enterprise manufacturing challenges rath
 ### 🌐 Website Demo
 *The process flow is illustrated in the image below:*
 
-![Flow Quy Trình](./flow.png) <!-- Bạn hãy đổi tên file hoặc đường dẫn ảnh cho phù hợp nếu cần -->
+![Flow Quy Trình](./flow.png)
 
 | Role | Username | Password |
 | :--- | :--- | :--- |
